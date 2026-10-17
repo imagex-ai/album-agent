@@ -205,9 +205,19 @@ async def download_video_resilient(
 
     ydl_opts["http_headers"] = headers
 
+    info_dict_holder: Dict[str, Any] = {}
+
     def _execute():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([canonical_url])
+            try:
+                info = ydl.extract_info(canonical_url, download=True)
+                if info and isinstance(info, dict):
+                    info_dict_holder["heatmap"] = info.get("heatmap")
+                    info_dict_holder["title"] = info.get("title")
+                    info_dict_holder["duration"] = info.get("duration")
+            except Exception as e_extract:
+                logger.debug(f"[ResilientDownloader] extract_info fallback to download: {e_extract}")
+                ydl.download([canonical_url])
 
     try:
         logger.info(f"[ResilientDownloader] Starting download for: {canonical_url} -> {target_path}")
@@ -243,7 +253,11 @@ async def download_video_resilient(
 
     # Validate non-empty file
     if os.path.exists(target_path) and os.path.getsize(target_path) > 100_000:
-        return True
+        return {
+            "success": True,
+            "heatmap": info_dict_holder.get("heatmap"),
+            "info": info_dict_holder
+        }
     else:
         if os.path.exists(target_path):
             try:

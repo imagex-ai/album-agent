@@ -29,7 +29,8 @@ import {
   Globe,
   Maximize2,
   Copy,
-  FolderHeart
+  FolderHeart,
+  Flame
 } from 'lucide-react';
 import { useAppStore, getCanonicalMediaFingerprint } from '../../store/useAppStore';
 import { backendApi } from '../../services/realApi';
@@ -498,6 +499,15 @@ export const VideosView: React.FC = () => {
               <Link2 size={11} className="text-slate-950" />
             </IconBadge>
             <span className="hidden md:inline">{t.addUrl}</span>
+          </button>
+
+          {/* Shorts & Reels */}
+          <button
+            onClick={() => navigateToView('shorts')}
+            className="px-3.5 py-2 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/40 text-rose-300 text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
+          >
+            <Flame size={13} className="text-rose-400" />
+            <span>Shorts</span>
           </button>
 
           {/* Extrair de Página Web */}

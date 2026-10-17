@@ -13,6 +13,8 @@ import time
 from typing import Any, Dict, List, Optional
 import httpx
 from PIL import Image
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from src.core.network_profiles import resolve_anti_hotlink_headers
 
 ALBUMS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "albums")
 
@@ -34,10 +36,7 @@ async def probe_image(
     if not needs_size and not needs_dims:
         return False
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Referer": referer or "https://google.com",
-    }
+    headers = resolve_anti_hotlink_headers(url, referer=referer)
 
     async with semaphore:
         try:

@@ -983,6 +983,7 @@ class AnalyzeRequest(BaseModel):
     anti_bot_delay_ms: Optional[int] = 500
     media_type_filter: Optional[str] = "all"  # "all", "images", "videos", "gifs"
     folder: Optional[str] = "Geral"
+    selected_image_urls: Optional[List[str]] = None
 
 
 class BatchAnalyzeRequest(BaseModel):
@@ -1111,7 +1112,7 @@ async def health_check():
     """System health check and version information."""
     return {
         "status": "ok",
-        "version": "5.0.0",
+        "version": "5.1.0",
         "timestamp": time.time()
     }
 
@@ -3630,7 +3631,19 @@ async def _run_ai_react_agent_task(session_id: str, req: AnalyzeRequest, semapho
                 _record_session_event(session_id, core_evt)
                 await queue.put(core_evt)
 
-            album = await agent.extract_album(req.url, on_event=on_agent_event)
+            clean_req_url = req.url.strip().rstrip("/")
+            selected_urls = getattr(req, "selected_image_urls", None)
+            cached_preview = _multi_album_preview_cache.get(clean_req_url) or _multi_album_preview_cache.get(req.url.strip())
+            if selected_urls and cached_preview and getattr(cached_preview, "images", None) and len(cached_preview.images) > 0:
+                album = cached_preview.model_copy(deep=True)
+            else:
+                album = await agent.extract_album(req.url, on_event=on_agent_event)
+                if getattr(album, "images", None) and len(album.images) > 0:
+                    _multi_album_preview_cache[clean_req_url] = album.model_copy(deep=True)
+
+            if selected_urls is not None and len(selected_urls) > 0:
+                album = _filter_album_by_selected_urls(album, selected_urls)
+
             album.metadata["model_used"] = f"AutonomousReActAgent ({req.model_name})"
             album.metadata["engine_type"] = "ai_react"
             target_f = getattr(req, "folder", "Geral") or "Geral"
@@ -3709,12 +3722,24 @@ async def _run_gemini_surgical_task(session_id: str, req: AnalyzeRequest, semaph
             gemini_model = req.gemini_model or (req.model_name if (req.model_name and "gemini" in req.model_name.lower()) else "gemini-3.7-flash")
             local_model = req.model_name if (req.model_name and "gemini" not in req.model_name.lower()) else "qwen2.5:32b"
 
-            album = await scout.extract_album(
-                url=req.url,
-                gemini_model=gemini_model,
-                local_model=local_model,
-                on_event=on_scout_event,
-            )
+            clean_req_url = req.url.strip().rstrip("/")
+            cached_preview = _multi_album_preview_cache.get(clean_req_url) or _multi_album_preview_cache.get(req.url.strip())
+            if cached_preview and getattr(cached_preview, "images", None) and len(cached_preview.images) > 0:
+                album = cached_preview.model_copy(deep=True)
+            else:
+                album = await scout.extract_album(
+                    url=req.url,
+                    gemini_model=gemini_model,
+                    local_model=local_model,
+                    on_event=on_scout_event,
+                )
+                if getattr(album, "images", None) and len(album.images) > 0:
+                    _multi_album_preview_cache[clean_req_url] = album.model_copy(deep=True)
+
+            selected_urls = getattr(req, "selected_image_urls", None)
+            if selected_urls is not None and len(selected_urls) > 0:
+                album = _filter_album_by_selected_urls(album, selected_urls)
+
             has_gemini = bool(scout.client and scout.api_key)
             album.metadata["model_used"] = (
                 f"Gemini Surgical Scout ({gemini_model}) + Qwen Closer ({local_model})"
@@ -3796,13 +3821,25 @@ async def _run_gemini_layout_task(session_id: str, req: AnalyzeRequest, semaphor
             gemini_model = req.gemini_model or (req.model_name if (req.model_name and "gemini" in req.model_name.lower()) else "gemini-3.7-flash")
             local_model = req.model_name if (req.model_name and "gemini" not in req.model_name.lower()) else "qwen2.5:32b"
 
-            album = await explorer.extract_album(
-                url=req.url,
-                max_pages=3,
-                gemini_model=gemini_model,
-                local_model=local_model,
-                on_event=on_explorer_event,
-            )
+            clean_req_url = req.url.strip().rstrip("/")
+            selected_urls = getattr(req, "selected_image_urls", None)
+            cached_preview = _multi_album_preview_cache.get(clean_req_url) or _multi_album_preview_cache.get(req.url.strip())
+            if selected_urls and cached_preview and getattr(cached_preview, "images", None) and len(cached_preview.images) > 0:
+                album = cached_preview.model_copy(deep=True)
+            else:
+                album = await explorer.extract_album(
+                    url=req.url,
+                    max_pages=3,
+                    gemini_model=gemini_model,
+                    local_model=local_model,
+                    on_event=on_explorer_event,
+                )
+                if getattr(album, "images", None) and len(album.images) > 0:
+                    _multi_album_preview_cache[clean_req_url] = album.model_copy(deep=True)
+
+            if selected_urls is not None and len(selected_urls) > 0:
+                album = _filter_album_by_selected_urls(album, selected_urls)
+
             album.metadata["model_used"] = f"Gemini Layout Explorer ({gemini_model}) + Qwen Closer ({local_model})"
             album.metadata["engine_type"] = "gemini_layout_explorer"
             target_f = getattr(req, "folder", "Geral") or "Geral"
@@ -4803,19 +4840,35 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
                 logger.warning(f"Direct video sniffer failed, falling back to Playwright: {direct_err}")
 
         if not album or not album.images:
-            if queue:
-                nav_evt = {"type": "status", "message": f"Navigating to {req.url} (Model: {llm.model_name})..."}
-                _record_session_event(session_id, nav_evt)
-                await queue.put(nav_evt)
+            clean_req_url = req.url.strip().rstrip("/")
+            selected_urls = getattr(req, "selected_image_urls", None)
+            cached_preview = _multi_album_preview_cache.get(clean_req_url) or _multi_album_preview_cache.get(req.url.strip())
+            if selected_urls and cached_preview and getattr(cached_preview, "images", None) and len(cached_preview.images) > 0:
+                album = cached_preview.model_copy(deep=True)
+            else:
+                if queue:
+                    nav_evt = {"type": "status", "message": f"Navigating to {req.url} (Model: {llm.model_name})..."}
+                    _record_session_event(session_id, nav_evt)
+                    await queue.put(nav_evt)
 
-            album = await brain.run(
-                req.url,
-                on_event=on_agent_event,
-                controller=controller,
-                media_type_filter=req.media_type_filter or "all",
-            )
+                album = await brain.run(
+                    req.url,
+                    on_event=on_agent_event,
+                    controller=controller,
+                    media_type_filter=req.media_type_filter or "all",
+                )
+                if getattr(album, "images", None) and len(album.images) > 0:
+                    _multi_album_preview_cache[clean_req_url] = album.model_copy(deep=True)
+
+        selected_urls = getattr(req, "selected_image_urls", None)
+        if selected_urls is not None and len(selected_urls) > 0:
+            album = _filter_album_by_selected_urls(album, selected_urls)
+
         album.metadata["model_used"] = req.model_name
         album.metadata["media_type_filter"] = req.media_type_filter or "all"
+        target_f = getattr(req, "folder", "Geral") or "Geral"
+        album.folder = target_f
+        album.metadata["folder"] = target_f
         _completed_albums[session_id] = album
         _save_album_to_disk(session_id, album)
 
@@ -6097,7 +6150,7 @@ async def _run_video_download_task(
                 return ctrl.is_paused if ctrl else False
 
             resilient_url = source_url or vurl
-            await download_video_resilient(
+            res_dl = await download_video_resilient(
                 url=resilient_url,
                 target_path=target_path,
                 clean_title=clean_title,
@@ -6106,6 +6159,7 @@ async def _run_video_download_task(
                 cancel_check=_cancel_chk,
                 pause_check=_pause_chk
             )
+            downloaded_heatmap = res_dl.get("heatmap") if isinstance(res_dl, dict) else None
             if os.path.exists(target_path):
                 total_written = os.path.getsize(target_path)
 
@@ -6118,7 +6172,7 @@ async def _run_video_download_task(
             raise RuntimeError("Video unavailable or corrupted (insufficient size).")
 
         if job_id in _active_jobs:
-            _active_jobs[job_id]["progress"]["status"] = "Gerando miniatura e salvando na galeria..."
+            _active_jobs[job_id]["progress"]["status"] = "Gerando miniatura e analisando melhores momentos..."
 
         # Registra nos metadados do VideoService
         final_title = os.path.splitext(os.path.basename(target_path))[0].replace("_", " ").replace("-", " ")
@@ -6136,7 +6190,8 @@ async def _run_video_download_task(
             source_url=source_url or None,
             source_id=source_id or None,
             source_thumbnail_url=thumbnail_url or None,
-            source_origin="web"
+            source_origin="web",
+            heatmap_data=downloaded_heatmap
         )
 
         # Gera e persiste a miniatura imediatamente (download web ou extração FFmpeg)
@@ -6144,6 +6199,12 @@ async def _run_video_download_task(
             video_service.get_or_generate_thumbnail(vid_id, thumbnail_url=thumbnail_url)
         except Exception as thumb_err:
             logger.warning(f"[VideoDownloader] Falha ao gerar thumbnail para {vid_id}: {thumb_err}")
+
+        # Auto-detecta os melhores momentos (Top 3 Clímax) já no término do download
+        try:
+            video_service.get_or_detect_smart_highlight(vid_id, heatmap_data=downloaded_heatmap)
+        except Exception as hl_err:
+            logger.debug(f"[VideoDownloader] Falha na auto-detecção de highlights: {hl_err}")
 
         filename = os.path.basename(target_path)
         video_service._trigger_background_upload(vid_id, target_path, folder_name, filename)
@@ -7833,6 +7894,90 @@ async def toggle_video_favorite(video_id: str):
     return {"success": True, "video_id": video_id, "is_favorite": new_fav}
 
 
+async def _resolve_album_video_smart_highlight(video_id: str, force: bool = False, desired_window: float = 35.0):
+    if not _completed_albums:
+        _load_albums_from_disk()
+
+    matched_album = None
+    for s_id, alb in _completed_albums.items():
+        if s_id == video_id or getattr(alb, "album_id", None) == video_id or video_id.startswith(f"img-{s_id}"):
+            matched_album = (s_id, alb)
+            break
+
+    if not matched_album:
+        return None
+
+    s_id, alb = matched_album
+    target_img = None
+    for img in getattr(alb, "images", []):
+        if getattr(img, "media_type", None) == "video" or getattr(img, "video_url", None) or getattr(img, "video_stream_url", None):
+            target_img = img
+            break
+
+    if not target_img:
+        return None
+
+    cached_sh = getattr(alb, "metadata", {}).get("smart_highlight") if getattr(alb, "metadata", None) else None
+    if not force and cached_sh and cached_sh.get("highlights") and float(cached_sh.get("highlight_start", 0)) > 0:
+        return cached_sh
+
+    from src.server.smart_shorts_detector import analyze_video_smart_highlights
+    stream_url = getattr(target_img, "video_stream_url", None) or getattr(target_img, "original_url", None) or getattr(target_img, "video_url", None)
+    dur = float(getattr(target_img, "duration_seconds", 0) or 0)
+
+    highlight_data = await asyncio.to_thread(
+        analyze_video_smart_highlights,
+        video_path=stream_url if (stream_url and not stream_url.startswith("http")) else None,
+        duration=dur,
+        desired_window=desired_window
+    )
+    if not isinstance(alb.metadata, dict):
+        alb.metadata = {}
+    alb.metadata["smart_highlight"] = highlight_data
+    _save_album_to_disk(s_id, alb)
+    return highlight_data
+
+
+@app.get("/api/videos/{video_id}/smart-highlight")
+async def get_video_smart_highlight(video_id: str, force: bool = False, desired_window: float = 35.0):
+    """
+    Returns the golden climax highlight (15s-60s), Top 3 ranked moments and intro cutoff for a video.
+    Identifies intro frames with uniform color/freezedetect and finds peak audio crescendo energy.
+    Runs asynchronously in threadpool to guarantee zero event loop blocking.
+    """
+    video = await asyncio.to_thread(video_service.get_video_by_id, video_id)
+    if video:
+        highlight_data = await asyncio.to_thread(
+            video_service.get_or_detect_smart_highlight, video_id, None, force, desired_window
+        )
+        return {"success": True, "video_id": video_id, "smart_highlight": highlight_data}
+
+    album_hl = await _resolve_album_video_smart_highlight(video_id, force=force, desired_window=desired_window)
+    if album_hl:
+        return {"success": True, "video_id": video_id, "smart_highlight": album_hl}
+
+    raise HTTPException(status_code=404, detail="Video not found")
+
+
+@app.post("/api/videos/{video_id}/smart-highlight/recompute")
+async def recompute_video_smart_highlight(video_id: str, desired_window: float = 35.0):
+    """
+    Forces immediate re-computation of the multi-highlight ranking for a video.
+    """
+    video = await asyncio.to_thread(video_service.get_video_by_id, video_id)
+    if video:
+        highlight_data = await asyncio.to_thread(
+            video_service.get_or_detect_smart_highlight, video_id, None, True, desired_window
+        )
+        return {"success": True, "video_id": video_id, "smart_highlight": highlight_data}
+
+    album_hl = await _resolve_album_video_smart_highlight(video_id, force=True, desired_window=desired_window)
+    if album_hl:
+        return {"success": True, "video_id": video_id, "smart_highlight": album_hl}
+
+    raise HTTPException(status_code=404, detail="Video not found")
+
+
 @app.delete("/api/videos/{video_id}")
 async def delete_video(video_id: str):
     """Moves a video to the Trash Bin."""
@@ -7965,6 +8110,7 @@ class MultiAlbumItemInput(BaseModel):
     url: str
     thumbnail_url: Optional[str] = None
     source_type: Optional[str] = "related"
+    selected_image_urls: Optional[List[str]] = None
 
 class MultiAlbumBatchSaveRequest(BaseModel):
     albums: List[MultiAlbumItemInput]
@@ -7975,54 +8121,197 @@ class MultiAlbumBatchDownloadRequest(BaseModel):
     albums: List[MultiAlbumItemInput]
     format: Optional[str] = "unified"  # "unified" or "individual"
 
-async def _resolve_or_extract_album_for_multi(item: MultiAlbumItemInput) -> Album:
-    """Helper to find existing completed album or extract it on-the-fly."""
-    clean_url = item.url.strip()
-    
-    # 1. Check in-memory completed albums
-    for aid, alb in _completed_albums.items():
-        if getattr(alb, "source_page", None) == clean_url or getattr(alb, "source_origin", None) == clean_url:
-            if getattr(alb, "images", None) and len(alb.images) > 0:
-                return alb
+_multi_album_preview_cache: Dict[str, Album] = {}
 
-    # 2. Check disk albums
-    if os.path.exists(ALBUMS_DIR):
+def _unwrap_image_url_for_match(u: Optional[str]) -> str:
+    if not u:
+        return ""
+    raw = str(u).strip()
+    if "/api/proxy-image" in raw and "url=" in raw:
+        try:
+            parsed_q = urllib.parse.parse_qs(urllib.parse.urlparse(raw).query)
+            if "url" in parsed_q and parsed_q["url"]:
+                raw = parsed_q["url"][0]
+        except Exception:
+            pass
+    return urllib.parse.unquote(raw).strip().rstrip("/")
+
+def _filter_album_by_selected_urls(album: Album, selected_urls: Optional[List[str]]) -> Album:
+    """Filtra as imagens de um álbum mantendo apenas aquelas selecionadas pelo usuário no Multi-Album View."""
+    if not selected_urls:
+        return album
+    target_set = set()
+    for su in selected_urls:
+        if not su:
+            continue
+        target_set.add(str(su).strip())
+        target_set.add(_unwrap_image_url_for_match(su))
+
+    filtered_imgs = []
+    for idx, img in enumerate(album.images):
+        candidates = [
+            getattr(img, "original_url", None),
+            getattr(img, "thumbnail_url", None),
+            getattr(img, "id", None),
+            getattr(img, "candidate_id", None),
+            f"img-{idx}",
+            str(getattr(img, "position", idx + 1)),
+        ]
+        matched = False
+        for c in candidates:
+            if not c:
+                continue
+            if str(c).strip() in target_set or _unwrap_image_url_for_match(str(c)) in target_set:
+                matched = True
+                break
+        if matched:
+            img_copy = img.model_copy(deep=True)
+            img_copy.position = len(filtered_imgs) + 1
+            filtered_imgs.append(img_copy)
+
+    if not filtered_imgs:
+        return album.model_copy(deep=True)
+
+    alb_copy = album.model_copy(deep=True)
+    alb_copy.images = filtered_imgs
+    alb_copy.cover_image_url = filtered_imgs[0].thumbnail_url or filtered_imgs[0].original_url or alb_copy.cover_image_url
+    if getattr(alb_copy, "telemetry", None):
+        alb_copy.telemetry.originals_resolved = len(filtered_imgs)
+    alb_copy.metadata["custom_selected_count"] = len(filtered_imgs)
+    alb_copy.metadata["original_total_count"] = len(album.images)
+    alb_copy.metadata["is_subset_selection"] = len(filtered_imgs) < len(album.images)
+    return alb_copy
+
+async def _resolve_or_extract_album_for_multi(
+    item: MultiAlbumItemInput,
+    persist_to_library: bool = False,
+    require_full_album: bool = False
+) -> Album:
+    """Helper to find existing completed/previewed album or extract it on-the-fly, applying selected_image_urls if present."""
+    clean_url = item.url.strip()
+    norm_key = clean_url.rstrip("/")
+    needs_unfiltered_base = require_full_album or bool(item.selected_image_urls)
+
+    found_alb: Optional[Album] = None
+
+    # 0. Check preview cache first (always stores full unfiltered albums)
+    if norm_key in _multi_album_preview_cache:
+        cached = _multi_album_preview_cache[norm_key]
+        if getattr(cached, "images", None) and len(cached.images) > 0:
+            found_alb = cached.model_copy(deep=True)
+
+    # 1. Check in-memory completed albums (skip subset-filtered albums when full album is needed)
+    if not found_alb:
+        for aid, alb in _completed_albums.items():
+            sp = (getattr(alb, "source_page", None) or "").rstrip("/")
+            so = (getattr(alb, "source_origin", None) or "").rstrip("/")
+            if sp == norm_key or so == norm_key:
+                meta = getattr(alb, "metadata", None) or {}
+                is_subset = bool(meta.get("is_subset_selection"))
+                if needs_unfiltered_base and is_subset:
+                    continue
+                if getattr(alb, "images", None) and len(alb.images) > 0:
+                    found_alb = alb.model_copy(deep=True)
+                    if not is_subset:
+                        _multi_album_preview_cache[norm_key] = alb.model_copy(deep=True)
+                    break
+
+    # 2. Check disk albums (skip subset-filtered albums when full album is needed)
+    if not found_alb and os.path.exists(ALBUMS_DIR):
         for fname in os.listdir(ALBUMS_DIR):
             if fname.endswith(".json"):
                 fpath = os.path.join(ALBUMS_DIR, fname)
                 try:
                     with open(fpath, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    if data.get("source_page") == clean_url or data.get("source_origin") == clean_url:
+                    sp = (data.get("source_page") or "").rstrip("/")
+                    so = (data.get("source_origin") or "").rstrip("/")
+                    if sp == norm_key or so == norm_key:
+                        meta = data.get("metadata") or {}
+                        is_subset = bool(meta.get("is_subset_selection"))
+                        if needs_unfiltered_base and is_subset:
+                            continue
                         alb = Album(**data)
                         if alb.images and len(alb.images) > 0:
                             aid = fname.replace(".json", "")
                             _completed_albums[aid] = alb
-                            return alb
+                            if not is_subset:
+                                _multi_album_preview_cache[norm_key] = alb.model_copy(deep=True)
+                            found_alb = alb.model_copy(deep=True)
+                            break
                 except Exception:
                     pass
 
     # 3. Not found: extract with surgical scout
-    scout = GeminiSurgicalScout()
-    async with _extraction_semaphore:
-        alb = await scout.extract_album(
-            url=clean_url,
-            gemini_model="gemini-3.7-flash",
-            local_model="qwen2.5:32b"
-        )
-    if not getattr(alb, "title", None) and item.title:
-        alb.title = item.title
-    if item.thumbnail_url and not alb.cover_image_url:
-        alb.cover_image_url = item.thumbnail_url
+    if not found_alb:
+        scout = GeminiSurgicalScout()
+        async with _extraction_semaphore:
+            alb = await scout.extract_album(
+                url=clean_url,
+                gemini_model="gemini-3.7-flash",
+                local_model="qwen2.5:32b"
+            )
+        if not getattr(alb, "title", None) and item.title:
+            alb.title = item.title
+        if item.thumbnail_url and not alb.cover_image_url:
+            alb.cover_image_url = item.thumbnail_url
 
-    s_id = f"sess_{abs(hash(clean_url + str(datetime.now(timezone.utc).timestamp()))) % 1000000}"
-    _completed_albums[s_id] = alb
-    _save_album_to_disk(s_id, alb)
-    return alb
+        _multi_album_preview_cache[norm_key] = alb.model_copy(deep=True)
+        if persist_to_library:
+            s_id = f"sess_{abs(hash(clean_url + str(datetime.now(timezone.utc).timestamp()))) % 1000000}"
+            _completed_albums[s_id] = alb
+            _save_album_to_disk(s_id, alb)
+        found_alb = alb.model_copy(deep=True)
+
+    if item.selected_image_urls is not None and len(item.selected_image_urls) > 0:
+        found_alb = _filter_album_by_selected_urls(found_alb, item.selected_image_urls)
+
+    return found_alb
+
+@app.post("/api/multi-album/preview-album")
+async def multi_album_preview_album(req: MultiAlbumItemInput):
+    """Inspeciona e extrai as imagens de um álbum descoberto no Multi-Album View para seleção individual pré-salvamento."""
+    u = (req.url or "").strip()
+    if not u or not u.startswith("http"):
+        raise HTTPException(status_code=400, detail="Invalid album URL.")
+
+    preview_req = MultiAlbumItemInput(
+        title=req.title or "Álbum",
+        url=u,
+        thumbnail_url=req.thumbnail_url,
+        source_type=req.source_type,
+        selected_image_urls=None
+    )
+    alb = await _resolve_or_extract_album_for_multi(preview_req, persist_to_library=False, require_full_album=True)
+    images_out = []
+    for idx, img in enumerate(alb.images or []):
+        orig = getattr(img, "original_url", None) or getattr(img, "thumbnail_url", "")
+        thumb = getattr(img, "thumbnail_url", None) or orig
+        images_out.append({
+            "id": getattr(img, "id", None) or getattr(img, "candidate_id", None) or f"img-{idx}",
+            "position": getattr(img, "position", idx + 1),
+            "thumbnail_url": thumb,
+            "original_url": orig,
+            "width": getattr(img, "width", 0) or 0,
+            "height": getattr(img, "height", 0) or 0,
+            "file_size": getattr(img, "file_size", 0) or 0,
+            "format": getattr(img, "format", "jpeg") or "jpeg",
+            "media_type": getattr(img, "media_type", "image") or "image",
+            "is_animated": bool(getattr(img, "is_animated", False)),
+            "title": getattr(img, "title", None) or f"{alb.title or req.title} - #{idx + 1}",
+        })
+
+    return {
+        "success": True,
+        "url": u,
+        "title": alb.title or req.title,
+        "total_images": len(images_out),
+        "images": images_out,
+    }
 
 @app.post("/api/multi-album/batch-save-to-library")
 async def multi_album_batch_save_to_library(req: MultiAlbumBatchSaveRequest):
-    """Enfileira múltiplos álbuns selecionados para extração e salvamento direto na biblioteca com pasta designada."""
+    """Enfileira múltiplos álbuns selecionados para extração e salvamento direto na biblioteca com pasta designada (respeitando seleção individual de imagens)."""
     if not req.albums:
         raise HTTPException(status_code=400, detail="No albums selected.")
 
@@ -8037,6 +8326,12 @@ async def multi_album_batch_save_to_library(req: MultiAlbumBatchSaveRequest):
 
         s_id = f"sess_{abs(hash(u + str(datetime.now(timezone.utc).timestamp()))) % 1000000}"
         _active_event_queues[s_id] = asyncio.Queue()
+        custom_count = len(alb.selected_image_urls) if alb.selected_image_urls else 0
+        status_msg = (
+            f"Na fila ({custom_count} imagens selecionadas)..."
+            if custom_count > 0
+            else "Na fila do Extrator..."
+        )
         job_data = {
             "session_id": s_id,
             "url": u,
@@ -8048,7 +8343,8 @@ async def multi_album_batch_save_to_library(req: MultiAlbumBatchSaveRequest):
             "status": "running",
             "model": req.model_name or "gemini-3.7-flash",
             "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-            "progress": {"current": 0, "total": 0, "status": "Na fila do Extrator...", "title": alb.title},
+            "progress": {"current": 0, "total": custom_count, "status": status_msg, "title": alb.title},
+            "selected_image_count": custom_count,
         }
         _active_jobs[s_id] = job_data
         single_req = AnalyzeRequest(
@@ -8058,11 +8354,11 @@ async def multi_album_batch_save_to_library(req: MultiAlbumBatchSaveRequest):
             model_name="qwen2.5:32b",
             engine_type="gemini_surgical_scout",
             folder=target_folder,
+            selected_image_urls=alb.selected_image_urls,
         )
         t = asyncio.create_task(_run_gemini_surgical_task(s_id, single_req, semaphore=_batch_photo_semaphore))
         _job_controllers[s_id] = TaskJobController(t)
         spawned.append(job_data)
-
 
     _save_jobs_to_disk()
     return {
@@ -8078,14 +8374,14 @@ async def multi_album_batch_download_zip(
     req: MultiAlbumBatchDownloadRequest,
     background_tasks: BackgroundTasks
 ):
-    """Extrai e compacta múltiplos álbuns em um ZIP unificado ou individual."""
+    """Extrai e compacta múltiplos álbuns em um ZIP unificado ou individual (respeitando seleção individual de imagens)."""
     if not req.albums:
         raise HTTPException(status_code=400, detail="No albums provided.")
 
     from .safe_downloader import safe_downloader, _sanitize_filename
 
-    # Extract all albums
-    tasks = [_resolve_or_extract_album_for_multi(item) for item in req.albums]
+    # Extract all albums (each item may have selected_image_urls)
+    tasks = [_resolve_or_extract_album_for_multi(item, persist_to_library=False) for item in req.albums]
     extracted_albums = await asyncio.gather(*tasks, return_exceptions=True)
     valid_albums = [a for a in extracted_albums if isinstance(a, Album) and len(a.images) > 0]
 
@@ -8117,16 +8413,26 @@ async def multi_album_batch_download_zip(
 async def multi_album_download_single_zip(
     url: str,
     background_tasks: BackgroundTasks,
-    title: Optional[str] = None
+    title: Optional[str] = None,
+    selected_urls: Optional[str] = None
 ):
-    """Extrai e baixa um único álbum em arquivo ZIP direto."""
+    """Extrai e baixa um único álbum em arquivo ZIP direto (suporta filtro de imagens selecionadas)."""
     if not url or not url.startswith("http"):
         raise HTTPException(status_code=400, detail="Invalid URL.")
 
     from .safe_downloader import safe_downloader, _sanitize_filename
 
-    item = MultiAlbumItemInput(title=title or "Álbum", url=url)
-    album = await _resolve_or_extract_album_for_multi(item)
+    parsed_selected: Optional[List[str]] = None
+    if selected_urls:
+        try:
+            loaded = json.loads(selected_urls)
+            if isinstance(loaded, list):
+                parsed_selected = [str(x) for x in loaded if x]
+        except Exception:
+            parsed_selected = [x.strip() for x in selected_urls.split(",") if x.strip()]
+
+    item = MultiAlbumItemInput(title=title or "Álbum", url=url, selected_image_urls=parsed_selected)
+    album = await _resolve_or_extract_album_for_multi(item, persist_to_library=False)
     if not album.images or len(album.images) == 0:
         raise HTTPException(status_code=404, detail="No images found in this album.")
 

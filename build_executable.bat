@@ -14,6 +14,11 @@ cd ..
 
 echo.
 echo [2/3] Checking Playwright dependencies...
+python -c "import playwright" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Installing requirements and Playwright...
+    python -m pip install -r requirements.txt
+)
 python -m playwright install chromium
 
 echo.

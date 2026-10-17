@@ -27,6 +27,14 @@ try:
 except ImportError:
     HAS_OPENCV = False
 
+try:
+    from .smart_shorts_detector import analyze_video_smart_highlights
+except ImportError:
+    try:
+        from src.server.smart_shorts_detector import analyze_video_smart_highlights
+    except ImportError:
+        from smart_shorts_detector import analyze_video_smart_highlights
+
 
 def get_ffmpeg_path() -> Optional[str]:
     """Returns absolute path to FFmpeg binary, trying imageio_ffmpeg first, then PATH."""
@@ -55,7 +63,7 @@ def get_video_duration(video_path: str) -> float:
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 video_path
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, creationflags=_NO_WINDOW)
             if res.returncode == 0 and res.stdout.strip():
                 dur = float(res.stdout.strip())
                 if dur > 0:
@@ -345,25 +353,76 @@ logger = logging.getLogger("VideoService")
 
 
 def probe_video_file(file_path: str) -> Dict[str, Any]:
-    """Probes a local video file using cv2 to extract exact resolution, fps and duration."""
+    """Probes a local video file using ffprobe (or cv2) to extract exact resolution, fps and duration."""
     info = {"width": 0, "height": 0, "fps": 0, "duration_seconds": 0.0}
-    if not file_path or not os.path.exists(file_path) or not HAS_OPENCV:
+    if not file_path or not os.path.exists(file_path):
         return info
-    try:
-        cap = cv2.VideoCapture(file_path)
-        if cap.isOpened():
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = round(cap.get(cv2.CAP_PROP_FPS))
-            total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-            dur = (total_frames / max(fps, 1)) if fps > 0 else 0.0
-            cap.release()
-            info["width"] = w
-            info["height"] = h
-            info["fps"] = fps
-            info["duration_seconds"] = round(dur, 2)
-    except Exception as e:
-        logger.warning(f"Error probing video {file_path} with cv2: {e}")
+
+    # Try ffprobe first (fast, precise, handles all containers)
+    ffprobe_exe = shutil.which("ffprobe")
+    if ffprobe_exe:
+        try:
+            cmd = [
+                ffprobe_exe,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height,r_frame_rate,duration:format=duration",
+                "-of", "json",
+                file_path
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8, creationflags=_NO_WINDOW)
+            if r.returncode == 0 and r.stdout.strip():
+                data = json.loads(r.stdout)
+                streams = data.get("streams", [])
+                if streams:
+                    s = streams[0]
+                    w = int(s.get("width") or 0)
+                    h = int(s.get("height") or 0)
+                    r_fps = str(s.get("r_frame_rate") or "24/1")
+                    fps_val = 24
+                    if "/" in r_fps:
+                        try:
+                            num, den = r_fps.split("/")
+                            fps_val = round(float(num) / max(1.0, float(den)))
+                        except Exception:
+                            fps_val = 24
+                    else:
+                        try:
+                            fps_val = round(float(r_fps))
+                        except Exception:
+                            fps_val = 24
+
+                    raw_dur = s.get("duration") or data.get("format", {}).get("duration") or 0.0
+                    try:
+                        dur_val = float(raw_dur)
+                    except Exception:
+                        dur_val = 0.0
+
+                    info["width"] = w
+                    info["height"] = h
+                    info["fps"] = fps_val
+                    info["duration_seconds"] = round(dur_val, 2)
+                    if w > 0 and h > 0:
+                        return info
+        except Exception as e_ffp:
+            logger.debug(f"ffprobe failed for {file_path}: {e_ffp}")
+
+    if HAS_OPENCV:
+        try:
+            cap = cv2.VideoCapture(file_path)
+            if cap.isOpened():
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps = round(cap.get(cv2.CAP_PROP_FPS))
+                total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                dur = (total_frames / max(fps, 1)) if fps > 0 else 0.0
+                cap.release()
+                info["width"] = w
+                info["height"] = h
+                info["fps"] = fps
+                info["duration_seconds"] = round(dur, 2)
+        except Exception as e:
+            logger.warning(f"Error probing video {file_path} with cv2: {e}")
     return info
 
 # =====================================================================
@@ -807,6 +866,19 @@ class VideoService:
                 return vid_id
         return self._get_video_id(norm)
 
+    def _find_disk_file_by_id(self, vid_id: str) -> Optional[str]:
+        """Finds the relative path of a physical video file on disk matching vid_id."""
+        if not vid_id:
+            return None
+        for root, dirs, files in os.walk(self.base_dir):
+            for f in files:
+                if f.lower().endswith(('.mp4', '.mkv', '.webm', '.mov', '.avi', '.ts')):
+                    fp = os.path.join(root, f)
+                    rel = os.path.relpath(fp, self.base_dir).replace('\\', '/').strip('/')
+                    if hashlib.md5(rel.encode('utf-8')).hexdigest()[:12] == vid_id:
+                        return rel
+        return None
+
     def _update_single_metadata(
         self,
         file_path: Optional[str] = None,
@@ -825,19 +897,32 @@ class VideoService:
         source_url: Optional[str] = None,
         source_id: Optional[str] = None,
         source_thumbnail_url: Optional[str] = None,
-        source_origin: Optional[str] = None
+        source_origin: Optional[str] = None,
+        intro_end: Optional[float] = None,
+        highlight_start: Optional[float] = None,
+        highlight_end: Optional[float] = None,
+        highlight_score: Optional[float] = None,
+        highlights: Optional[List[Dict[str, Any]]] = None,
+        heatmap_data: Optional[List[Dict[str, Any]]] = None
     ):
         meta = self._load_metadata()
+        entry = meta.get(vid_id, {}) if vid_id else {}
         if file_path:
             rel_path = os.path.relpath(file_path, self.base_dir).replace("\\", "/")
             if not vid_id:
                 vid_id = self._find_video_id(rel_path, meta)
+                entry = meta.get(vid_id, {})
         else:
-            rel_path = f"{folder or 'Geral'}/remote_{vid_id or int(time.time())}.mp4"
+            rel_path = entry.get("rel_path")
+            if not rel_path or ("remote_" in rel_path and not entry.get("cloud_url")):
+                matched_disk = self._find_disk_file_by_id(vid_id) if vid_id else None
+                if matched_disk:
+                    rel_path = matched_disk
+                else:
+                    rel_path = rel_path or f"{folder or 'Geral'}/remote_{vid_id or int(time.time())}.mp4"
             if not vid_id:
                 vid_id = self._get_video_id(rel_path)
-
-        entry = meta.get(vid_id, {})
+                entry = meta.get(vid_id, {})
 
         if title is not None:
             entry["title"] = title
@@ -869,6 +954,19 @@ class VideoService:
             entry["source_id"] = source_id
         if source_thumbnail_url is not None:
             entry["source_thumbnail_url"] = source_thumbnail_url
+
+        if intro_end is not None:
+            entry["intro_end"] = round(float(intro_end), 2)
+        if highlight_start is not None:
+            entry["highlight_start"] = round(float(highlight_start), 2)
+        if highlight_end is not None:
+            entry["highlight_end"] = round(float(highlight_end), 2)
+        if highlight_score is not None:
+            entry["highlight_score"] = round(float(highlight_score), 2)
+        if highlights is not None:
+            entry["highlights"] = highlights
+        if heatmap_data is not None:
+            entry["heatmap_data"] = heatmap_data
 
         if source_origin is not None:
             entry["source_origin"] = source_origin
@@ -1008,18 +1106,7 @@ class VideoService:
                     h = entry_meta.get("height") or 0
                     fps = entry_meta.get("fps") or 0
                     dur = entry_meta.get("duration_seconds") or 0.0
-                    if (w == 0 or h == 0) and os.path.exists(full_path):
-                        p_info = probe_video_file(full_path)
-                        if p_info["width"] > 0:
-                            w = p_info["width"]
-                            h = p_info["height"]
-                            fps = p_info["fps"]
-                            dur = p_info["duration_seconds"]
-                            entry_meta["width"] = w
-                            entry_meta["height"] = h
-                            entry_meta["fps"] = fps
-                            entry_meta["duration_seconds"] = dur
-                            meta[vid_id] = entry_meta
+
 
                     videos.append({
                         "id": vid_id,
@@ -1041,6 +1128,11 @@ class VideoService:
                         "height": h,
                         "fps": fps,
                         "duration_seconds": dur,
+                        "intro_end": entry_meta.get("intro_end", 0.0),
+                        "highlight_start": entry_meta.get("highlight_start", 0.0),
+                        "highlight_end": entry_meta.get("highlight_end", dur),
+                        "highlight_score": entry_meta.get("highlight_score", 0.0),
+                        "highlights": entry_meta.get("highlights", []),
                         "source_url": entry_meta.get("source_url"),
                         "source_id": entry_meta.get("source_id")
                     })
@@ -1075,6 +1167,7 @@ class VideoService:
                         fname = os.path.basename(rel_p) if rel_p else f"{clean_title}.mp4"
                         size_bytes = hf_sizes.get(f"videos/{folder_name}/{fname}") or hf_sizes.get(fname) or 0
 
+                dur = entry_meta.get("duration_seconds") or 0.0
                 videos.append({
                     "id": vid_id,
                     "title": clean_title,
@@ -1094,7 +1187,12 @@ class VideoService:
                     "width": entry_meta.get("width") or 0,
                     "height": entry_meta.get("height") or 0,
                     "fps": entry_meta.get("fps") or 0,
-                    "duration_seconds": entry_meta.get("duration_seconds") or 0,
+                    "duration_seconds": dur,
+                    "intro_end": entry_meta.get("intro_end", 0.0),
+                    "highlight_start": entry_meta.get("highlight_start", 0.0),
+                    "highlight_end": entry_meta.get("highlight_end", dur),
+                    "highlight_score": entry_meta.get("highlight_score", 0.0),
+                    "highlights": entry_meta.get("highlights", []),
                     "source_url": entry_meta.get("source_url"),
                     "source_id": entry_meta.get("source_id")
                 })
@@ -1115,11 +1213,21 @@ class VideoService:
             if not os.path.exists(full_path):
                 fname = entry.get("filename") or os.path.basename(rel_path)
                 for root, dirs, files in os.walk(self.base_dir):
-                    if fname in files:
+                    if fname in files and not fname.startswith("remote_"):
                         full_path = os.path.join(root, fname)
+                        entry["rel_path"] = os.path.relpath(full_path, self.base_dir).replace("\\", "/")
                         break
+                if not os.path.exists(full_path):
+                    matched_disk = self._find_disk_file_by_id(video_id)
+                    if matched_disk:
+                        full_path = os.path.join(self.base_dir, matched_disk.replace("/", os.sep))
+                        entry["rel_path"] = matched_disk
+                        entry["filename"] = os.path.basename(matched_disk)
+                        entry["folder"] = matched_disk.split("/")[0] if "/" in matched_disk else "Geral"
+                        self._save_metadata(meta)
 
             exists = os.path.exists(full_path) if full_path else False
+            dur = entry.get("duration_seconds") or 0.0
             return {
                 "id": video_id,
                 "title": entry.get("title") or entry.get("filename", "").replace("_", " "),
@@ -1139,7 +1247,12 @@ class VideoService:
                 "width": entry.get("width") or 0,
                 "height": entry.get("height") or 0,
                 "fps": entry.get("fps") or 0,
-                "duration_seconds": entry.get("duration_seconds") or 0.0,
+                "duration_seconds": dur,
+                "intro_end": entry.get("intro_end", 0.0),
+                "highlight_start": entry.get("highlight_start", 0.0),
+                "highlight_end": entry.get("highlight_end", dur),
+                "highlight_score": entry.get("highlight_score", 0.0),
+                "highlights": entry.get("highlights", []),
                 "source_url": entry.get("source_url"),
                 "source_id": entry.get("source_id"),
                 "full_path": full_path if exists else None
@@ -1152,6 +1265,72 @@ class VideoService:
                 v["full_path"] = full_path if os.path.exists(full_path) else None
                 return v
         return None
+
+    def get_or_detect_smart_highlight(
+        self,
+        video_id: str,
+        heatmap_data: Optional[List[Dict[str, Any]]] = None,
+        force_recompute: bool = False,
+        desired_window: float = 35.0
+    ) -> Dict[str, Any]:
+        """
+        Retrieves or dynamically computes the golden climax moment (15s-60s) and Top 3 highlights.
+        Detects intro end, fast audio crescendo dynamics, and audience heatmap peaks.
+        Persists results in metadata cache for zero-latency instant seeks in future plays.
+        """
+        meta = self._load_metadata()
+        entry = meta.get(video_id, {})
+        cached_start = entry.get("highlight_start")
+        cached_end = entry.get("highlight_end")
+        cached_highlights = entry.get("highlights")
+
+        has_valid_hls = bool(cached_highlights and isinstance(cached_highlights, list) and len(cached_highlights) > 0)
+        has_valid_start = (cached_start is not None and float(cached_start) > 0)
+        if not force_recompute and has_valid_start and cached_end is not None and cached_end > 0 and has_valid_hls:
+            return {
+                "intro_end": entry.get("intro_end", 0.0),
+                "highlight_start": float(cached_start),
+                "highlight_end": float(cached_end),
+                "highlight_score": entry.get("highlight_score", 0.0),
+                "duration": entry.get("duration_seconds", 0.0),
+                "highlights": cached_highlights
+            }
+
+        video_info = self.get_video_by_id(video_id)
+        if not video_info:
+            return {
+                "intro_end": 0.0,
+                "highlight_start": 0.0,
+                "highlight_end": 0.0,
+                "highlight_score": 0.0,
+                "duration": 0.0,
+                "highlights": []
+            }
+
+        full_path = video_info.get("full_path")
+        dur = float(video_info.get("duration_seconds") or 0.0)
+
+        # Execute smart analysis using intro detection, audio dynamics, or yt-dlp heatmap
+        result = analyze_video_smart_highlights(
+            video_path=full_path if (full_path and os.path.exists(full_path)) else None,
+            duration=dur,
+            heatmap_data=heatmap_data or entry.get("heatmap_data"),
+            desired_window=desired_window
+        )
+
+        # Cache in video metadata
+        self._update_single_metadata(
+            file_path=full_path,
+            vid_id=video_id,
+            folder=video_info.get("folder"),
+            title=video_info.get("title"),
+            intro_end=result.get("intro_end", 0.0),
+            highlight_start=result.get("highlight_start", 0.0),
+            highlight_end=result.get("highlight_end", dur),
+            highlight_score=result.get("highlight_score", 0.0),
+            highlights=result.get("highlights", [])
+        )
+        return result
 
     def create_folder(self, folder_name: str) -> bool:
         """Creates a new folder on disk."""

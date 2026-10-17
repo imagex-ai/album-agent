@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Film,
   Search,
@@ -19,12 +19,18 @@ import {
   Square,
   AlertCircle,
   RotateCcw,
-  Copy
+  Copy,
+  Eye,
+  ArrowLeft,
+  FolderPlus,
+  LayoutGrid,
+  Filter,
+  X
 } from 'lucide-react';
 import { useAppStore, triggerJobsPollingLoop, getCanonicalMediaFingerprint } from '../../store/useAppStore';
 import { backendApi } from '../../services/realApi';
 import { soundEffects } from '../../services/soundEffects';
-import { ScannedVideoItem } from '../../types';
+import { ScannedVideoItem, VideoScraperAlbum } from '../../types';
 import { FolderSelectModal } from '../common/FolderSelectModal';
 import { SavedRedirectBadge } from '../common/SavedRedirectBadge';
 import { getProxiedStreamUrl } from './AlbumDetailView';
@@ -53,8 +59,12 @@ export const WebVideoScraperView: React.FC = () => {
 
   const { url, scanResult, selectedIds, targetFolder, errorMsg } = webScraperState;
   const activeTab = webScraperState.activeTab || 'main';
+  const viewLayout = webScraperState.viewLayout || 'albums';
+  const videoAlbums: VideoScraperAlbum[] = webScraperState.videoAlbums || [];
+  const selectedAlbumIds: string[] = webScraperState.selectedAlbumIds || [];
 
   const [isScanning, setIsScanning] = useState(false);
+  const [scanningSubAlbumUrl, setScanningSubAlbumUrl] = useState<string | null>(null);
   const [isBatchSaving, setIsBatchSaving] = useState(false);
   const [limit, setLimit] = useState<number | ''>('');
   const [playingVideoId, setPlayingVideoId] = useState<string | null>(null);
@@ -64,9 +74,21 @@ export const WebVideoScraperView: React.FC = () => {
   const [onlyNewVideosList, setOnlyNewVideosList] = useState<ScannedVideoItem[]>([]);
   const [folderModalState, setFolderModalState] = useState<{
     isOpen: boolean;
-    mode: 'single' | 'batch';
+    mode: 'single' | 'batch' | 'album_batch';
     targetVideo?: ScannedVideoItem;
+    customBatchVideos?: ScannedVideoItem[];
   }>({ isOpen: false, mode: 'single' });
+
+  // Interactive Video Album Inspector State (Enter album -> select videos -> return to albums)
+  const [inspectingAlbumId, setInspectingAlbumId] = useState<string | null>(null);
+  const [draftAlbumSelectedIds, setDraftAlbumSelectedIds] = useState<Set<string>>(new Set());
+  const [inspectorSearchQuery, setInspectorSearchQuery] = useState<string>('');
+  const [inspectorSectionFilter, setInspectorSectionFilter] = useState<'all' | 'new' | 'hd'>('all');
+
+  const inspectingAlbum = useMemo(
+    () => videoAlbums.find(a => a.id === inspectingAlbumId) || null,
+    [videoAlbums, inspectingAlbumId]
+  );
 
   const handleUrlChange = (val: string) => {
     setWebScraperState({ url: val });
@@ -88,7 +110,7 @@ export const WebVideoScraperView: React.FC = () => {
   };
 
   // In-page duplicate detection map (canonical fingerprint)
-  const inPageDuplicateMap = React.useMemo(() => {
+  const inPageDuplicateMap = useMemo(() => {
     const counts = new Map<string, number>();
     if (!scanResult || !scanResult.videos) return counts;
     scanResult.videos.forEach(v => {
@@ -117,7 +139,83 @@ export const WebVideoScraperView: React.FC = () => {
   const totalSavedCount = scanResult ? scanResult.videos.filter(v => isVideoSavedInGallery(v)).length : 0;
   const totalNewCount = scanResult ? (scanResult.videos.length - totalSavedCount) : 0;
 
-  const handleScanPage = async () => {
+  // Build VideoAlbums from a scan response and merge with existing albums
+  const buildAlbumsFromScan = (
+    cleanUrl: string,
+    pageTitle: string,
+    suggestedFolder: string,
+    scannedVideos: ScannedVideoItem[],
+    appendMode: boolean = false
+  ): { nextAlbums: VideoScraperAlbum[]; nextSelectedAlbumIds: string[] } => {
+    const primaryVids = scannedVideos.filter(v => v.is_primary !== false && v.section !== 'recommended');
+    const recVids = scannedVideos.filter(v => v.is_primary === false || v.section === 'recommended');
+
+    const createdAlbums: VideoScraperAlbum[] = [];
+    const baseId = `valb-${cleanUrl.replace(/[^a-zA-Z0-9]/g, '').slice(-24)}-${Date.now().toString(36).slice(-4)}`;
+
+    if (primaryVids.length > 0) {
+      const unsavedPrimaryIds = primaryVids
+        .filter(v => !v.already_saved && !isVideoSavedInGallery(v))
+        .map(v => v.id);
+      createdAlbums.push({
+        id: `${baseId}-main`,
+        title: pageTitle || cleanUrl,
+        url: cleanUrl,
+        thumbnailUrl: primaryVids[0]?.thumbnail_url || scannedVideos[0]?.thumbnail_url || '',
+        suggestedFolder,
+        videos: primaryVids,
+        selectedVideoIds: unsavedPrimaryIds.length > 0 ? unsavedPrimaryIds : primaryVids.map(v => v.id),
+        sourceType: 'main',
+        scannedAt: Date.now()
+      });
+    }
+
+    if (recVids.length > 0) {
+      const unsavedRecIds = recVids
+        .filter(v => !v.already_saved && !isVideoSavedInGallery(v))
+        .map(v => v.id);
+      createdAlbums.push({
+        id: `${baseId}-rec`,
+        title: `${pageTitle || cleanUrl} — ${isEn ? 'Related / Recommended' : 'Recomendados da Página'}`,
+        url: `${cleanUrl}#recommended`,
+        thumbnailUrl: recVids[0]?.thumbnail_url || scannedVideos[0]?.thumbnail_url || '',
+        suggestedFolder,
+        videos: recVids,
+        selectedVideoIds: unsavedRecIds.length > 0 ? unsavedRecIds : recVids.map(v => v.id),
+        sourceType: 'recommended',
+        scannedAt: Date.now()
+      });
+    }
+
+    if (createdAlbums.length === 0 && scannedVideos.length > 0) {
+      createdAlbums.push({
+        id: `${baseId}-all`,
+        title: pageTitle || cleanUrl,
+        url: cleanUrl,
+        thumbnailUrl: scannedVideos[0]?.thumbnail_url || '',
+        suggestedFolder,
+        videos: scannedVideos,
+        selectedVideoIds: scannedVideos.map(v => v.id),
+        sourceType: 'main',
+        scannedAt: Date.now()
+      });
+    }
+
+    const baseExisting = appendMode
+      ? videoAlbums.filter(a => a.url !== cleanUrl && a.url !== `${cleanUrl}#recommended`)
+      : [];
+    const nextAlbums = [...createdAlbums, ...baseExisting];
+    const autoSelectAlbumIds = createdAlbums
+      .filter(a => a.sourceType === 'main' || createdAlbums.length === 1)
+      .map(a => a.id);
+    const nextSelectedAlbumIds = appendMode
+      ? Array.from(new Set([...selectedAlbumIds, ...autoSelectAlbumIds]))
+      : autoSelectAlbumIds;
+
+    return { nextAlbums, nextSelectedAlbumIds };
+  };
+
+  const handleScanPage = async (appendAsNewAlbum: boolean = false) => {
     const cleanUrl = url.trim();
     if (!cleanUrl) return;
     setWebScraperState({ errorMsg: null });
@@ -131,11 +229,19 @@ export const WebVideoScraperView: React.FC = () => {
         const folder = res.suggested_folder || 'Extraídos';
         const primaryVids = res.videos.filter((v: ScannedVideoItem) => v.is_primary !== false && v.section !== 'recommended');
         const targetVids = primaryVids.length > 0 ? primaryVids : res.videos;
-        
+
         // Smart selection: select ONLY videos that are NOT yet saved!
         const unsavedTargetIds = targetVids
           .filter((v: ScannedVideoItem) => !v.already_saved && !isVideoSavedInGallery(v))
           .map((v: ScannedVideoItem) => v.id);
+
+        const { nextAlbums, nextSelectedAlbumIds } = buildAlbumsFromScan(
+          cleanUrl,
+          res.page_title || cleanUrl,
+          folder,
+          res.videos,
+          appendAsNewAlbum
+        );
 
         setWebScraperState({
           scanResult: {
@@ -153,6 +259,8 @@ export const WebVideoScraperView: React.FC = () => {
           targetFolder: folder,
           activeTab: 'main',
           selectedIds: unsavedTargetIds,
+          videoAlbums: nextAlbums,
+          selectedAlbumIds: nextSelectedAlbumIds,
           errorMsg: null
         });
         soundEffects.success(settings.soundEnabled);
@@ -165,6 +273,198 @@ export const WebVideoScraperView: React.FC = () => {
       soundEffects.trash(settings.soundEnabled);
     } finally {
       setIsScanning(false);
+    }
+  };
+
+  // Scan a specific video card's target page as a sub-album and open it in the Video Album Selector!
+  const handleInspectVideoPageAsAlbum = async (item: ScannedVideoItem, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    const pageUrl = (item.url || '').trim();
+    if (!pageUrl) return;
+
+    // Check if already in videoAlbums
+    const existing = videoAlbums.find(a => a.url === pageUrl);
+    if (existing) {
+      openVideoAlbumInspector(existing);
+      return;
+    }
+
+    setScanningSubAlbumUrl(pageUrl);
+    soundEffects.click(settings.soundEnabled);
+    try {
+      const res = await backendApi.scanPageForVideos(pageUrl, 200);
+      if (res.success && res.videos && res.videos.length > 0) {
+        const unsavedIds = res.videos
+          .filter((v: ScannedVideoItem) => !v.already_saved && !isVideoSavedInGallery(v))
+          .map((v: ScannedVideoItem) => v.id);
+        const newAlbum: VideoScraperAlbum = {
+          id: `valb-sub-${Date.now().toString(36)}`,
+          title: res.page_title || item.title || pageUrl,
+          url: pageUrl,
+          thumbnailUrl: item.thumbnail_url || res.videos[0]?.thumbnail_url || '',
+          suggestedFolder: res.suggested_folder || targetFolder || 'Extraídos',
+          videos: res.videos,
+          selectedVideoIds: unsavedIds.length > 0 ? unsavedIds : res.videos.map((v: ScannedVideoItem) => v.id),
+          sourceType: 'sub_album',
+          scannedAt: Date.now()
+        };
+        const nextAlbums = [newAlbum, ...videoAlbums];
+        const nextSelAlbums = Array.from(new Set([...selectedAlbumIds, newAlbum.id]));
+        setWebScraperState({
+          videoAlbums: nextAlbums,
+          selectedAlbumIds: nextSelAlbums
+        });
+        openVideoAlbumInspector(newAlbum);
+      } else {
+        // Fallback: create a single-item album for this video if page has no sub-list
+        const fallbackAlbum: VideoScraperAlbum = {
+          id: `valb-sub-${Date.now().toString(36)}`,
+          title: item.title || pageUrl,
+          url: pageUrl,
+          thumbnailUrl: item.thumbnail_url || '',
+          suggestedFolder: targetFolder || 'Extraídos',
+          videos: [item],
+          selectedVideoIds: [item.id],
+          sourceType: 'sub_album',
+          scannedAt: Date.now()
+        };
+        const nextAlbums = [fallbackAlbum, ...videoAlbums];
+        setWebScraperState({
+          videoAlbums: nextAlbums,
+          selectedAlbumIds: Array.from(new Set([...selectedAlbumIds, fallbackAlbum.id]))
+        });
+        openVideoAlbumInspector(fallbackAlbum);
+      }
+    } catch (_) {
+    } finally {
+      setScanningSubAlbumUrl(null);
+    }
+  };
+
+  // Enter a Video Album to select which videos will be downloaded from that album
+  const openVideoAlbumInspector = (album: VideoScraperAlbum) => {
+    soundEffects.click(settings.soundEnabled);
+    setInspectingAlbumId(album.id);
+    setDraftAlbumSelectedIds(new Set(album.selectedVideoIds));
+    setInspectorSearchQuery('');
+    setInspectorSectionFilter('all');
+  };
+
+  // Confirm video selection for the inspected album and return to the Video Albums view
+  const handleConfirmVideoAlbumSelection = () => {
+    if (!inspectingAlbum) return;
+    soundEffects.click(settings.soundEnabled);
+    const selectedArr = Array.from(draftAlbumSelectedIds);
+    const updatedAlbums = videoAlbums.map(a =>
+      a.id === inspectingAlbum.id
+        ? { ...a, selectedVideoIds: selectedArr }
+        : a
+    );
+    const nextSelAlbums = new Set(selectedAlbumIds);
+    if (selectedArr.length > 0) {
+      nextSelAlbums.add(inspectingAlbum.id);
+    } else {
+      nextSelAlbums.delete(inspectingAlbum.id);
+    }
+
+    // Also sync flat selectedIds if this is the main album
+    const allSelectedVideoIdsAcrossAlbums = Array.from(
+      new Set(
+        updatedAlbums
+          .filter(a => nextSelAlbums.has(a.id))
+          .flatMap(a => a.selectedVideoIds)
+      )
+    );
+
+    setWebScraperState({
+      videoAlbums: updatedAlbums,
+      selectedAlbumIds: Array.from(nextSelAlbums),
+      selectedIds: allSelectedVideoIdsAcrossAlbums.length > 0 ? allSelectedVideoIdsAcrossAlbums : selectedIds
+    });
+    setInspectingAlbumId(null);
+  };
+
+  const toggleSelectVideoAlbum = (albumId: string) => {
+    const next = selectedAlbumIds.includes(albumId)
+      ? selectedAlbumIds.filter(id => id !== albumId)
+      : [...selectedAlbumIds, albumId];
+    setWebScraperState({ selectedAlbumIds: next });
+  };
+
+  const handleRemoveVideoAlbum = (albumId: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    soundEffects.trash(settings.soundEnabled);
+    const updatedAlbums = videoAlbums.filter(a => a.id !== albumId);
+    const updatedSelectedIds = selectedAlbumIds.filter(id => id !== albumId);
+    if (inspectingAlbumId === albumId) {
+      setInspectingAlbumId(null);
+    }
+    setWebScraperState({
+      videoAlbums: updatedAlbums,
+      selectedAlbumIds: updatedSelectedIds
+    });
+  };
+
+  // Total videos selected across all currently selected Video Albums
+  const selectedVideosFromSelectedAlbums = useMemo(() => {
+    const map = new Map<string, ScannedVideoItem>();
+    videoAlbums
+      .filter(a => selectedAlbumIds.includes(a.id))
+      .forEach(alb => {
+        const selSet = new Set(alb.selectedVideoIds);
+        alb.videos.forEach(v => {
+          if (selSet.has(v.id)) {
+            map.set(v.id, v);
+          }
+        });
+      });
+    return Array.from(map.values());
+  }, [videoAlbums, selectedAlbumIds]);
+
+  const handleDownloadSelectedVideoAlbums = () => {
+    if (selectedVideosFromSelectedAlbums.length === 0 || isBatchSaving) return;
+    const duplicates = selectedVideosFromSelectedAlbums.filter(v => isVideoSavedInGallery(v));
+    const onlyNew = selectedVideosFromSelectedAlbums.filter(v => !isVideoSavedInGallery(v));
+
+    if (duplicates.length > 0) {
+      setDuplicateVideosList(duplicates);
+      setOnlyNewVideosList(onlyNew);
+      setShowDuplicateModal(true);
+      return;
+    }
+
+    if (settings.askFolderOnSave) {
+      setFolderModalState({
+        isOpen: true,
+        mode: 'album_batch',
+        customBatchVideos: selectedVideosFromSelectedAlbums
+      });
+    } else {
+      executeBatchSave(
+        selectedVideosFromSelectedAlbums,
+        true,
+        targetFolder.trim() || settings.defaultVideoFolder || 'Extraídos'
+      );
+    }
+  };
+
+  const handleDownloadSingleVideoAlbum = (album: VideoScraperAlbum, overrideSelectedIds?: string[]) => {
+    const selSet = new Set(overrideSelectedIds || album.selectedVideoIds);
+    const videosToDownload = album.videos.filter(v => selSet.has(v.id));
+    if (videosToDownload.length === 0 || isBatchSaving) return;
+
+    if (settings.askFolderOnSave) {
+      setFolderModalState({
+        isOpen: true,
+        mode: 'album_batch',
+        customBatchVideos: videosToDownload
+      });
+    } else {
+      executeBatchSave(
+        videosToDownload,
+        true,
+        targetFolder.trim() || album.suggestedFolder || settings.defaultVideoFolder || 'Extraídos'
+      );
     }
   };
 
@@ -235,14 +535,23 @@ export const WebVideoScraperView: React.FC = () => {
             targetView: 'videos'
           });
         });
+        const saveIdSet = new Set(videosToSave.map(v => v.id));
+        const updatedVideoAlbums = videoAlbums.map(alb => ({
+          ...alb,
+          videos: alb.videos.map(v => saveIdSet.has(v.id) ? { ...v, already_saved: true, saved_folder: folderToUse } : v)
+        }));
         if (scanResult) {
-          const saveIdSet = new Set(videosToSave.map(v => v.id));
           const updatedVideos = scanResult.videos.map(v => saveIdSet.has(v.id) ? { ...v, already_saved: true, saved_folder: folderToUse } : v);
           setWebScraperState({
             scanResult: {
               ...scanResult,
               videos: updatedVideos
-            }
+            },
+            videoAlbums: updatedVideoAlbums
+          });
+        } else {
+          setWebScraperState({
+            videoAlbums: updatedVideoAlbums
           });
         }
 
@@ -273,7 +582,6 @@ export const WebVideoScraperView: React.FC = () => {
       setIsBatchSaving(false);
     }
   };
-
 
   const isVideoSaving = (item: ScannedVideoItem) => {
     return savingSingleId === item.id || jobs.some(j =>
@@ -320,7 +628,6 @@ export const WebVideoScraperView: React.FC = () => {
     try {
       const res = await backendApi.batchSaveVideos([item], folderToUse, 2);
       if (res.success) {
-        // Marcação otimista imediata para exibir a tag Salvo em [Pasta] na mesma hora
         markItemAsSavedOptimistically({
           url: item.url || item.stream_url,
           title: item.title,
@@ -328,13 +635,22 @@ export const WebVideoScraperView: React.FC = () => {
           targetId: item.id,
           targetView: 'videos'
         });
+        const updatedVideoAlbums = videoAlbums.map(alb => ({
+          ...alb,
+          videos: alb.videos.map(v => v.id === item.id ? { ...v, already_saved: true, saved_folder: folderToUse } : v)
+        }));
         if (scanResult) {
           const updatedVideos = scanResult.videos.map(v => v.id === item.id ? { ...v, already_saved: true, saved_folder: folderToUse } : v);
           setWebScraperState({
             scanResult: {
               ...scanResult,
               videos: updatedVideos
-            }
+            },
+            videoAlbums: updatedVideoAlbums
+          });
+        } else {
+          setWebScraperState({
+            videoAlbums: updatedVideoAlbums
           });
         }
 
@@ -389,7 +705,7 @@ export const WebVideoScraperView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3 shrink-0">
-          {scanResult && (
+          {(scanResult || videoAlbums.length > 0) && (
             <button
               onClick={() => {
                 clearWebScraperState();
@@ -424,7 +740,7 @@ export const WebVideoScraperView: React.FC = () => {
       {/* Input URL Section */}
       <div className="glass-panel p-4 sm:p-6 rounded-3xl border border-border space-y-4">
         <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
-          <div className="sm:col-span-6 md:col-span-6 lg:col-span-7 space-y-1.5">
+          <div className="sm:col-span-6 md:col-span-6 lg:col-span-6 space-y-1.5">
             <div className="h-5 flex items-center">
               <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider truncate">
                 {t.urlLabel}
@@ -434,12 +750,12 @@ export const WebVideoScraperView: React.FC = () => {
               type="url"
               value={url}
               onChange={e => handleUrlChange(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleScanPage()}
+              onKeyDown={e => e.key === 'Enter' && handleScanPage(false)}
               placeholder={t.urlPlaceholder}
               className="w-full h-12 bg-surface-elevated border border-border focus:border-violet-500 text-slate-100 text-xs sm:text-sm rounded-2xl px-4 outline-none transition-colors shadow-inner"
             />
           </div>
-          <div className="sm:col-span-3 md:col-span-3 lg:col-span-2 space-y-1.5">
+          <div className="sm:col-span-2 md:col-span-2 lg:col-span-2 space-y-1.5">
             <div className="h-5 flex items-center">
               <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider truncate whitespace-nowrap" title={t.limitTitle}>
                 {t.limitLabel}
@@ -456,14 +772,11 @@ export const WebVideoScraperView: React.FC = () => {
               className="w-full h-12 bg-surface-elevated border border-border focus:border-violet-500 text-slate-100 text-xs sm:text-sm rounded-2xl px-3 outline-none transition-colors shadow-inner text-center font-medium"
             />
           </div>
-          <div className="sm:col-span-3 md:col-span-3 lg:col-span-3 space-y-1.5">
-            <div className="h-5 hidden sm:flex items-center select-none" aria-hidden="true">
-              <span className="invisible text-xs font-bold uppercase">&nbsp;</span>
-            </div>
+          <div className="sm:col-span-4 md:col-span-4 lg:col-span-4 flex items-center gap-2">
             <button
-              onClick={handleScanPage}
+              onClick={() => handleScanPage(false)}
               disabled={isScanning || !url.trim()}
-              className="w-full h-12 px-6 rounded-2xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-violet-600/20 disabled:opacity-50 transition-all shrink-0 cursor-pointer"
+              className="flex-1 h-12 px-4 rounded-2xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-violet-600/20 disabled:opacity-50 transition-all cursor-pointer"
             >
               {isScanning ? (
                 <>
@@ -477,6 +790,19 @@ export const WebVideoScraperView: React.FC = () => {
                 </>
               )}
             </button>
+
+            {videoAlbums.length > 0 && (
+              <button
+                type="button"
+                onClick={() => handleScanPage(true)}
+                disabled={isScanning || !url.trim()}
+                className="h-12 px-3.5 rounded-2xl bg-surface-elevated hover:bg-violet-500/20 text-violet-300 border border-violet-500/40 font-bold text-xs flex items-center justify-center gap-1.5 transition-all shrink-0 cursor-pointer disabled:opacity-50"
+                title={isEn ? 'Scan URL and add as another Video Album to your selection' : 'Escanear URL e adicionar como mais um Álbum de Vídeos na seleção'}
+              >
+                <FolderPlus size={15} />
+                <span className="hidden xl:inline">{isEn ? '+ Add Album' : '+ Álbum'}</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -489,7 +815,7 @@ export const WebVideoScraperView: React.FC = () => {
       </div>
 
       {/* Scanned Results Toolbar & Actions */}
-      {scanResult && (
+      {(scanResult || videoAlbums.length > 0) && (
         <div className="glass-panel p-4 sm:p-5 rounded-3xl border border-border space-y-4">
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             {/* Folder Destination & Suggestion */}
@@ -505,7 +831,6 @@ export const WebVideoScraperView: React.FC = () => {
                   placeholder={t.folderPlaceholder}
                   className="bg-surface-elevated border border-border focus:border-brand-500 text-slate-100 text-xs font-bold rounded-xl px-3 py-1.5 outline-none w-48"
                 />
-                {/* Folder Select Dropdown Helper */}
                 {videoFolders.length > 0 && (
                   <select
                     onChange={e => e.target.value && setWebScraperState({ targetFolder: e.target.value })}
@@ -521,142 +846,411 @@ export const WebVideoScraperView: React.FC = () => {
                 )}
               </div>
 
-              {scanResult.page_title && (
-                <span className="text-[11px] text-slate-400 truncate max-w-xs font-medium">
-                  {scanResult.page_title}
-                </span>
-              )}
-            </div>
-
-            {/* Selection & Batch Download Buttons */}
-            <div className="flex flex-wrap items-center gap-2">
-              {newDisplayedVideos.length > 0 && (
+              {/* View Mode Switcher: Video Albums vs Flat Video Grid */}
+              <div className="flex items-center bg-slate-950/90 p-1 rounded-xl border border-border text-xs font-bold">
                 <button
-                  onClick={handleSelectOnlyNew}
-                  className="px-2.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface-hover text-emerald-300 border border-emerald-500/40 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
-                  title={t.selectOnlyNewTitle}
+                  type="button"
+                  onClick={() => setWebScraperState({ viewLayout: 'albums' })}
+                  className={`px-3 py-1 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
+                    viewLayout === 'albums'
+                      ? 'bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
                 >
-                  <CheckCircle2 size={13} className="text-emerald-400" />
-                  <span>{t.selectOnlyNew} ({newDisplayedVideos.length})</span>
+                  <Layers size={13} />
+                  <span>{isEn ? `Video Albums (${videoAlbums.length})` : `Álbuns de Vídeos (${videoAlbums.length})`}</span>
                 </button>
-              )}
-
-              <button
-                onClick={handleSelectAll}
-                className="px-2.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface-hover text-slate-200 border border-border text-xs font-medium flex items-center gap-1.5 transition-colors"
-              >
-                {isAllDisplayedSelected ? (
-                  <>
-                    <CheckSquare size={13} className="text-brand-400" />
-                    <span>{t.deselectAll} ({displayedVideos.length})</span>
-                  </>
-                ) : (
-                  <>
-                    <Square size={13} />
-                    <span>{t.selectAll} ({displayedVideos.length})</span>
-                  </>
-                )}
-              </button>
-
-              <span className="text-xs font-mono font-bold text-violet-300 px-2.5 py-1 rounded bg-violet-950/60 border border-violet-500/30">
-                {selectedIds.length} {t.selected}
-              </span>
-
-              <button
-                onClick={handleBatchSave}
-                disabled={selectedIds.length === 0 || isBatchSaving}
-                className="px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-bold text-xs flex items-center gap-2 shadow-md shadow-violet-600/30 disabled:opacity-50 transition-all"
-              >
-                {isBatchSaving ? (
-                  <>
-                    <Loader2 size={13} className="animate-spin" />
-                    <span>{t.queuing}</span>
-                  </>
-                ) : (
-                  <>
-                    <Save size={13} />
-                    <span>{t.downloadSelected} ({selectedIds.length})</span>
-                  </>
-                )}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setWebScraperState({ viewLayout: 'videos' })}
+                  className={`px-3 py-1 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
+                    viewLayout === 'videos'
+                      ? 'bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <LayoutGrid size={13} />
+                  <span>{isEn ? `All Videos Grid (${allVideos.length})` : `Grade de Vídeos (${allVideos.length})`}</span>
+                </button>
+              </div>
             </div>
+
+            {/* Selection & Batch Download Buttons (Context-aware for Albums Mode vs Videos Mode) */}
+            {viewLayout === 'albums' ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (selectedAlbumIds.length === videoAlbums.length) {
+                      setWebScraperState({ selectedAlbumIds: [] });
+                    } else {
+                      setWebScraperState({ selectedAlbumIds: videoAlbums.map(a => a.id) });
+                    }
+                  }}
+                  className="px-2.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface-hover text-slate-200 border border-border text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  {selectedAlbumIds.length === videoAlbums.length && videoAlbums.length > 0 ? (
+                    <>
+                      <CheckSquare size={13} className="text-brand-400" />
+                      <span>{t.deselectAll} ({videoAlbums.length})</span>
+                    </>
+                  ) : (
+                    <>
+                      <Square size={13} />
+                      <span>{t.selectAll} ({videoAlbums.length})</span>
+                    </>
+                  )}
+                </button>
+
+                <span className="text-xs font-mono font-bold text-violet-300 px-2.5 py-1 rounded bg-violet-950/60 border border-violet-500/30">
+                  {selectedAlbumIds.length} {isEn ? 'albums' : 'álbuns'} • {selectedVideosFromSelectedAlbums.length} {isEn ? 'videos' : 'vídeos'}
+                </span>
+
+                <button
+                  type="button"
+                  onClick={handleDownloadSelectedVideoAlbums}
+                  disabled={selectedVideosFromSelectedAlbums.length === 0 || isBatchSaving}
+                  className="px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-bold text-xs flex items-center gap-2 shadow-md shadow-violet-600/30 disabled:opacity-50 transition-all cursor-pointer"
+                >
+                  {isBatchSaving ? (
+                    <>
+                      <Loader2 size={13} className="animate-spin" />
+                      <span>{t.queuing}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save size={13} />
+                      <span>
+                        {isEn
+                          ? `Download Selected (${selectedVideosFromSelectedAlbums.length} videos)`
+                          : `Baixar Selecionados (${selectedVideosFromSelectedAlbums.length} vídeos)`}
+                      </span>
+                    </>
+                  )}
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                {newDisplayedVideos.length > 0 && (
+                  <button
+                    onClick={handleSelectOnlyNew}
+                    className="px-2.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface-hover text-emerald-300 border border-emerald-500/40 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                    title={t.selectOnlyNewTitle}
+                  >
+                    <CheckCircle2 size={13} className="text-emerald-400" />
+                    <span>{t.selectOnlyNew} ({newDisplayedVideos.length})</span>
+                  </button>
+                )}
+
+                <button
+                  onClick={handleSelectAll}
+                  className="px-2.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface-hover text-slate-200 border border-border text-xs font-medium flex items-center gap-1.5 transition-colors"
+                >
+                  {isAllDisplayedSelected ? (
+                    <>
+                      <CheckSquare size={13} className="text-brand-400" />
+                      <span>{t.deselectAll} ({displayedVideos.length})</span>
+                    </>
+                  ) : (
+                    <>
+                      <Square size={13} />
+                      <span>{t.selectAll} ({displayedVideos.length})</span>
+                    </>
+                  )}
+                </button>
+
+                <span className="text-xs font-mono font-bold text-violet-300 px-2.5 py-1 rounded bg-violet-950/60 border border-violet-500/30">
+                  {selectedIds.length} {t.selected}
+                </span>
+
+                <button
+                  onClick={handleBatchSave}
+                  disabled={selectedIds.length === 0 || isBatchSaving}
+                  className="px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-bold text-xs flex items-center gap-2 shadow-md shadow-violet-600/30 disabled:opacity-50 transition-all"
+                >
+                  {isBatchSaving ? (
+                    <>
+                      <Loader2 size={13} className="animate-spin" />
+                      <span>{t.queuing}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save size={13} />
+                      <span>{t.downloadSelected} ({selectedIds.length})</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
           </div>
 
-          {/* Segmented Section Filter Tabs */}
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-border/40">
-            <div className="flex flex-wrap items-center gap-2">
-              {/* Tab: Principais (Default) */}
-              <button
-                onClick={() => {
-                  setWebScraperState({ activeTab: 'main' });
-                  soundEffects.click(settings.soundEnabled);
-                }}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm ${
-                  activeTab === 'main'
-                    ? 'bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-violet-600/30 ring-1 ring-violet-400/40'
-                    : 'bg-surface-elevated hover:bg-surface-hover text-slate-300 border border-border'
-                }`}
-              >
-                <Film size={13} className={activeTab === 'main' ? 'text-white' : 'text-violet-400'} />
-                <span>{t.mainVideos} ({mainVideos.length})</span>
-              </button>
-
-              {/* Tab: Recomendados */}
-              {recommendedVideos.length > 0 && (
+          {/* Segmented Section Filter Tabs (when in flat videos layout) */}
+          {viewLayout === 'videos' && scanResult && (
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-border/40">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   onClick={() => {
-                    setWebScraperState({ activeTab: 'recommended' });
+                    setWebScraperState({ activeTab: 'main' });
                     soundEffects.click(settings.soundEnabled);
                   }}
                   className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm ${
-                    activeTab === 'recommended'
-                      ? 'bg-gradient-to-r from-amber-600 to-orange-600 text-white shadow-amber-600/30 ring-1 ring-amber-400/40'
+                    activeTab === 'main'
+                      ? 'bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-violet-600/30 ring-1 ring-violet-400/40'
                       : 'bg-surface-elevated hover:bg-surface-hover text-slate-300 border border-border'
                   }`}
                 >
-                  <Sparkles size={13} className={activeTab === 'recommended' ? 'text-white' : 'text-amber-400'} />
-                  <span>{t.recommendedVideos} ({recommendedVideos.length})</span>
+                  <Film size={13} className={activeTab === 'main' ? 'text-white' : 'text-violet-400'} />
+                  <span>{t.mainVideos} ({mainVideos.length})</span>
                 </button>
-              )}
 
-              {/* Tab: Todos */}
-              <button
-                onClick={() => {
-                  setWebScraperState({ activeTab: 'all' });
-                  soundEffects.click(settings.soundEnabled);
-                }}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm ${
-                  activeTab === 'all'
-                    ? 'bg-slate-700 text-white shadow-slate-700/30 ring-1 ring-slate-400/30'
-                    : 'bg-surface-elevated hover:bg-surface-hover text-slate-300 border border-border'
-                }`}
-              >
-                <span>{t.allVideos} ({allVideos.length})</span>
-              </button>
-            </div>
+                {recommendedVideos.length > 0 && (
+                  <button
+                    onClick={() => {
+                      setWebScraperState({ activeTab: 'recommended' });
+                      soundEffects.click(settings.soundEnabled);
+                    }}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm ${
+                      activeTab === 'recommended'
+                        ? 'bg-gradient-to-r from-amber-600 to-orange-600 text-white shadow-amber-600/30 ring-1 ring-amber-400/40'
+                        : 'bg-surface-elevated hover:bg-surface-hover text-slate-300 border border-border'
+                    }`}
+                  >
+                    <Sparkles size={13} className={activeTab === 'recommended' ? 'text-white' : 'text-amber-400'} />
+                    <span>{t.recommendedVideos} ({recommendedVideos.length})</span>
+                  </button>
+                )}
 
-            <div className="flex flex-wrap items-center gap-2.5 text-[11px] text-slate-400 font-medium">
-              {totalSavedCount > 0 && (
-                <span className="px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 font-bold flex items-center gap-1 shadow-sm">
-                  <Check size={11} className="text-emerald-400" />
-                  <span>{totalSavedCount} {t.savedCount}</span>
+                <button
+                  onClick={() => {
+                    setWebScraperState({ activeTab: 'all' });
+                    soundEffects.click(settings.soundEnabled);
+                  }}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm ${
+                    activeTab === 'all'
+                      ? 'bg-slate-700 text-white shadow-slate-700/30 ring-1 ring-slate-400/30'
+                      : 'bg-surface-elevated hover:bg-surface-hover text-slate-300 border border-border'
+                  }`}
+                >
+                  <span>{t.allVideos} ({allVideos.length})</span>
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2.5 text-[11px] text-slate-400 font-medium">
+                {totalSavedCount > 0 && (
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 font-bold flex items-center gap-1 shadow-sm">
+                    <Check size={11} className="text-emerald-400" />
+                    <span>{totalSavedCount} {t.savedCount}</span>
+                  </span>
+                )}
+                {totalNewCount > 0 && (
+                  <span className="px-2 py-0.5 rounded-full bg-violet-950/80 border border-violet-500/40 text-violet-300 font-bold">
+                    {totalNewCount} {t.newCount}
+                  </span>
+                )}
+                <span>
+                  {t.displaying} <span className="font-bold text-slate-200">{displayedVideos.length}</span> {activeTab === 'main' ? t.mainOf : activeTab === 'recommended' ? t.recommendedOf : t.ofTotal}
                 </span>
-              )}
-              {totalNewCount > 0 && (
-                <span className="px-2 py-0.5 rounded-full bg-violet-950/80 border border-violet-500/40 text-violet-300 font-bold">
-                  {totalNewCount} {t.newCount}
-                </span>
-              )}
-              <span>
-                {t.displaying} <span className="font-bold text-slate-200">{displayedVideos.length}</span> {activeTab === 'main' ? t.mainOf : activeTab === 'recommended' ? t.recommendedOf : t.ofTotal}
-              </span>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
 
-      {/* Videos Grid */}
-      {scanResult && (
+      {/* VIEW MODE 1: VIDEO ALBUMS / COLLECTIONS (Enter album -> select videos -> return & download selected) */}
+      {viewLayout === 'albums' && videoAlbums.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {videoAlbums.map((vAlbum) => {
+            const isAlbumSelected = selectedAlbumIds.includes(vAlbum.id);
+            const selectedCount = vAlbum.selectedVideoIds.length;
+            const totalCount = vAlbum.videos.length;
+            const isCustomSubset = selectedCount > 0 && selectedCount < totalCount;
+            const savedInAlbumCount = vAlbum.videos.filter(v => isVideoSavedInGallery(v)).length;
+            const previewThumbs = vAlbum.videos.slice(0, 4).map(v => v.thumbnail_url).filter(Boolean);
+
+            return (
+              <div
+                key={vAlbum.id}
+                className={`bg-surface-elevated border rounded-2xl p-4 flex flex-col justify-between transition-all group shadow-md relative ${
+                  isAlbumSelected
+                    ? 'border-violet-500 bg-violet-950/20 shadow-glow-brand ring-1 ring-violet-500/30'
+                    : 'border-border hover:border-violet-500/40'
+                }`}
+              >
+                <div className="space-y-3">
+                  {/* Album Mosaic / Cover Preview */}
+                  <div
+                    onClick={() => openVideoAlbumInspector(vAlbum)}
+                    className="aspect-video w-full rounded-xl overflow-hidden bg-slate-950/90 border border-border relative cursor-pointer group/thumb"
+                    title={isEn ? 'Click to open album and select which videos to download' : 'Clique para entrar no álbum e escolher quais vídeos baixar'}
+                  >
+                    {/* Checkbox to select/deselect entire Video Album */}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSelectVideoAlbum(vAlbum.id);
+                      }}
+                      className={`absolute top-2.5 left-2.5 z-20 p-1.5 rounded-lg backdrop-blur-md transition-all border ${
+                        isAlbumSelected
+                          ? 'bg-violet-600 text-white border-violet-400 shadow-md'
+                          : 'bg-black/60 text-white/70 hover:text-white hover:bg-black/90 border-white/20'
+                      }`}
+                    >
+                      {isAlbumSelected ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                    </button>
+
+                    {/* Mosaic of up to 4 video thumbnails */}
+                    {previewThumbs.length >= 4 ? (
+                      <div className="grid grid-cols-2 grid-rows-2 w-full h-full gap-0.5 bg-slate-900">
+                        {previewThumbs.slice(0, 4).map((thumb, idx) => (
+                          <img
+                            key={idx}
+                            src={thumb}
+                            alt=""
+                            loading="lazy"
+                            className="w-full h-full object-cover group-hover/thumb:scale-105 transition-transform duration-300"
+                          />
+                        ))}
+                      </div>
+                    ) : vAlbum.thumbnailUrl ? (
+                      <img
+                        src={vAlbum.thumbnailUrl}
+                        alt={vAlbum.title}
+                        loading="lazy"
+                        className="w-full h-full object-cover group-hover/thumb:scale-105 transition-transform duration-300"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center text-slate-500 gap-1">
+                        <Film className="w-8 h-8 opacity-50" />
+                      </div>
+                    )}
+
+                    {/* Badge: Source Type */}
+                    <div className="absolute top-2.5 right-2.5 z-10">
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold border backdrop-blur-md ${
+                          vAlbum.sourceType === 'recommended'
+                            ? 'bg-amber-950/90 text-amber-300 border-amber-500/40'
+                            : vAlbum.sourceType === 'sub_album'
+                            ? 'bg-cyan-950/90 text-cyan-300 border-cyan-500/40'
+                            : 'bg-violet-950/90 text-violet-300 border-violet-500/40'
+                        }`}
+                      >
+                        {vAlbum.sourceType === 'recommended'
+                          ? t.badgeRecommended
+                          : vAlbum.sourceType === 'sub_album'
+                          ? (isEn ? 'Inspected Page' : 'Página Inspecionada')
+                          : t.badgePrimary}
+                      </span>
+                    </div>
+
+                    {/* Bottom Overlay Pill: Open & Select Videos */}
+                    <div className="absolute inset-x-0 bottom-0 p-2.5 bg-gradient-to-t from-black/90 via-black/60 to-transparent flex items-center justify-between">
+                      <span className="px-2.5 py-1 rounded-lg bg-violet-600/90 hover:bg-violet-500 text-white text-[11px] font-bold flex items-center gap-1.5 shadow-lg">
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>{isEn ? 'Open & Select Videos' : 'Abrir & Selecionar Vídeos'}</span>
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-black/80 text-slate-200 font-mono text-[10px] font-bold border border-white/10">
+                        {totalCount} {isEn ? 'videos' : 'vídeos'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Title & Subset Selection Status */}
+                  <div className="space-y-1.5">
+                    <h3
+                      onClick={() => openVideoAlbumInspector(vAlbum)}
+                      className="font-bold text-slate-100 hover:text-violet-300 text-sm line-clamp-2 cursor-pointer transition-colors"
+                      title={vAlbum.title}
+                    >
+                      {vAlbum.title}
+                    </h3>
+
+                    {/* Subset selection indicator */}
+                    <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-violet-950/50 border border-violet-500/30 text-[11px] font-semibold text-violet-200">
+                      <button
+                        type="button"
+                        onClick={() => openVideoAlbumInspector(vAlbum)}
+                        className="flex items-center gap-1.5 hover:underline truncate cursor-pointer"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span>
+                          {isEn
+                            ? `${selectedCount} of ${totalCount} videos selected`
+                            : `${selectedCount} de ${totalCount} vídeos selecionados`}
+                        </span>
+                      </button>
+                      {isCustomSubset && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const updated = videoAlbums.map(a =>
+                              a.id === vAlbum.id ? { ...a, selectedVideoIds: a.videos.map(v => v.id) } : a
+                            );
+                            setWebScraperState({ videoAlbums: updated });
+                          }}
+                          className="text-[10px] text-slate-400 hover:text-white px-1.5 py-0.5 rounded bg-black/40"
+                          title={isEn ? 'Select all videos in this album' : 'Selecionar todos os vídeos deste álbum'}
+                        >
+                          {isEn ? 'All' : 'Todos'}
+                        </button>
+                      )}
+                    </div>
+
+                    {savedInAlbumCount > 0 && (
+                      <div className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
+                        <Check size={11} />
+                        <span>
+                          {savedInAlbumCount} {isEn ? 'already saved in gallery' : 'já salvos na galeria'}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Card Actions Footer */}
+                <div className="flex items-center gap-2 mt-4 pt-3 border-t border-border">
+                  <button
+                    type="button"
+                    onClick={() => openVideoAlbumInspector(vAlbum)}
+                    className="flex-1 py-2 px-3 rounded-xl bg-surface hover:bg-violet-500/20 text-slate-200 hover:text-violet-200 border border-border hover:border-violet-500/40 text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                  >
+                    <Eye className="w-3.5 h-3.5 text-violet-400" />
+                    <span>{isEn ? 'Select Videos' : 'Escolher Vídeos'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={selectedCount === 0 || isBatchSaving}
+                    onClick={() => handleDownloadSingleVideoAlbum(vAlbum)}
+                    className="flex-1 py-2 px-3 rounded-xl bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/40 text-xs font-bold flex items-center justify-center gap-1.5 transition-all disabled:opacity-50 cursor-pointer"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>
+                      {isEn ? `Save (${selectedCount})` : `Baixar (${selectedCount})`}
+                    </span>
+                  </button>
+
+                  {videoAlbums.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={(e) => handleRemoveVideoAlbum(vAlbum.id, e)}
+                      className="p-2 rounded-xl bg-surface hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 border border-border hover:border-rose-500/40 transition-all cursor-pointer"
+                      title={isEn ? 'Remove this video album from list' : 'Remover este álbum de vídeos da lista'}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* VIEW MODE 2: FLAT VIDEOS GRID */}
+      {(viewLayout === 'videos' || videoAlbums.length === 0) && scanResult && (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
           {displayedVideos.map((item, idx) => {
             const isSelected = selectedIds.includes(item.id);
@@ -686,7 +1280,6 @@ export const WebVideoScraperView: React.FC = () => {
               >
                 {/* Thumbnail / Video Preview Area */}
                 <div className="relative aspect-video bg-black overflow-hidden">
-
                   {isPlaying ? (
                     <div
                       className="w-full h-full relative"
@@ -779,6 +1372,23 @@ export const WebVideoScraperView: React.FC = () => {
                     </span>
 
                     <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+                      {/* Inspect video target page as a Video Album */}
+                      {item.url && (
+                        <button
+                          type="button"
+                          onClick={(e) => handleInspectVideoPageAsAlbum(item, e)}
+                          disabled={scanningSubAlbumUrl === item.url}
+                          className="p-1.5 rounded-lg bg-indigo-950/80 hover:bg-indigo-600 text-indigo-300 hover:text-white border border-indigo-500/40 transition-colors shadow-sm"
+                          title={isEn ? 'Open this video page as an Album to select videos' : 'Abrir página deste vídeo como Álbum para selecionar vídeos'}
+                        >
+                          {scanningSubAlbumUrl === item.url ? (
+                            <Loader2 size={13} className="animate-spin" />
+                          ) : (
+                            <Layers size={13} />
+                          )}
+                        </button>
+                      )}
+
                       {/* Individual Save Button */}
                       <button
                         onClick={() => handleInitiateSingleSave(item)}
@@ -843,6 +1453,341 @@ export const WebVideoScraperView: React.FC = () => {
             );
           })}
         </div>
+      )}
+
+      {/* Modal de Inspeção do Álbum de Vídeos (Entrar no Álbum -> Selecionar Vídeos -> Voltar aos Álbuns) */}
+      {inspectingAlbum && (
+        <ModalPortal>
+          <div
+            className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-xl flex flex-col p-2 sm:p-5 overflow-hidden animate-in fade-in duration-200"
+            onClick={handleConfirmVideoAlbumSelection}
+          >
+            <div
+              className="relative w-full max-w-7xl mx-auto flex-1 flex flex-col bg-slate-900/95 border border-border rounded-3xl overflow-hidden shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Modal Header */}
+              <div className="p-4 sm:p-5 border-b border-border bg-slate-950/70 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="flex items-start gap-3 min-w-0">
+                  <button
+                    type="button"
+                    onClick={handleConfirmVideoAlbumSelection}
+                    className="px-3 py-2 rounded-xl bg-surface-elevated hover:bg-violet-600/20 text-slate-200 hover:text-violet-300 border border-border hover:border-violet-500/40 text-xs font-bold flex items-center gap-1.5 transition-all shrink-0 cursor-pointer"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                    <span>{isEn ? 'Back to Video Albums' : 'Voltar aos Álbuns'}</span>
+                  </button>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-violet-500/20 text-violet-300 border border-violet-500/40">
+                        {isEn ? 'VIDEO ALBUM SELECTOR' : 'SELETOR DE VÍDEOS DO ÁLBUM'}
+                      </span>
+                      <span className="text-xs font-mono font-bold text-emerald-400">
+                        {draftAlbumSelectedIds.size} / {inspectingAlbum.videos.length} {isEn ? 'selected' : 'selecionados'}
+                      </span>
+                    </div>
+                    <h2 className="text-sm sm:text-base font-black text-white truncate mt-1" title={inspectingAlbum.title}>
+                      {inspectingAlbum.title}
+                    </h2>
+                    <p className="text-[11px] text-slate-400 font-mono truncate">{inspectingAlbum.url}</p>
+                  </div>
+                </div>
+
+                {/* Selection & Filter Controls inside Album */}
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Search input inside Album */}
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={inspectorSearchQuery}
+                      onChange={(e) => setInspectorSearchQuery(e.target.value)}
+                      placeholder={isEn ? 'Filter videos...' : 'Filtrar vídeos...'}
+                      className="pl-8 pr-2.5 py-1.5 rounded-xl bg-slate-950 border border-border text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-violet-500 w-36 sm:w-44"
+                    />
+                  </div>
+
+                  {/* Quick Filter Pills: All / Only New / HD */}
+                  <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-border text-[11px] font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setInspectorSectionFilter('all')}
+                      className={`px-2 py-1 rounded-lg transition-all cursor-pointer ${
+                        inspectorSectionFilter === 'all' ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {isEn ? 'All' : 'Todos'} ({inspectingAlbum.videos.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setInspectorSectionFilter('new')}
+                      className={`px-2 py-1 rounded-lg transition-all cursor-pointer ${
+                        inspectorSectionFilter === 'new' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {isEn ? 'New' : 'Novos'} ({inspectingAlbum.videos.filter(v => !isVideoSavedInGallery(v)).length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setInspectorSectionFilter('hd')}
+                      className={`px-2 py-1 rounded-lg transition-all cursor-pointer ${
+                        inspectorSectionFilter === 'hd' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      HD
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const onlyNewIds = inspectingAlbum.videos
+                        .filter(v => !isVideoSavedInGallery(v))
+                        .map(v => v.id);
+                      setDraftAlbumSelectedIds(new Set(onlyNewIds));
+                    }}
+                    className="px-2.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface-hover text-emerald-300 border border-emerald-500/40 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>{t.selectOnlyNew}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setDraftAlbumSelectedIds(new Set(inspectingAlbum.videos.map(v => v.id)))}
+                    className="px-2.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface-hover text-slate-200 border border-border text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <CheckSquare className="w-3.5 h-3.5 text-violet-400" />
+                    <span>{t.selectAll}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setDraftAlbumSelectedIds(new Set())}
+                    className="px-2.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface-hover text-slate-200 border border-border text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Square className="w-3.5 h-3.5 text-slate-400" />
+                    <span>{t.deselectAll}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = new Set<string>();
+                      inspectingAlbum.videos.forEach(v => {
+                        if (!draftAlbumSelectedIds.has(v.id)) next.add(v.id);
+                      });
+                      setDraftAlbumSelectedIds(next);
+                    }}
+                    className="px-2.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface-hover text-slate-300 border border-border text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Filter className="w-3.5 h-3.5 text-amber-400" />
+                    <span>{isEn ? 'Invert' : 'Inverter'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleConfirmVideoAlbumSelection}
+                    className="p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Videos Grid inside Album Inspector */}
+              <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                  {inspectingAlbum.videos
+                    .filter((vItem) => {
+                      if (inspectorSearchQuery.trim()) {
+                        const q = inspectorSearchQuery.trim().toLowerCase();
+                        if (!(vItem.title || '').toLowerCase().includes(q)) return false;
+                      }
+                      if (inspectorSectionFilter === 'new') {
+                        return !isVideoSavedInGallery(vItem);
+                      }
+                      if (inspectorSectionFilter === 'hd') {
+                        const qHint = (vItem.quality_hint || vItem.resolution || '').toLowerCase();
+                        return (vItem.height || 0) >= 720 || qHint.includes('hd') || qHint.includes('1080') || qHint.includes('720') || qHint.includes('4k') || !vItem.height;
+                      }
+                      return true;
+                    })
+                    .map((vItem, idx) => {
+                      const isVidSelected = draftAlbumSelectedIds.has(vItem.id);
+                      const isPlaying = playingVideoId === vItem.id;
+                      const isSaving = isVideoSaving(vItem);
+                      const savedStatus = checkItemSavedStatus({
+                        url: vItem.url || vItem.stream_url,
+                        title: vItem.title,
+                        mediaType: 'video'
+                      });
+
+                      return (
+                        <div
+                          key={vItem.id}
+                          onClick={() => {
+                            const next = new Set(draftAlbumSelectedIds);
+                            if (next.has(vItem.id)) next.delete(vItem.id);
+                            else next.add(vItem.id);
+                            setDraftAlbumSelectedIds(next);
+                          }}
+                          className={`group relative rounded-2xl border-2 overflow-hidden cursor-pointer transition-all flex flex-col justify-between bg-slate-950 ${
+                            isVidSelected
+                              ? 'border-violet-500 ring-2 ring-violet-500/30 shadow-lg'
+                              : 'border-slate-800/80 opacity-65 hover:opacity-95 hover:border-slate-600'
+                          }`}
+                        >
+                          <div className="relative aspect-video bg-black overflow-hidden">
+                            {isPlaying ? (
+                              <div className="w-full h-full" onClick={e => e.stopPropagation()}>
+                                <video
+                                  src={getProxiedStreamUrl(vItem.stream_url || vItem.url, vItem.url)}
+                                  controls
+                                  autoPlay
+                                  playsInline
+                                  className="w-full h-full object-contain"
+                                />
+                              </div>
+                            ) : (
+                              <img
+                                src={vItem.thumbnail_url}
+                                alt={vItem.title}
+                                loading="lazy"
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              />
+                            )}
+
+                            {/* Checkbox badge */}
+                            <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 z-10">
+                              <span
+                                className={`w-6 h-6 rounded-lg flex items-center justify-center border transition-all shadow ${
+                                  isVidSelected
+                                    ? 'bg-violet-600 border-violet-300 text-white'
+                                    : 'bg-black/70 border-white/25 text-white/70'
+                                }`}
+                              >
+                                {isVidSelected ? <Check className="w-3.5 h-3.5 stroke-[3]" /> : <span className="text-[10px] font-mono">{idx + 1}</span>}
+                              </span>
+                              {savedStatus.isSaved && (
+                                <span className="px-2 py-0.5 rounded-full bg-emerald-600/90 text-white text-[9px] font-bold">
+                                  {t.savedVideo}
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Quality Badge */}
+                            <span className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded-full bg-violet-950/80 backdrop-blur-md border border-violet-500/40 text-[9px] font-mono font-bold text-violet-200">
+                              {vItem.quality_hint || '1080p HD'}
+                            </span>
+
+                            {/* Play Preview Toggle Button */}
+                            {vItem.stream_url && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setPlayingVideoId(isPlaying ? null : vItem.id);
+                                }}
+                                className="absolute bottom-2 left-2 px-2 py-1 rounded-lg bg-black/80 hover:bg-violet-600 text-white text-[10px] font-bold flex items-center gap-1 border border-white/15 z-10"
+                              >
+                                {isPlaying ? <Pause size={11} /> : <Play size={11} />}
+                                <span>{isPlaying ? t.pauseVideo : t.playVideo}</span>
+                              </button>
+                            )}
+
+                            {vItem.duration && (
+                              <span className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded bg-black/80 text-[10px] font-mono font-bold text-slate-200">
+                                {vItem.duration}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="p-3 flex items-center justify-between gap-2">
+                            <h4 className="text-xs font-bold text-slate-200 line-clamp-2 flex-1" title={vItem.title}>
+                              {vItem.title}
+                            </h4>
+                            <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                              {vItem.url && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => handleInspectVideoPageAsAlbum(vItem, e)}
+                                  disabled={scanningSubAlbumUrl === vItem.url}
+                                  className="p-1.5 rounded-lg bg-indigo-950/80 hover:bg-indigo-600 text-indigo-300 hover:text-white border border-indigo-500/40 transition-colors"
+                                  title={isEn ? 'Inspect this video page as a sub-album' : 'Inspecionar página deste vídeo como sub-álbum'}
+                                >
+                                  {scanningSubAlbumUrl === vItem.url ? (
+                                    <Loader2 size={12} className="animate-spin" />
+                                  ) : (
+                                    <Layers size={12} />
+                                  )}
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => handleInitiateSingleSave(vItem)}
+                                disabled={isSaving}
+                                className="p-1.5 rounded-lg bg-violet-900/80 hover:bg-violet-700 text-violet-200 hover:text-white border border-violet-500/40 transition-colors"
+                                title={isEn ? 'Save only this video now' : 'Salvar apenas este vídeo agora'}
+                              >
+                                {isSaving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+
+              {/* Modal Sticky Footer */}
+              <div className="p-4 sm:p-5 border-t border-border bg-slate-950/90 flex flex-col sm:flex-row items-center justify-between gap-3">
+                <div className="text-xs text-slate-300 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>
+                    {isEn
+                      ? `${draftAlbumSelectedIds.size} of ${inspectingAlbum.videos.length} videos selected in this album.`
+                      : `${draftAlbumSelectedIds.size} de ${inspectingAlbum.videos.length} vídeos selecionados neste álbum.`}
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto justify-end">
+                  <button
+                    type="button"
+                    onClick={handleConfirmVideoAlbumSelection}
+                    className="px-4 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-violet-600/30 transition-all cursor-pointer"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>
+                      {isEn
+                        ? `Confirm Selection (${draftAlbumSelectedIds.size}) & Back to Albums`
+                        : `Confirmar Seleção (${draftAlbumSelectedIds.size}) e Voltar aos Álbuns`}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={draftAlbumSelectedIds.size === 0 || isBatchSaving}
+                    onClick={() => {
+                      const selectedArr = Array.from(draftAlbumSelectedIds);
+                      const targetAlb = inspectingAlbum;
+                      handleConfirmVideoAlbumSelection();
+                      handleDownloadSingleVideoAlbum(targetAlb, selectedArr);
+                    }}
+                    className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-600/30 transition-all cursor-pointer"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>
+                      {isEn
+                        ? `Download ${draftAlbumSelectedIds.size} Selected Videos Now`
+                        : `Baixar ${draftAlbumSelectedIds.size} Vídeos Selecionados Agora`}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </ModalPortal>
       )}
 
       {/* Duplicate Videos Warning / Confirmation Modal */}
@@ -923,16 +1868,22 @@ export const WebVideoScraperView: React.FC = () => {
       <FolderSelectModal
         isOpen={folderModalState.isOpen}
         onClose={() => setFolderModalState({ isOpen: false, mode: 'single' })}
-        title={folderModalState.mode === 'batch' 
-          ? t.saveCountVideosFolder.replace('{count}', String(selectedIds.length))
-          : t.folderModalSingleTitle}
+        title={
+          folderModalState.mode === 'album_batch'
+            ? t.saveCountVideosFolder.replace('{count}', String(folderModalState.customBatchVideos?.length || 0))
+            : folderModalState.mode === 'batch'
+            ? t.saveCountVideosFolder.replace('{count}', String(selectedIds.length))
+            : t.folderModalSingleTitle
+        }
         subtitle={t.folderModalSubtitle}
         existingFolders={videoFolders.map(f => f.name)}
         defaultFolder={targetFolder.trim() || settings.defaultVideoFolder || 'Extraídos'}
         type="video"
         onConfirm={(selectedFolder: string) => {
           setWebScraperState({ targetFolder: selectedFolder });
-          if (folderModalState.mode === 'batch') {
+          if (folderModalState.mode === 'album_batch' && folderModalState.customBatchVideos) {
+            executeBatchSave(folderModalState.customBatchVideos, true, selectedFolder);
+          } else if (folderModalState.mode === 'batch') {
             const selectedVideos = scanResult?.videos.filter(v => selectedIds.includes(v.id)) || [];
             executeBatchSave(selectedVideos, true, selectedFolder);
           } else if (folderModalState.targetVideo) {
@@ -943,4 +1894,3 @@ export const WebVideoScraperView: React.FC = () => {
     </div>
   );
 };
-

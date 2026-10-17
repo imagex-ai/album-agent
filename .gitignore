@@ -83,3 +83,4 @@ frontend/dist/
 album-agent-main/
 frontend-mobile-preview/test-*.mjs
 refactor_album_detail.py
+scripts/poc_moment_intelligence/

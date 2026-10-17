@@ -128,3 +128,24 @@ def test_translation_leaf_values_are_valid_strings():
                 else:
                     assert isinstance(v, (str, int, float, list)), f"Leaf {curr} in {lang} must be string/number, got {type(v)}"
         check_leaves(dict_obj)
+
+
+def test_shorts_view_translation_keys_resolved():
+    """Ensures every t.shorts.<key> and t.globalSlider.<key> called in ShortsView.tsx exists in both language dictionaries."""
+    translations = _extract_translations_via_node()
+    shorts_path = os.path.join(os.path.dirname(__file__), "..", "frontend-mobile-preview", "src", "components", "views", "ShortsView.tsx")
+    with open(shorts_path, "r", encoding="utf-8") as f:
+        code = f.read()
+
+    used_shorts_keys = set(re.findall(r"\bt\.shorts\.([a-zA-Z0-9_]+)", code))
+    used_slider_keys = set(re.findall(r"\bt\.globalSlider\.([a-zA-Z0-9_]+)", code))
+    assert len(used_shorts_keys) >= 15, "ShortsView must use t.shorts.* translation keys"
+
+    for lang in ["pt-BR", "en-US"]:
+        shorts_dict = translations[lang]["shorts"]
+        slider_dict = translations[lang]["globalSlider"]
+        missing_shorts = [k for k in used_shorts_keys if k not in shorts_dict]
+        missing_slider = [k for k in used_slider_keys if k not in slider_dict]
+        assert not missing_shorts, f"Keys used in ShortsView missing in {lang} shorts: {missing_shorts}"
+        assert not missing_slider, f"Keys used in ShortsView missing in {lang} globalSlider: {missing_slider}"
+

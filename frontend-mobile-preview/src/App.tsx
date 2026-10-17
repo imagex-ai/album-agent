@@ -35,6 +35,7 @@ import { BatchQueueView } from './components/views/BatchQueueView';
 import { LiveMonitorView } from './components/views/LiveMonitorView';
 import { GalleryView } from './components/views/GalleryView';
 import { VideosView } from './components/views/VideosView';
+import { ShortsView } from './components/views/ShortsView';
 import { TrashView } from './components/views/TrashView';
 import { DuplicatesView } from './components/views/DuplicatesView';
 import { AlbumDetailView } from './components/views/AlbumDetailView';
@@ -94,7 +95,7 @@ export const App: React.FC = () => {
 
       const validViews = [
         'home', 'extractor', 'multi-album', 'web-video-scraper', 'batch-queue', 'live-monitor', 'gallery',
-        'videos', 'trash', 'duplicates', 'domain-patterns', 'job-history',
+        'videos', 'shorts', 'trash', 'duplicates', 'domain-patterns', 'job-history',
         'realtime-logs', 'performance-metrics', 'settings'
       ];
       if (validViews.includes(hash)) {
@@ -147,6 +148,8 @@ export const App: React.FC = () => {
         return <GalleryView />;
       case 'videos':
         return <VideosView />;
+      case 'shorts':
+        return <ShortsView />;
       case 'trash':
         return <TrashView />;
       case 'duplicates':
@@ -178,18 +181,20 @@ export const App: React.FC = () => {
         {/* Top Header */}
         <TopHeader onOpenMobileMenu={() => setMobileMenuOpen(true)} />
 
-        {/* Multi-Tab Session Bar with Smooth Touch Scroll */}
-        <TopTabBar />
+        {/* Multi-Tab Session Bar with Smooth Touch Scroll (hidden on mobile during full-screen Shorts) */}
+        <div className={currentView === 'shorts' ? 'hidden md:block shrink-0' : 'shrink-0'}>
+          <TopTabBar />
+        </div>
 
         {/* Active View Container with Unified Safe Viewport Scroll */}
         <main
           ref={mainContainerRef}
-          className="flex-1 overflow-y-auto relative touch-scroll pb-6"
+          className={`flex-1 relative ${currentView === 'shorts' ? 'overflow-hidden pb-0' : 'overflow-y-auto touch-scroll pb-6'}`}
         >
           <ErrorBoundary>
             <div
               key={`${currentView}-${activeTabId}`}
-              className={`${getViewTransitionClass(settings.viewTransitionAnimation || 'fade', settings.disableAllAnimations)} ${getSpeedClass(settings.animationSpeed || 'normal')} ${getDistanceClass(settings.animationDistance || 'normal')} min-h-full w-full`}
+              className={`${getViewTransitionClass(settings.viewTransitionAnimation || 'fade', settings.disableAllAnimations)} ${getSpeedClass(settings.animationSpeed || 'normal')} ${getDistanceClass(settings.animationDistance || 'normal')} ${currentView === 'shorts' ? 'h-full' : 'min-h-full'} w-full`}
             >
               {renderActiveView()}
             </div>

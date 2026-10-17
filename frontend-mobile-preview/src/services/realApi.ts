@@ -1,4 +1,4 @@
-import { Album, AlbumFolder, ExtractionJob, ImageItem, DomainPattern, VideoItem, VideoFolder, TrashItem, TrashStats, ScanPageVideosResponse, OllamaHealthStatus, OllamaModelInfo } from '../types';
+import { Album, AlbumFolder, ExtractionJob, ImageItem, DomainPattern, VideoItem, VideoFolder, TrashItem, TrashStats, ScanPageVideosResponse, OllamaHealthStatus, OllamaModelInfo, MultiAlbumPreviewImage } from '../types';
 import { colorPaletteCache } from './colorExtractor';
 
 export class BackendApiClient {
@@ -628,7 +628,12 @@ export class BackendApiClient {
             width: v.width || 0,
             height: v.height || 0,
             fps: v.fps || 0,
-            durationSeconds: v.duration_seconds || 0
+            durationSeconds: v.duration_seconds || 0,
+            introEnd: v.intro_end || 0,
+            highlightStart: v.highlight_start || 0,
+            highlightEnd: v.highlight_end || 0,
+            highlightScore: v.highlight_score || 0,
+            highlights: v.highlights || []
           };
         }),
         folders: (data.folders || []).map((f: any) => ({
@@ -1401,10 +1406,73 @@ export class BackendApiClient {
   }
 
   /**
+   * Pré-visualiza as imagens de um álbum específico no Multi-Album antes do salvamento/download.
+   */
+  async previewMultiAlbum(
+    album: { title: string; url: string; thumbnail_url?: string | null; source_type?: string }
+  ): Promise<{
+    success: boolean;
+    title: string;
+    url: string;
+    total: number;
+    images: MultiAlbumPreviewImage[];
+    error?: string;
+  }> {
+    try {
+      const res = await fetch('/api/multi-album/preview-album', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(album),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to preview album images');
+      }
+      const data = await res.json();
+      const rawImages = Array.isArray(data.images) ? data.images : [];
+      const referer = album.url || '';
+      const getSafeUrl = (u?: string) => {
+        if (!u) return '';
+        if (u.startsWith('http') && !u.includes('unsplash.com')) {
+          return `/api/proxy-image?url=${encodeURIComponent(u)}&referer=${encodeURIComponent(referer)}`;
+        }
+        return u;
+      };
+      const mappedImages: MultiAlbumPreviewImage[] = rawImages.map((img: any, idx: number) => ({
+        id: img.id || `img-${idx + 1}`,
+        position: img.position || idx + 1,
+        original_url: img.original_url || img.thumbnail_url || '',
+        thumbnail_url: getSafeUrl(img.thumbnail_url || img.original_url || ''),
+        width: img.width || 0,
+        height: img.height || 0,
+        file_size_bytes: img.file_size_bytes || 0,
+        media_type: img.media_type === 'gif' || (img.original_url || '').toLowerCase().endsWith('.gif') ? 'gif' : 'photo',
+        filename: img.filename || `image_${idx + 1}.jpg`,
+      }));
+      return {
+        success: true,
+        title: data.title || album.title,
+        url: data.url || album.url,
+        total: mappedImages.length,
+        images: mappedImages,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        title: album.title,
+        url: album.url,
+        total: 0,
+        images: [],
+        error: err.message || 'Server connection error',
+      };
+    }
+  }
+
+  /**
    * Envia múltiplos álbuns selecionados para extração e salvamento na biblioteca interna.
    */
   async batchSaveMultiAlbums(
-    albums: Array<{ title: string; url: string; thumbnail_url?: string | null; source_type?: string }>,
+    albums: Array<{ title: string; url: string; thumbnail_url?: string | null; source_type?: string; selected_image_urls?: string[] }>,
     folder?: string
   ): Promise<{ success: boolean; queued: number; target_folder?: string; message: string }> {
     try {
@@ -1502,7 +1570,7 @@ export class BackendApiClient {
    * Dispara o download de múltiplos álbuns em arquivo ZIP (individual ou unificado).
    */
   async batchDownloadMultiAlbumsZip(
-    albums: Array<{ title: string; url: string; thumbnail_url?: string | null }>,
+    albums: Array<{ title: string; url: string; thumbnail_url?: string | null; selected_image_urls?: string[] }>,
     format: 'unified' | 'individual' = 'unified'
   ): Promise<{ success: boolean; error?: string }> {
     try {
@@ -1540,9 +1608,17 @@ export class BackendApiClient {
   }
 
   /**
-   * Baixa um único álbum em arquivo ZIP direto.
+   * Baixa um único álbum em arquivo ZIP direto (respeitando subconjunto de imagens se houver).
    */
-  triggerSingleAlbumZipDownload(url: string, title?: string): void {
+  triggerSingleAlbumZipDownload(url: string, title?: string, selectedImageUrls?: string[]): void {
+    if (selectedImageUrls && selectedImageUrls.length > 0) {
+      // Utiliza POST via batchDownloadMultiAlbumsZip no formato individual para não estourar limite de URL em GET
+      this.batchDownloadMultiAlbumsZip(
+        [{ title: title || 'album', url, selected_image_urls: selectedImageUrls }],
+        'individual'
+      );
+      return;
+    }
     const params = new URLSearchParams({ url });
     if (title) params.append('title', title);
     const downloadUrl = `/api/multi-album/download-single-zip?${params.toString()}`;

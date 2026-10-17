@@ -34,7 +34,9 @@ import {
   Clapperboard,
   Calendar,
   Clock,
-  Heart
+  Heart,
+  Flame,
+  RefreshCw
 } from 'lucide-react';
 import { useAppStore, getCanonicalMediaFingerprint } from '../../store/useAppStore';
 import { GalleryViewMode, Album } from '../../types';
@@ -81,12 +83,18 @@ export const GalleryView: React.FC = () => {
     updateAlbum,
     openExportModal,
     openLightbox,
+    setSlideshowOpen,
+    setGlobalSliderConfig,
     settings,
-    highlightedItemId
+    highlightedItemId,
+    isRenewingBatchStreams,
+    batchRenewProgress,
+    refreshBatchAlbumStreams
   } = useAppStore();
   const isEn = settings?.language === 'en-US';
 
   const t: any = translations[settings.language].gallery || {};
+  const tGlobalSlider: any = translations[settings.language].globalSlider || {};
   const { uploadPhotoAlbum } = useAppStore();
 
   // Sync albums and folders on mount
@@ -236,8 +244,32 @@ export const GalleryView: React.FC = () => {
   }, [albums]);
   const paletteColors = ['#facc15', '#dc2626', '#3b82f6', '#10b981', '#ec4899', '#8b5cf6'];
 
+  // Verifica se o álbum contém vídeos (por mediaType, tags ou imagens de vídeo)
+  const isAlbumWithVideos = (album: Album) => {
+    return (
+      album.mediaType === 'video' ||
+      album.tags?.some(tag => tag.toLowerCase().includes('video') || tag.toLowerCase().includes('vídeo')) ||
+      (album.images || []).some(img => img.mediaType === 'video' || !!img.videoUrl || !!(img as any).videoStreamUrl || !!(img as any).is_video || /\.(mp4|webm|m4v)(\?|$)/i.test(img.originalUrl || ''))
+    );
+  };
 
+  // Botão de Renovar Streams: visível quando o filtro de vídeo está ativo ou quando uma pasta com vídeos está selecionada
+  const showRenewStreamsBtn = mediaTypeFilter === 'video' || (Boolean(activeAlbumFolder) && filtered.some(isAlbumWithVideos));
 
+  const videoAlbumsInList = useMemo(() => {
+    return mediaTypeFilter === 'video' ? filtered : filtered.filter(isAlbumWithVideos);
+  }, [filtered, mediaTypeFilter]);
+
+  const handleRenewAllListStreams = async (targetIds?: string[]) => {
+    let ids: string[];
+    if (targetIds && targetIds.length > 0) {
+      ids = targetIds;
+    } else {
+      ids = videoAlbumsInList.map(a => a.id);
+    }
+    if (!ids.length || isRenewingBatchStreams) return;
+    await refreshBatchAlbumStreams(ids);
+  };
 
   return (
     <div className="p-3 sm:p-6 max-w-7xl mx-auto space-y-4 sm:space-y-6 min-w-0 max-w-full">
@@ -267,8 +299,79 @@ export const GalleryView: React.FC = () => {
           </p>
         </div>
 
-        {/* Action Buttons: Batch, Select Mode or Upload New Album */}
+        {/* Action Buttons: Global Slider, Shorts, Batch, Select Mode or Upload New Album */}
         <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+          {/* Botão Slider Global de Dopamina (Todas as Fotos & GIFs) */}
+          <button
+            type="button"
+            onClick={() => {
+              if (activeAlbumFolder) {
+                setGlobalSliderConfig({
+                  scope: 'all_app',
+                  sequenceMode: 'folder',
+                  selectedFolder: activeAlbumFolder,
+                });
+              } else {
+                setGlobalSliderConfig({
+                  scope: 'all_app',
+                });
+              }
+              setSlideshowOpen(true, 0, 'global');
+            }}
+            className="px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 bg-gradient-to-r from-brand-600 to-fuchsia-600 hover:from-brand-500 hover:to-fuchsia-500 text-white shadow-glow-brand transition-all cursor-pointer"
+          >
+            <Sparkles size={14} className="text-amber-200" />
+            <span>{tGlobalSlider.launchButton || 'Slider Global (App Todo)'}</span>
+          </button>
+
+          {/* Botão Shorts & Reels */}
+          <button
+            type="button"
+            onClick={() => navigateToView('shorts')}
+            className="px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/40 text-rose-300 transition-all cursor-pointer"
+          >
+            <Flame size={14} className="text-rose-400" />
+            <span>Shorts</span>
+          </button>
+
+          {/* Botão Renovar Streams (quando vídeos e pasta selecionados ou modo vídeo ativo) */}
+          {showRenewStreamsBtn && videoAlbumsInList.length > 0 && (
+            <button
+              type="button"
+              onClick={() => handleRenewAllListStreams()}
+              disabled={isRenewingBatchStreams || videoAlbumsInList.length === 0}
+              className="px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 bg-violet-600/20 hover:bg-violet-600/30 border border-violet-500/40 text-violet-300 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              title={
+                activeAlbumFolder
+                  ? (isEn
+                      ? `Renew video stream links for all ${videoAlbumsInList.length} albums in folder "${activeAlbumFolder}"`
+                      : `Renovar links de stream dos vídeos de todos os ${videoAlbumsInList.length} álbuns da pasta "${activeAlbumFolder}"`)
+                  : (isEn
+                      ? `Renew video stream links for all ${videoAlbumsInList.length} video albums in the list`
+                      : `Renovar links de stream dos vídeos de todos os ${videoAlbumsInList.length} álbuns da lista`)
+              }
+            >
+              <RefreshCw size={14} className={isRenewingBatchStreams ? 'animate-spin text-violet-400' : 'text-violet-400'} />
+              <span className="hidden sm:inline">
+                {isRenewingBatchStreams
+                  ? (batchRenewProgress
+                      ? `${isEn ? 'Renewing' : 'Renovando'} (${batchRenewProgress.current}/${batchRenewProgress.total})...`
+                      : (isEn ? 'Renewing...' : 'Renovando...'))
+                  : (t.renewStreams || (isEn ? 'Renew Streams' : 'Renovar Streams'))}
+              </span>
+              <span className="sm:hidden">
+                {isRenewingBatchStreams
+                  ? (batchRenewProgress ? `${batchRenewProgress.current}/${batchRenewProgress.total}` : (isEn ? 'Renewing...' : 'Renovando...'))
+                  : (isEn ? 'Renew' : 'Renovar')}
+              </span>
+              {!isRenewingBatchStreams && (
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-violet-950/60 text-violet-300 border border-violet-500/30">
+                  {videoAlbumsInList.length}
+                </span>
+              )}
+            </button>
+          )}
+
           {/* Botão de Modo Seleção */}
           <button
             type="button"
@@ -327,6 +430,16 @@ export const GalleryView: React.FC = () => {
               >
                 <Folder size={13} />
                 <span>{t.move} ({selectedAlbumIds.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleRenewAllListStreams(selectedAlbumIds)}
+                disabled={isRenewingBatchStreams}
+                className="px-3.5 py-2 rounded-xl bg-violet-600/20 border border-violet-500/40 hover:bg-violet-600/30 text-violet-300 text-xs font-bold flex items-center gap-1.5 transition-all disabled:opacity-50"
+                title={isEn ? "Renew stream links for selected albums" : "Renovar links de stream dos álbuns selecionados"}
+              >
+                <RefreshCw size={13} className={isRenewingBatchStreams ? 'animate-spin text-violet-400' : 'text-violet-400'} />
+                <span>{isRenewingBatchStreams ? (isEn ? 'Renewing...' : 'Renovando...') : (t.renewStreams || (isEn ? 'Renew Streams' : 'Renovar Streams'))} ({selectedAlbumIds.length})</span>
               </button>
               <button
                 onClick={() => setIsConfirmingBatchDelete(true)}

@@ -17,7 +17,10 @@ if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
 
 from src.browser.engine import BrowserEngine
 from src.browser.tools import BrowserTools
@@ -111,23 +114,28 @@ def main():
         print(f" Mock Tests:       http://localhost:{args.port}/mock/gallery/album-1")
         print("=" * 65 + "\n")
 
-        server_thread = threading.Thread(
-            target=uvicorn.run,
-            args=(app,),
-            kwargs={"host": args.host, "port": args.port, "loop": "asyncio"},
-            daemon=True  # Fecha o servidor assim que a janela principal for fechada
-        )
-        server_thread.start()
-
-        # Se pediu --server ou --no-window, não abre a janela desktop
+        # Se pediu --server ou --no-window, roda diretamente no main thread com resiliência
         if args.server or getattr(args, 'no_window', False):
             import time
-            try:
-                while True:
+            while True:
+                try:
+                    uvicorn.run(app, host=args.host, port=args.port, loop="asyncio")
+                    break
+                except KeyboardInterrupt:
+                    print("\nA encerrar servidor...")
+                    break
+                except Exception as e:
+                    print(f"\n[Server] Reiniciando uvicorn após erro: {e}", flush=True)
                     time.sleep(1)
-            except KeyboardInterrupt:
-                print("\nA encerrar servidor...")
         else:
+            server_thread = threading.Thread(
+                target=uvicorn.run,
+                args=(app,),
+                kwargs={"host": args.host, "port": args.port, "loop": "asyncio"},
+                daemon=True  # Fecha o servidor assim que a janela principal for fechada
+            )
+            server_thread.start()
+
             # Modo desktop nativo (PyWebView com API de tela cheia do monitor)
             class DesktopApi:
                 def __init__(self):

@@ -11,6 +11,7 @@ export type ViewId =
   | 'live-monitor'
   | 'gallery'
   | 'videos'
+  | 'shorts'
   | 'trash'
   | 'duplicates'
   | 'album-detail'
@@ -367,6 +368,17 @@ export interface AppSettings {
   customAnimationDurationMs?: number;
 }
 
+export interface VideoHighlight {
+  id?: string;
+  start: number;
+  end: number;
+  duration: number;
+  score: number;
+  rank?: 'gold' | 'silver' | 'bronze' | number | string;
+  label: string;
+  reason?: string;
+}
+
 export interface VideoItem {
   id: string;
   title: string;
@@ -390,6 +402,11 @@ export interface VideoItem {
   height?: number;
   fps?: number;
   durationSeconds?: number;
+  introEnd?: number;
+  highlightStart?: number;
+  highlightEnd?: number;
+  highlightScore?: number;
+  highlights?: VideoHighlight[];
 }
 
 export interface StorageAnalytics {
@@ -484,6 +501,47 @@ export interface ScanPageVideosResponse {
   videos: ScannedVideoItem[];
 }
 
+export type AlbumImage = ImageItem;
+
+export interface MultiAlbumPreviewImage {
+  id: string;
+  position: number;
+  thumbnail_url: string;
+  original_url: string;
+  width: number;
+  height: number;
+  file_size: number;
+  format: string;
+  media_type: 'image' | 'video' | 'gif';
+  is_animated: boolean;
+  title: string;
+  filename?: string;
+}
+
+export interface MultiAlbumCustomSelection {
+  albumUrl?: string;
+  selectedImageUrls: string[];
+  totalImages: number;
+  images?: MultiAlbumPreviewImage[];
+  cachedImages?: MultiAlbumPreviewImage[];
+  updatedAt: number;
+}
+
+export interface VideoScraperAlbum {
+  id: string;
+  title: string;
+  url?: string;
+  sourceUrl?: string;
+  suggestedFolder: string;
+  thumbnailUrl?: string;
+  videos: ScannedVideoItem[];
+  selectedVideoIds: string[];
+  createdAt?: string;
+  scannedAt?: number;
+  sectionType?: 'page' | 'sub_album' | 'main' | 'recommended';
+  sourceType?: 'main' | 'recommended' | 'sub_album' | 'page';
+}
+
 export interface WebScraperState {
   url: string;
   scanResult: ScanPageVideosResponse | null;
@@ -491,5 +549,36 @@ export interface WebScraperState {
   targetFolder: string;
   errorMsg: string | null;
   activeTab?: 'main' | 'recommended' | 'all';
+  videoAlbums?: VideoScraperAlbum[];
+  selectedAlbumIds?: string[];
+  activeInspectingAlbumId?: string | null;
+  viewLayout?: 'albums' | 'grid' | 'videos';
 }
+
+export type SliderSequenceMode = 'random' | 'alphabetical' | 'artist' | 'folder' | 'recent' | 'size' | 'orientation';
+export type SliderMediaFilter = 'all' | 'photos' | 'images' | 'gifs';
+export type SliderOrientationFilter = 'all' | 'vertical' | 'horizontal';
+
+export interface GlobalSliderConfig {
+  scope: 'all_app' | 'current_album';
+  mediaFilter: SliderMediaFilter;
+  sequenceMode: SliderSequenceMode;
+  alphabeticalOrder: 'asc' | 'desc';
+  sortOrder?: 'asc' | 'desc';
+  selectedArtist: string;
+  selectedFolder: string;
+  recentDaysLimit?: number;
+  onlyRecent?: boolean;
+  recentDays?: number;
+  sizeSortOrder?: 'asc' | 'desc';
+  minResolution: 'all' | 'hd' | '4k';
+  minResolutionFilter?: string;
+  minSizeFilter?: 'all' | '4k' | 'hd' | 'largeBytes';
+  orientationFilter: SliderOrientationFilter;
+  onlyFavorites: boolean;
+  speedSeconds: number;
+  kenBurnsEffect: boolean;
+  shuffleSeed: number;
+}
+
 

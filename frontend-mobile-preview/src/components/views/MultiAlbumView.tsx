@@ -20,7 +20,11 @@ import {
   CheckCircle2,
   Clock,
   RotateCcw,
-  Check
+  Check,
+  Images,
+  Eye,
+  ArrowLeft,
+  Filter
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { backendApi } from '../../services/realApi';
@@ -30,6 +34,7 @@ import { FolderSelectModal } from '../common/FolderSelectModal';
 import { SavedRedirectBadge } from '../common/SavedRedirectBadge';
 import { IconBadge } from '../common/IconBadge';
 import { ModalPortal } from '../common/ModalPortal';
+import { MultiAlbumPreviewImage, MultiAlbumCustomSelection } from '../../types';
 
 interface DiscoveredItem {
   title: string;
@@ -67,12 +72,21 @@ export const MultiAlbumView: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
 
+  // Per-Album Image Inspection & Subset Selection State
+  const [inspectingAlbum, setInspectingAlbum] = useState<DiscoveredItem | null>(null);
+  const [isLoadingAlbumPreview, setIsLoadingAlbumPreview] = useState(false);
+  const [albumPreviewError, setAlbumPreviewError] = useState<string | null>(null);
+  const [albumPreviewImages, setAlbumPreviewImages] = useState<MultiAlbumPreviewImage[]>([]);
+  const [draftSelectedImageUrls, setDraftSelectedImageUrls] = useState<Set<string>>(new Set());
+  const [inspectorMediaFilter, setInspectorMediaFilter] = useState<'all' | 'photo' | 'gif'>('all');
+
   // Destination folder state
   const [destinationFolder, setDestinationFolder] = useState<string>('');
   const [folderModalState, setFolderModalState] = useState<{
     isOpen: boolean;
     mode: 'single' | 'batch';
     targetAlbum?: DiscoveredItem;
+    overrideSelectedUrls?: string[];
   }>({ isOpen: false, mode: 'single' });
 
   // Optimistic queue state for immediate card feedback
@@ -93,6 +107,7 @@ export const MultiAlbumView: React.FC = () => {
   const streamingStatus = multiAlbumState.streamingStatus || '';
   const lastSearchedPerformer = multiAlbumState.lastSearchedPerformer || null;
   const selectedUrls = useMemo(() => new Set(multiAlbumState.selectedUrls || []), [multiAlbumState.selectedUrls]);
+  const customSelections: Record<string, MultiAlbumCustomSelection> = multiAlbumState.customSelections || {};
 
   // Sync albums & jobs on mount
   useEffect(() => {
@@ -362,13 +377,128 @@ export const MultiAlbumView: React.FC = () => {
 
   const effectiveFolder = destinationFolder.trim() || settings.defaultAlbumFolder || performerName.trim() || 'Geral';
 
+  // Helper that attaches custom subset selection (selected_image_urls) to an album payload if the user selected specific images
+  const enrichAlbumWithSelection = (album: DiscoveredItem, overrideSelectedUrls?: string[]) => {
+    const custom = customSelections[album.url];
+    const selectedList = overrideSelectedUrls !== undefined
+      ? overrideSelectedUrls
+      : (custom && Array.isArray(custom.selectedImageUrls) && custom.selectedImageUrls.length > 0)
+      ? custom.selectedImageUrls
+      : undefined;
+    return {
+      ...album,
+      selected_image_urls: selectedList,
+    };
+  };
+
+  // Opens an album to inspect & select specific images before saving/downloading
+  const openAlbumImageSelector = async (album: DiscoveredItem, forceRefresh: boolean = false) => {
+    soundEffects.click(settings.soundEnabled);
+    setInspectingAlbum(album);
+    setAlbumPreviewError(null);
+    setInspectorMediaFilter('all');
+
+    const cached = customSelections[album.url];
+    if (!forceRefresh && cached && Array.isArray(cached.images) && cached.images.length > 0) {
+      setAlbumPreviewImages(cached.images);
+      setDraftSelectedImageUrls(new Set(cached.selectedImageUrls));
+      setIsLoadingAlbumPreview(false);
+      return;
+    }
+
+    setIsLoadingAlbumPreview(true);
+    setAlbumPreviewImages([]);
+    setDraftSelectedImageUrls(new Set());
+
+    const res = await backendApi.previewMultiAlbum(album);
+    setIsLoadingAlbumPreview(false);
+    if (!res.success || res.images.length === 0) {
+      setAlbumPreviewError(
+        res.error ||
+          (isEn
+            ? 'Could not extract preview images from this album page.'
+            : 'Não foi possível carregar a prévia de imagens deste álbum.')
+      );
+      return;
+    }
+
+    const allUrls = res.images.map((i) => i.original_url);
+    const hasExplicitZeroSelection = cached && Array.isArray(cached.selectedImageUrls) && cached.selectedImageUrls.length === 0 && cached.totalImages > 0;
+    const initialSelected = cached && Array.isArray(cached.selectedImageUrls) && cached.selectedImageUrls.length > 0
+      ? cached.selectedImageUrls.filter((u) => allUrls.includes(u))
+      : hasExplicitZeroSelection
+      ? []
+      : allUrls;
+    const effectiveSelected = hasExplicitZeroSelection
+      ? []
+      : (initialSelected.length > 0 ? initialSelected : allUrls);
+
+    setAlbumPreviewImages(res.images);
+    setDraftSelectedImageUrls(new Set(effectiveSelected));
+
+    // Cache previewed images immediately
+    const nextCustom: Record<string, MultiAlbumCustomSelection> = {
+      ...customSelections,
+      [album.url]: {
+        albumUrl: album.url,
+        totalImages: res.images.length,
+        selectedImageUrls: effectiveSelected,
+        images: res.images,
+        updatedAt: Date.now(),
+      },
+    };
+    setMultiAlbumState({ customSelections: nextCustom });
+  };
+
+  const handleConfirmAlbumImageSelection = () => {
+    if (!inspectingAlbum) return;
+    soundEffects.click(settings.soundEnabled);
+    if (isLoadingAlbumPreview || albumPreviewImages.length === 0) {
+      setInspectingAlbum(null);
+      return;
+    }
+    const selectedArr = Array.from(draftSelectedImageUrls);
+    const nextCustom: Record<string, MultiAlbumCustomSelection> = {
+      ...customSelections,
+      [inspectingAlbum.url]: {
+        albumUrl: inspectingAlbum.url,
+        totalImages: albumPreviewImages.length,
+        selectedImageUrls: selectedArr,
+        images: albumPreviewImages,
+        updatedAt: Date.now(),
+      },
+    };
+
+    // Automatically select this album in the Multi-Album list if at least 1 image is selected
+    const nextSelectedAlbums = new Set(selectedUrls);
+    if (selectedArr.length > 0) {
+      nextSelectedAlbums.add(inspectingAlbum.url);
+    } else {
+      nextSelectedAlbums.delete(inspectingAlbum.url);
+    }
+
+    setMultiAlbumState({
+      customSelections: nextCustom,
+      selectedUrls: Array.from(nextSelectedAlbums),
+    });
+    setInspectingAlbum(null);
+  };
+
+  const handleClearAlbumCustomSelection = (albumUrl: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    const nextCustom = { ...customSelections };
+    delete nextCustom[albumUrl];
+    setMultiAlbumState({ customSelections: nextCustom });
+  };
+
   // Direct actions
-  const executeSaveSingleDirect = async (album: DiscoveredItem, targetFolder: string) => {
+  const executeSaveSingleDirect = async (album: DiscoveredItem, targetFolder: string, overrideSelectedUrls?: string[]) => {
     const normUrl = normalizeUrl(album.url);
     setOptimisticQueuedUrls((prev) => new Set(prev).add(normUrl));
+    const enriched = enrichAlbumWithSelection(album, overrideSelectedUrls);
 
     try {
-      const res = await backendApi.batchSaveMultiAlbums([album], targetFolder);
+      const res = await backendApi.batchSaveMultiAlbums([enriched], targetFolder);
       if (res.success) {
         markItemAsSavedOptimistically({
           url: album.url,
@@ -414,16 +544,17 @@ export const MultiAlbumView: React.FC = () => {
     }
   };
 
-  const handleDownloadSingleDirect = (album: DiscoveredItem) => {
+  const handleDownloadSingleDirect = (album: DiscoveredItem, overrideSelectedUrls?: string[]) => {
+    const enriched = enrichAlbumWithSelection(album, overrideSelectedUrls);
     setToast({
       type: 'info',
       message: t.startingSingleZip.replace('{title}', album.title.slice(0, 28)),
     });
-    backendApi.triggerSingleAlbumZipDownload(album.url, album.title);
+    backendApi.triggerSingleAlbumZipDownload(album.url, album.title, enriched.selected_image_urls);
   };
 
   const executeBatchSaveToApp = async (targetFolder: string) => {
-    const selectedAlbums = results.filter((r) => selectedUrls.has(r.url));
+    const selectedAlbums = results.filter((r) => selectedUrls.has(r.url)).map((a) => enrichAlbumWithSelection(a));
     if (selectedAlbums.length === 0) return;
 
     // Set optimistic queued status for all selected
@@ -478,7 +609,7 @@ export const MultiAlbumView: React.FC = () => {
   };
 
   const handleBatchDownload = async (format: 'unified' | 'individual') => {
-    const selectedAlbums = results.filter((r) => selectedUrls.has(r.url));
+    const selectedAlbums = results.filter((r) => selectedUrls.has(r.url)).map((a) => enrichAlbumWithSelection(a));
     if (selectedAlbums.length === 0) return;
 
     setShowDownloadDropdown(false);
@@ -490,7 +621,7 @@ export const MultiAlbumView: React.FC = () => {
       });
       selectedAlbums.forEach((alb, idx) => {
         setTimeout(() => {
-          backendApi.triggerSingleAlbumZipDownload(alb.url, alb.title);
+          backendApi.triggerSingleAlbumZipDownload(alb.url, alb.title, alb.selected_image_urls);
         }, idx * 600);
       });
       clearSelection();
@@ -958,6 +1089,17 @@ export const MultiAlbumView: React.FC = () => {
               {visibleAlbums.map((album) => {
                 const isSelected = selectedUrls.has(album.url);
                 const statusInfo = getAlbumStatus(album.url, album.title);
+                const customSel = customSelections[album.url];
+                const hasCustomSubset = Boolean(
+                  customSel &&
+                  customSel.selectedImageUrls.length > 0 &&
+                  customSel.selectedImageUrls.length < customSel.totalImages
+                );
+                const hasInspectedAll = Boolean(
+                  customSel &&
+                  customSel.totalImages > 0 &&
+                  customSel.selectedImageUrls.length === customSel.totalImages
+                );
 
                 return (
                   <div
@@ -988,6 +1130,24 @@ export const MultiAlbumView: React.FC = () => {
                         {isSelected ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
                       </button>
 
+                      {/* Quick Inspect / Select Images Overlay Pill */}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openAlbumImageSelector(album);
+                        }}
+                        className="absolute bottom-2 left-2 z-20 px-2.5 py-1 rounded-lg bg-indigo-950/85 hover:bg-indigo-600 text-indigo-200 hover:text-white border border-indigo-400/40 text-[10px] font-bold flex items-center gap-1.5 backdrop-blur-md transition-all shadow-lg cursor-pointer"
+                        title={isEn ? 'Open album to inspect and select specific images to download' : 'Abrir álbum para inspecionar e escolher quais imagens baixar'}
+                      >
+                        <Images className="w-3.5 h-3.5 text-indigo-300" />
+                        <span>
+                          {customSel
+                            ? `${customSel.selectedImageUrls.length}/${customSel.totalImages} ${isEn ? 'imgs' : 'fotos'}`
+                            : (isEn ? 'Select Images' : 'Selecionar Fotos')}
+                        </span>
+                      </button>
+
                       {album.thumbnail_url ? (
                         <>
                           <img
@@ -996,8 +1156,8 @@ export const MultiAlbumView: React.FC = () => {
                             className="w-full h-full object-contain cursor-pointer transition-transform duration-300"
                             loading="lazy"
                             referrerPolicy="no-referrer"
-                            onClick={() => setPreviewImage(album.thumbnail_url || null)}
-                            title={t.expandThumbTooltip}
+                            onClick={() => openAlbumImageSelector(album)}
+                            title={isEn ? 'Click to open album and select images' : 'Clique para abrir o álbum e selecionar imagens'}
                           />
                           <button
                             type="button"
@@ -1012,7 +1172,10 @@ export const MultiAlbumView: React.FC = () => {
                           </button>
                         </>
                       ) : (
-                        <div className="flex flex-col items-center justify-center text-slate-600 gap-1">
+                        <div
+                          onClick={() => openAlbumImageSelector(album)}
+                          className="flex flex-col items-center justify-center text-slate-600 gap-1 cursor-pointer w-full h-full"
+                        >
                           <FolderHeart className="w-8 h-8 opacity-40" />
                           <span className="text-[10px] font-bold">{t.noThumbnail}</span>
                         </div>
@@ -1026,7 +1189,11 @@ export const MultiAlbumView: React.FC = () => {
                     {/* Title and Status */}
                     <div>
                       <div className="flex items-start justify-between gap-2">
-                        <h3 className="font-bold text-slate-100 text-sm line-clamp-2 title-tooltip flex-1" title={album.title}>
+                        <h3
+                          onClick={() => openAlbumImageSelector(album)}
+                          className="font-bold text-slate-100 hover:text-brand-300 cursor-pointer text-sm line-clamp-2 title-tooltip flex-1 transition-colors"
+                          title={album.title}
+                        >
                           {album.title}
                         </h3>
                         {statusInfo && (
@@ -1056,6 +1223,39 @@ export const MultiAlbumView: React.FC = () => {
                           )
                         )}
                       </div>
+
+                      {/* Custom Image Selection Status Badge */}
+                      {(hasCustomSubset || hasInspectedAll) && customSel && (
+                        <div className="mt-1.5 flex items-center justify-between gap-2 px-2.5 py-1 rounded-lg bg-cyan-950/60 border border-cyan-500/30 text-[11px] text-cyan-300 font-semibold">
+                          <button
+                            type="button"
+                            onClick={() => openAlbumImageSelector(album)}
+                            className="flex items-center gap-1.5 hover:underline text-left truncate cursor-pointer"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                            <span>
+                              {hasCustomSubset
+                                ? (isEn
+                                    ? `${customSel.selectedImageUrls.length} of ${customSel.totalImages} images selected`
+                                    : `${customSel.selectedImageUrls.length} de ${customSel.totalImages} imagens selecionadas`)
+                                : (isEn
+                                    ? `All ${customSel.totalImages} images verified`
+                                    : `Todas as ${customSel.totalImages} imagens selecionadas`)}
+                            </span>
+                          </button>
+                          {hasCustomSubset && (
+                            <button
+                              type="button"
+                              onClick={(e) => handleClearAlbumCustomSelection(album.url, e)}
+                              className="text-[10px] text-slate-400 hover:text-rose-300 px-1.5 py-0.5 rounded bg-black/30 hover:bg-rose-500/20 transition-colors shrink-0"
+                              title={isEn ? 'Reset to download all images' : 'Resetar para baixar todas as imagens'}
+                            >
+                              {isEn ? 'Reset' : 'Todas'}
+                            </button>
+                          )}
+                        </div>
+                      )}
+
                       <p className="text-xs text-slate-500 font-mono truncate mt-1" title={album.url}>
                         {album.url}
                       </p>
@@ -1064,6 +1264,17 @@ export const MultiAlbumView: React.FC = () => {
 
                   {/* Actions Toolbar */}
                   <div className="flex flex-wrap items-center gap-1.5 mt-4 pt-3 border-t border-border">
+                    {/* Botão Abrir / Selecionar Imagens */}
+                    <button
+                      type="button"
+                      onClick={() => openAlbumImageSelector(album)}
+                      className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 border border-indigo-500/30 text-[11px] font-bold transition-all cursor-pointer"
+                      title={isEn ? 'Open album and choose which images to download' : 'Abrir álbum e escolher quais fotos baixar'}
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>{isEn ? 'Images' : 'Fotos'}</span>
+                    </button>
+
                     {/* Botão Dinâmico: Se Salvo -> "Ver na Galeria", Se Extraindo -> "Extraindo...", Se Normal -> "Salvar no App" */}
                     {statusInfo?.status === 'saved' ? (
                       <button
@@ -1075,14 +1286,14 @@ export const MultiAlbumView: React.FC = () => {
                             navigateToView('gallery');
                           }
                         }}
-                        className="flex-1 min-w-[110px] flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold transition-all shadow-glow-emerald"
+                        className="flex-1 min-w-[100px] flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold transition-all shadow-glow-emerald"
                         title={t.openInGalleryTooltip}
                       >
                         <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
                         <span>{t.viewInGallery}</span>
                       </button>
                     ) : statusInfo?.status === 'extracting' || statusInfo?.status === 'queued' ? (
-                      <div className="flex-1 min-w-[110px] flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-brand-500/20 text-brand-300 border border-brand-500/30 text-[11px] font-bold">
+                      <div className="flex-1 min-w-[100px] flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-brand-500/20 text-brand-300 border border-brand-500/30 text-[11px] font-bold">
                         <Loader2 className="w-3.5 h-3.5 animate-spin text-brand-400" />
                         <span>{statusInfo.status === 'queued' ? t.inQueue : t.extracting}</span>
                       </div>
@@ -1090,11 +1301,15 @@ export const MultiAlbumView: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => handleInitiateSingleSave(album)}
-                        className="flex-1 min-w-[100px] flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 text-[11px] font-bold transition-all"
+                        className="flex-1 min-w-[95px] flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 text-[11px] font-bold transition-all"
                         title={t.saveToAppTooltip}
                       >
                         <FolderHeart className="w-3.5 h-3.5" />
-                        <span>{t.saveToApp}</span>
+                        <span>
+                          {hasCustomSubset && customSel
+                            ? `${t.saveToApp} (${customSel.selectedImageUrls.length})`
+                            : t.saveToApp}
+                        </span>
                       </button>
                     )}
 
@@ -1102,11 +1317,15 @@ export const MultiAlbumView: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => handleDownloadSingleDirect(album)}
-                      className="flex-1 min-w-[90px] flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/20 text-[11px] font-bold transition-all"
+                      className="flex-1 min-w-[85px] flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/20 text-[11px] font-bold transition-all"
                       title={t.downloadZipTooltip}
                     >
                       <Download className="w-3.5 h-3.5" />
-                      <span>{t.downloadZip}</span>
+                      <span>
+                        {hasCustomSubset && customSel
+                          ? `ZIP (${customSel.selectedImageUrls.length})`
+                          : t.downloadZip}
+                      </span>
                     </button>
 
                     {/* Extrair com o Agente (Aba Extrator) */}
@@ -1188,6 +1407,332 @@ export const MultiAlbumView: React.FC = () => {
         </div>
       )}
 
+      {/* Modal de Inspeção do Álbum e Seleção Individual de Imagens */}
+      {inspectingAlbum && (
+        <ModalPortal>
+          <div
+            className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-xl flex flex-col p-2 sm:p-5 overflow-hidden animate-in fade-in duration-200"
+            onClick={handleConfirmAlbumImageSelection}
+          >
+            <div
+              className="relative w-full max-w-7xl mx-auto flex-1 flex flex-col bg-slate-900/95 border border-border rounded-3xl overflow-hidden shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Top Header */}
+              <div className="p-4 sm:p-5 border-b border-border bg-slate-950/60 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="flex items-start gap-3 min-w-0">
+                  <button
+                    type="button"
+                    onClick={handleConfirmAlbumImageSelection}
+                    className="px-3 py-2 rounded-xl bg-surface-elevated hover:bg-brand-600/20 text-slate-200 hover:text-brand-300 border border-border hover:border-brand-500/40 text-xs font-bold flex items-center gap-1.5 transition-all shrink-0 cursor-pointer"
+                    title={isEn ? 'Back to Multi-Album list keeping selection' : 'Voltar à lista de álbuns mantendo a seleção'}
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                    <span>{isEn ? 'Back to Albums' : 'Voltar aos Álbuns'}</span>
+                  </button>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
+                        {isEn ? 'IMAGE SELECTOR' : 'SELETOR DE IMAGENS DO ÁLBUM'}
+                      </span>
+                      <span className="text-xs font-mono font-bold text-cyan-300">
+                        {draftSelectedImageUrls.size} / {albumPreviewImages.length} {isEn ? 'selected' : 'selecionadas'}
+                      </span>
+                    </div>
+                    <h2 className="text-sm sm:text-base font-black text-white truncate mt-1" title={inspectingAlbum.title}>
+                      {inspectingAlbum.title}
+                    </h2>
+                    <p className="text-[11px] text-slate-400 font-mono truncate">{inspectingAlbum.url}</p>
+                  </div>
+                </div>
+
+                {/* Filter & Selection Toolbar */}
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Media Type Filter */}
+                  {albumPreviewImages.some((i) => i.media_type === 'gif') && (
+                    <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-border text-[11px] font-bold">
+                      <button
+                        type="button"
+                        onClick={() => setInspectorMediaFilter('all')}
+                        className={`px-2.5 py-1 rounded-lg transition-all ${
+                          inspectorMediaFilter === 'all' ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {isEn ? 'All' : 'Todas'} ({albumPreviewImages.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setInspectorMediaFilter('photo')}
+                        className={`px-2.5 py-1 rounded-lg transition-all ${
+                          inspectorMediaFilter === 'photo' ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {isEn ? 'Photos' : 'Fotos'} ({albumPreviewImages.filter((i) => i.media_type !== 'gif').length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setInspectorMediaFilter('gif')}
+                        className={`px-2.5 py-1 rounded-lg transition-all ${
+                          inspectorMediaFilter === 'gif' ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        GIFs ({albumPreviewImages.filter((i) => i.media_type === 'gif').length})
+                      </button>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const visible = albumPreviewImages.filter((img) =>
+                        inspectorMediaFilter === 'all' ? true : img.media_type === inspectorMediaFilter
+                      );
+                      const next = new Set(draftSelectedImageUrls);
+                      visible.forEach((img) => next.add(img.original_url));
+                      setDraftSelectedImageUrls(next);
+                    }}
+                    className="px-2.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface-hover text-slate-200 border border-border text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <CheckSquare className="w-3.5 h-3.5 text-brand-400" />
+                    <span>{t.selectAll}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const visible = albumPreviewImages.filter((img) =>
+                        inspectorMediaFilter === 'all' ? true : img.media_type === inspectorMediaFilter
+                      );
+                      const next = new Set(draftSelectedImageUrls);
+                      visible.forEach((img) => next.delete(img.original_url));
+                      setDraftSelectedImageUrls(next);
+                    }}
+                    className="px-2.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface-hover text-slate-200 border border-border text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Square className="w-3.5 h-3.5 text-slate-400" />
+                    <span>{t.deselectAll}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = new Set<string>();
+                      albumPreviewImages.forEach((img) => {
+                        if (!draftSelectedImageUrls.has(img.original_url)) {
+                          next.add(img.original_url);
+                        }
+                      });
+                      setDraftSelectedImageUrls(next);
+                    }}
+                    className="px-2.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface-hover text-slate-300 border border-border text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Filter className="w-3.5 h-3.5 text-amber-400" />
+                    <span>{isEn ? 'Invert' : 'Inverter'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => openAlbumImageSelector(inspectingAlbum, true)}
+                    disabled={isLoadingAlbumPreview}
+                    className="p-2 rounded-xl bg-surface-elevated hover:bg-surface-hover text-slate-300 border border-border text-xs cursor-pointer disabled:opacity-50"
+                    title={isEn ? 'Reload album images' : 'Recarregar imagens do álbum'}
+                  >
+                    <RotateCcw className={`w-3.5 h-3.5 ${isLoadingAlbumPreview ? 'animate-spin' : ''}`} />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleConfirmAlbumImageSelection}
+                    className="p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 cursor-pointer"
+                    title={t.closeLightbox}
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Images Grid Body */}
+              <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+                {isLoadingAlbumPreview ? (
+                  <div className="h-72 flex flex-col items-center justify-center gap-3 text-slate-300">
+                    <Loader2 className="w-10 h-10 animate-spin text-brand-400" />
+                    <p className="text-sm font-bold">
+                      {isEn ? 'Scanning album and extracting high-res image previews...' : 'Extraindo e inspecionando imagens deste álbum...'}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      {isEn ? 'You will be able to select exactly which photos or GIFs to download.' : 'Você poderá escolher exatamente quais fotos ou GIFs deseja baixar.'}
+                    </p>
+                  </div>
+                ) : albumPreviewError ? (
+                  <div className="h-64 flex flex-col items-center justify-center gap-3 text-rose-300 p-6 text-center">
+                    <AlertCircle className="w-10 h-10 text-rose-400" />
+                    <p className="text-sm font-bold">{albumPreviewError}</p>
+                    <button
+                      type="button"
+                      onClick={() => openAlbumImageSelector(inspectingAlbum, true)}
+                      className="px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold flex items-center gap-2"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>{isEn ? 'Try Again' : 'Tentar Novamente'}</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
+                    {albumPreviewImages
+                      .filter((img) => (inspectorMediaFilter === 'all' ? true : img.media_type === inspectorMediaFilter))
+                      .map((img) => {
+                        const isImgSelected = draftSelectedImageUrls.has(img.original_url);
+                        return (
+                          <div
+                            key={img.id || img.original_url}
+                            onClick={() => {
+                              const next = new Set(draftSelectedImageUrls);
+                              if (next.has(img.original_url)) {
+                                next.delete(img.original_url);
+                              } else {
+                                next.add(img.original_url);
+                              }
+                              setDraftSelectedImageUrls(next);
+                            }}
+                            className={`group relative aspect-[4/5] rounded-2xl overflow-hidden border-2 cursor-pointer transition-all select-none bg-slate-950 ${
+                              isImgSelected
+                                ? 'border-emerald-500 ring-2 ring-emerald-500/30 shadow-lg'
+                                : 'border-slate-800/80 opacity-60 hover:opacity-95 hover:border-slate-600'
+                            }`}
+                          >
+                            <img
+                              src={img.thumbnail_url}
+                              alt={img.filename || `Image #${img.position}`}
+                              loading="lazy"
+                              className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                            />
+
+                            {/* Top-left position & selection badge */}
+                            <div className="absolute top-2 left-2 flex items-center gap-1.5">
+                              <span
+                                className={`w-6 h-6 rounded-lg flex items-center justify-center border transition-all shadow ${
+                                  isImgSelected
+                                    ? 'bg-emerald-500 border-emerald-300 text-white'
+                                    : 'bg-black/70 border-white/25 text-white/70'
+                                }`}
+                              >
+                                {isImgSelected ? <Check className="w-3.5 h-3.5 stroke-[3]" /> : <span className="text-[10px] font-mono">{img.position}</span>}
+                              </span>
+                              {img.media_type === 'gif' && (
+                                <span className="px-1.5 py-0.5 rounded bg-fuchsia-600/90 text-white text-[9px] font-black uppercase">
+                                  GIF
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Zoom full image button */}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setPreviewImage(img.original_url);
+                              }}
+                              className="absolute top-2 right-2 p-1.5 rounded-lg bg-black/70 hover:bg-black text-white/80 hover:text-white border border-white/15 opacity-0 group-hover:opacity-100 transition-opacity"
+                              title={t.viewRealSizeTooltip}
+                            >
+                              <Maximize2 className="w-3.5 h-3.5" />
+                            </button>
+
+                            {/* Bottom info bar */}
+                            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent p-2 pt-5 flex items-center justify-between text-[10px] text-slate-200 font-mono">
+                              <span className="truncate">#{img.position}</span>
+                              {img.width && img.height ? (
+                                <span>{img.width}×{img.height}</span>
+                              ) : null}
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
+
+              {/* Sticky Footer Actions */}
+              <div className="p-4 sm:p-5 border-t border-border bg-slate-950/90 flex flex-col sm:flex-row items-center justify-between gap-3">
+                <div className="text-xs text-slate-300 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>
+                    {isEn
+                      ? `${draftSelectedImageUrls.size} of ${albumPreviewImages.length} images selected for this album.`
+                      : `${draftSelectedImageUrls.size} de ${albumPreviewImages.length} imagens selecionadas neste álbum.`}
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto justify-end">
+                  {/* Save Selection & Return to Multi-Album List */}
+                  <button
+                    type="button"
+                    onClick={handleConfirmAlbumImageSelection}
+                    className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-indigo-600/30 transition-all cursor-pointer"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>
+                      {isEn
+                        ? `Confirm Selection (${draftSelectedImageUrls.size}) & Back to Albums`
+                        : `Confirmar Seleção (${draftSelectedImageUrls.size}) e Voltar aos Álbuns`}
+                    </span>
+                  </button>
+
+                  {/* Save Directly to App Library Now */}
+                  <button
+                    type="button"
+                    disabled={draftSelectedImageUrls.size === 0}
+                    onClick={() => {
+                      const selectedArr = Array.from(draftSelectedImageUrls);
+                      const targetAlb = inspectingAlbum;
+                      handleConfirmAlbumImageSelection();
+                      if (settings.askFolderOnSave) {
+                        setFolderModalState({
+                          isOpen: true,
+                          mode: 'single',
+                          targetAlbum: targetAlb,
+                          overrideSelectedUrls: selectedArr,
+                        });
+                      } else {
+                        executeSaveSingleDirect(targetAlb, effectiveFolder, selectedArr);
+                      }
+                    }}
+                    className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-600/30 transition-all cursor-pointer"
+                  >
+                    <FolderHeart className="w-4 h-4" />
+                    <span>
+                      {isEn
+                        ? `Save ${draftSelectedImageUrls.size} to App Now`
+                        : `Salvar ${draftSelectedImageUrls.size} no App Agora`}
+                    </span>
+                  </button>
+
+                  {/* Download ZIP of Selected Images Now */}
+                  <button
+                    type="button"
+                    disabled={draftSelectedImageUrls.size === 0}
+                    onClick={() => {
+                      const selectedArr = Array.from(draftSelectedImageUrls);
+                      const targetAlb = inspectingAlbum;
+                      handleConfirmAlbumImageSelection();
+                      handleDownloadSingleDirect(targetAlb, selectedArr);
+                    }}
+                    className="px-4 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-600/30 transition-all cursor-pointer"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>
+                      {isEn
+                        ? `Download ZIP (${draftSelectedImageUrls.size})`
+                        : `Baixar ZIP (${draftSelectedImageUrls.size})`}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </ModalPortal>
+      )}
+
       {/* Lightbox Modal para visualizar miniatura sem cortes */}
       {previewImage && (
         <ModalPortal>
@@ -1207,7 +1752,7 @@ export const MultiAlbumView: React.FC = () => {
                 <X className="w-5 h-5" />
               </button>
               <img
-                src={`/api/proxy-image?url=${encodeURIComponent(previewImage)}`}
+                src={previewImage.startsWith('/api/') ? previewImage : `/api/proxy-image?url=${encodeURIComponent(previewImage)}`}
                 alt={t.previewImageAlt || 'Preview'}
                 className="max-h-[85vh] w-auto max-w-full rounded-xl object-contain shadow-inner"
               />
@@ -1232,7 +1777,7 @@ export const MultiAlbumView: React.FC = () => {
           if (folderModalState.mode === 'batch') {
             executeBatchSaveToApp(selectedFolder);
           } else if (folderModalState.targetAlbum) {
-            executeSaveSingleDirect(folderModalState.targetAlbum, selectedFolder);
+            executeSaveSingleDirect(folderModalState.targetAlbum, selectedFolder, folderModalState.overrideSelectedUrls);
           }
         }}
       />

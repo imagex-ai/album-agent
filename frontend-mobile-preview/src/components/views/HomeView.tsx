@@ -13,7 +13,8 @@ import {
   ExternalLink,
   Layers,
   ChevronRight,
-  LucideIcon
+  LucideIcon,
+  Flame
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { translations } from '../../i18n/translations';
@@ -50,6 +51,7 @@ export const HomeView: React.FC = () => {
     syncVideos,
     navigateToView,
     setActivePlayingVideo,
+    setSlideshowOpen,
     settings
   } = useAppStore();
 
@@ -174,6 +176,15 @@ export const HomeView: React.FC = () => {
       accentColor: 'emerald',
       iconVariant: 'emerald',
       stat: `${videos.length} ${isEn ? 'videos' : 'vídeos'}`
+    },
+    {
+      id: 'shorts',
+      title: isEn ? 'Shorts & Reels (Videos & Photos)' : 'Shorts & Reels (Vídeos e Fotos)',
+      description: isEn ? 'Vertical dopamine feed for videos, photos and GIFs with random shuffle, orientation filters and auto-advance.' : 'Feed vertical de alta dopamina para vídeos, fotos e GIFs com modo aleatório, orientação e auto-avanço.',
+      icon: Flame,
+      accentColor: 'rose',
+      iconVariant: 'rose',
+      badge: 'DOPAMINE'
     }
   ];
 
@@ -241,13 +252,20 @@ export const HomeView: React.FC = () => {
         </div>
       </div>
 
-      {/* Launchpad Grid: 5 Core Modules */}
+      {/* Launchpad Grid: Core Modules */}
       <section className="space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-extrabold uppercase tracking-wider text-slate-300 flex items-center gap-2">
             <IconBadge icon={<Sparkles size={14} />} variant="neon" size="xs" />
             <span>{t.availableTools || (isEn ? 'Available Tools' : 'Ferramentas do Sistema')}</span>
           </h2>
+          <button
+            onClick={() => setSlideshowOpen(true, 0, 'global')}
+            className="px-4 py-2 rounded-xl bg-gradient-to-r from-brand-600 to-fuchsia-600 hover:from-brand-500 hover:to-fuchsia-500 text-white text-xs font-bold flex items-center gap-2 shadow-glow-brand transition-all cursor-pointer"
+          >
+            <Sparkles size={14} className="text-amber-200" />
+            <span>{isEn ? 'Global Slider (All App Photos & GIFs)' : 'Slider Global (Todas as Fotos e GIFs)'}</span>
+          </button>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">

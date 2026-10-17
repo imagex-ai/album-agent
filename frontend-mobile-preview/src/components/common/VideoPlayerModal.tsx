@@ -21,7 +21,8 @@ import {
   ExternalLink,
   AlertTriangle,
   Loader2,
-  RefreshCw
+  RefreshCw,
+  Zap
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { formatFileSize } from '../../utils/formatters';
@@ -387,6 +388,42 @@ export const VideoPlayerModal: React.FC = () => {
     return `${mins < 10 ? '0' : ''}${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
 
+  const highlights = useMemo(() => {
+    if (!activePlayingVideo) return [];
+    if (activePlayingVideo.highlights && activePlayingVideo.highlights.length > 0) {
+      return activePlayingVideo.highlights;
+    }
+    if (typeof activePlayingVideo.highlightStart === 'number' && activePlayingVideo.highlightStart > 0) {
+      return [{
+        rank: 1,
+        label: 'Clímax #1',
+        start: activePlayingVideo.highlightStart,
+        end: activePlayingVideo.highlightEnd || (activePlayingVideo.highlightStart + 30),
+        score: activePlayingVideo.highlightScore || 85,
+        duration: (activePlayingVideo.highlightEnd || (activePlayingVideo.highlightStart + 30)) - activePlayingVideo.highlightStart
+      }];
+    }
+    return [];
+  }, [activePlayingVideo]);
+
+  const primaryHighlightStart = useMemo(() => {
+    if (highlights.length > 0) return highlights[0].start;
+    if (typeof activePlayingVideo?.highlightStart === 'number') return activePlayingVideo.highlightStart;
+    return null;
+  }, [highlights, activePlayingVideo]);
+
+  const handleJumpToHighlight = (startSec?: number) => {
+    const target = typeof startSec === 'number' ? startSec : primaryHighlightStart;
+    if (target !== null && target !== undefined && videoRef.current) {
+      videoRef.current.currentTime = target;
+      setCurrentTime(target);
+      if (!isPlaying) {
+        videoRef.current.play().catch(console.error);
+        setIsPlaying(true);
+      }
+    }
+  };
+
   const handleRenewStream = async () => {
     if (!activePlayingVideo || isRenewingStream) return;
     setIsRenewingStream(true);
@@ -736,16 +773,40 @@ export const VideoPlayerModal: React.FC = () => {
           onClick={(e) => e.stopPropagation()}
         >
           {/* Scrubber Progress Bar */}
-          <div className="flex items-center gap-2 group/scrub">
-            <input
-              type="range"
-              min={0}
-              max={duration || 100}
-              step={0.1}
-              value={currentTime}
-              onChange={handleSeekScrubber}
-              className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-brand-500 hover:h-2.5 transition-all"
-            />
+          <div className="flex items-center gap-2 group/scrub relative">
+            <div className="relative w-full flex items-center">
+              <input
+                type="range"
+                min={0}
+                max={duration || 100}
+                step={0.1}
+                value={currentTime}
+                onChange={handleSeekScrubber}
+                className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-brand-500 hover:h-2.5 transition-all z-10"
+              />
+              {/* Highlight Notches / Markers */}
+              {duration > 0 && highlights.map((hl, idx) => {
+                const leftPercent = Math.min(100, Math.max(0, (hl.start / duration) * 100));
+                const widthPercent = Math.min(100 - leftPercent, Math.max(0.6, ((hl.end - hl.start) / duration) * 100));
+                const colorClass = idx === 0 
+                  ? 'bg-amber-400 border-amber-300 shadow-glow-amber' 
+                  : idx === 1 
+                  ? 'bg-orange-400 border-orange-300' 
+                  : 'bg-cyan-400 border-cyan-300';
+                return (
+                  <div
+                    key={idx}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleJumpToHighlight(hl.start);
+                    }}
+                    style={{ left: `${leftPercent}%`, width: `${Math.max(1.2, widthPercent)}%` }}
+                    className={`absolute h-2.5 top-1/2 -translate-y-1/2 rounded-full pointer-events-auto cursor-pointer border opacity-80 hover:opacity-100 hover:scale-y-125 transition-all z-20 ${colorClass}`}
+                    title={`${hl.label || `Destaque #${idx + 1}`} (${formatTime(hl.start)})`}
+                  />
+                );
+              })}
+            </div>
           </div>
 
           {/* Controls Row */}
@@ -777,6 +838,20 @@ export const VideoPlayerModal: React.FC = () => {
               >
                 <RotateCw size={15} />
               </button>
+
+              {/* Jump to Highlight / Climax Button */}
+              {primaryHighlightStart !== null && (
+                <button
+                  type="button"
+                  onClick={() => handleJumpToHighlight()}
+                  className="px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[11px] font-bold flex items-center gap-1 transition-all shadow-sm active:scale-95 cursor-pointer ml-0.5"
+                  title={isEn ? `Jump to Best Moment (${formatTime(primaryHighlightStart)})` : `Pular para o Melhor Momento (${formatTime(primaryHighlightStart)})`}
+                >
+                  <Zap size={13} className="fill-amber-400 text-amber-400 animate-pulse shrink-0" />
+                  <span className="hidden sm:inline">Clímax</span>
+                  <span className="text-[10px] text-amber-400/80 font-mono">({formatTime(primaryHighlightStart)})</span>
+                </button>
+              )}
 
               {/* Volume & Mute */}
               <div className="flex items-center gap-1.5 group/volume">

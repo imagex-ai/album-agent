@@ -31,7 +31,9 @@ import {
   TrashStats,
   WebScraperState,
   OllamaHealthStatus,
-  OllamaModelInfo
+  OllamaModelInfo,
+  MultiAlbumCustomSelection,
+  GlobalSliderConfig
 } from '../types';
 import {
   INITIAL_ALBUMS,
@@ -143,6 +145,8 @@ interface AppState {
   lightboxAnimCounter: number;
   slideshowOpen: boolean;
   slideshowInitialIndex: number;
+  slideshowMode: 'album' | 'global';
+  globalSliderConfig: GlobalSliderConfig;
   contactSheetOpen: boolean;
   coPilotOpen: boolean;
   exportModalOpen: boolean;
@@ -240,6 +244,9 @@ interface AppState {
   setAlbumCover: (albumId: string, coverImageUrl: string) => Promise<boolean>;
   deleteAlbum: (id: string) => Promise<void> | void;
   refreshAlbumStreams: (albumId: string) => Promise<boolean>;
+  isRenewingBatchStreams: boolean;
+  batchRenewProgress: { current: number; total: number } | null;
+  refreshBatchAlbumStreams: (albumIds: string[]) => Promise<{ succeeded: number; failed: number }>;
   removeImagesFromAlbum: (albumId: string, imageIds: string[]) => Promise<void> | void;
   renameAlbumImage: (albumId: string, imageId: string, newTitle: string) => Promise<boolean>;
   toggleFavoriteAlbum: (id: string) => void;
@@ -282,7 +289,8 @@ interface AppState {
   openLightbox: (image: ImageItem, album?: Album, originRect?: { x: number; y: number; width: number; height: number } | null) => void;
   closeLightbox: () => void;
   setLightboxFullscreen: (fullscreen: boolean) => void;
-  setSlideshowOpen: (open: boolean, initialIndex?: number) => void;
+  setSlideshowOpen: (open: boolean, initialIndex?: number, mode?: 'album' | 'global') => void;
+  setGlobalSliderConfig: (partial: Partial<GlobalSliderConfig>) => void;
   setContactSheetOpen: (open: boolean) => void;
   setCoPilotOpen: (open: boolean) => void;
   openExportModal: (album: Album) => void;
@@ -318,6 +326,8 @@ interface AppState {
     streamingStatus: string;
     lastSearchedPerformer: string | null;
     selectedUrls: string[];
+    customSelections?: Record<string, MultiAlbumCustomSelection>;
+    activeInspectingUrl?: string | null;
   };
   setMultiAlbumState: (partial: Partial<{
     url: string;
@@ -327,6 +337,8 @@ interface AppState {
     streamingStatus: string;
     lastSearchedPerformer: string | null;
     selectedUrls: string[];
+    customSelections: Record<string, MultiAlbumCustomSelection>;
+    activeInspectingUrl: string | null;
   }>) => void;
   clearMultiAlbumState: () => void;
   syncAlbums: () => Promise<void>;
@@ -540,14 +552,20 @@ export const useAppStore = create<AppState>((set, get) => {
     results: [] as any[],
     streamingStatus: '',
     lastSearchedPerformer: null as string | null,
-    selectedUrls: [] as string[]
+    selectedUrls: [] as string[],
+    customSelections: {} as Record<string, MultiAlbumCustomSelection>,
+    activeInspectingUrl: null as string | null
   };
   let savedWebScraperState: WebScraperState = {
     url: '',
     scanResult: null,
     selectedIds: [],
     targetFolder: getIsEn() ? 'Extracted' : 'Extraídos',
-    errorMsg: null
+    errorMsg: null,
+    videoAlbums: [],
+    selectedAlbumIds: [],
+    activeInspectingAlbumId: null,
+    viewLayout: 'albums'
   };
 
   if (typeof window !== 'undefined') {
@@ -676,6 +694,8 @@ export const useAppStore = create<AppState>((set, get) => {
     webScraperState: savedWebScraperState,
 
     albums: [],
+    isRenewingBatchStreams: false,
+    batchRenewProgress: null,
     jobs: [],
     logs: savedLogs,
     domainPatterns: savedDomainPatterns,
@@ -770,6 +790,24 @@ export const useAppStore = create<AppState>((set, get) => {
     lightboxAnimCounter: 0,
     slideshowOpen: false,
     slideshowInitialIndex: 0,
+    slideshowMode: 'album',
+    globalSliderConfig: {
+      scope: 'all_app',
+      mediaFilter: 'all',
+      sequenceMode: 'random',
+      alphabeticalOrder: 'asc',
+      selectedArtist: '',
+      selectedFolder: '',
+      recentDaysLimit: 0,
+      sizeSortOrder: 'desc',
+      minResolution: 'all',
+      minResolutionFilter: 'all',
+      orientationFilter: 'all',
+      onlyFavorites: false,
+      speedSeconds: 3,
+      kenBurnsEffect: true,
+      shuffleSeed: 1,
+    },
     contactSheetOpen: false,
     coPilotOpen: false,
     exportModalOpen: false,
@@ -1326,7 +1364,9 @@ export const useAppStore = create<AppState>((set, get) => {
         results: [],
         streamingStatus: '',
         lastSearchedPerformer: null,
-        selectedUrls: []
+        selectedUrls: [],
+        customSelections: {},
+        activeInspectingUrl: null
       };
       try {
         localStorage.removeItem('imagex_multi_album_state');
@@ -1350,7 +1390,11 @@ export const useAppStore = create<AppState>((set, get) => {
         scanResult: null,
         selectedIds: [],
         targetFolder: getIsEn() ? 'Extracted' : 'Extraídos',
-        errorMsg: null
+        errorMsg: null,
+        videoAlbums: [],
+        selectedAlbumIds: [],
+        activeInspectingAlbumId: null,
+        viewLayout: 'albums'
       };
       try {
         localStorage.removeItem('imagex_web_scraper_state');
@@ -1655,6 +1699,7 @@ export const useAppStore = create<AppState>((set, get) => {
       else if (viewId === 'web-video-scraper') tabTitle = isPt ? 'Extrator de Vídeos Web' : 'Web Video Extractor';
       else if (viewId === 'gallery') tabTitle = isPt ? 'Galeria de Álbuns' : 'Album Library';
       else if (viewId === 'videos') tabTitle = isPt ? 'Galeria de Vídeos' : 'Video Gallery';
+      else if (viewId === 'shorts') tabTitle = isPt ? 'Shorts & Reels' : 'Shorts & Reels';
       else if (viewId === 'live-monitor') tabTitle = isPt ? 'Monitor da IA' : 'AI Live Monitor';
       else if (viewId === 'job-history') tabTitle = isPt ? 'Gestão de Tarefas' : 'Task Management';
       else if (viewId === 'duplicates') tabTitle = isPt ? 'Detector de Duplicatas' : 'Duplicates Finder';
@@ -1922,6 +1967,82 @@ export const useAppStore = create<AppState>((set, get) => {
         });
       }
       return ok;
+    },
+
+    refreshBatchAlbumStreams: async (albumIds: string[]) => {
+      if (!albumIds || albumIds.length === 0) return { succeeded: 0, failed: 0 };
+      const state = get();
+      if (state.isRenewingBatchStreams) return { succeeded: 0, failed: 0 };
+
+      const isEn = state.settings?.language === 'en-US';
+      set({
+        isRenewingBatchStreams: true,
+        batchRenewProgress: { current: 0, total: albumIds.length }
+      });
+
+      get().addNotification({
+        title: isEn ? 'Renewing Video Streams' : 'Renovando Streams',
+        message: isEn
+          ? `Starting renewal of video streams for ${albumIds.length} albums in the background...`
+          : `Iniciando renovação de streams para ${albumIds.length} álbuns em segundo plano...`,
+        type: 'info'
+      });
+
+      let succeeded = 0;
+      let failed = 0;
+
+      try {
+        for (let i = 0; i < albumIds.length; i++) {
+          const albumId = albumIds[i];
+          set({
+            batchRenewProgress: { current: i + 1, total: albumIds.length }
+          });
+
+          try {
+            const ok = await backendApi.refreshAlbumStreams(albumId);
+            if (ok) {
+              const fresh = await backendApi.fetchAlbumDetails(albumId);
+              if (fresh) {
+                set(curr => ({
+                  albums: curr.albums.map(a => a.id === albumId ? fresh : a)
+                }));
+              }
+              succeeded++;
+            } else {
+              failed++;
+            }
+          } catch (err) {
+            console.error(`Failed to refresh streams for album ${albumId}:`, err);
+            failed++;
+          }
+        }
+      } finally {
+        set({
+          isRenewingBatchStreams: false,
+          batchRenewProgress: null
+        });
+      }
+
+      const finalState = get();
+      if (succeeded > 0) {
+        finalState.addNotification({
+          title: isEn ? 'Streams Renewal Completed' : 'Renovação Concluída',
+          message: isEn
+            ? `${succeeded} of ${albumIds.length} albums had their video streams renewed successfully!${failed > 0 ? ` (${failed} failed)` : ''}`
+            : `${succeeded} de ${albumIds.length} álbuns tiveram seus streams de vídeo renovados com sucesso!${failed > 0 ? ` (${failed} falharam)` : ''}`,
+          type: failed > 0 ? 'warning' : 'success'
+        });
+      } else {
+        finalState.addNotification({
+          title: isEn ? 'Streams Renewal Failed' : 'Falha na Renovação',
+          message: isEn
+            ? 'Could not renew video streams for the albums in the list.'
+            : 'Não foi possível renovar os links de stream dos álbuns da lista.',
+          type: 'error'
+        });
+      }
+
+      return { succeeded, failed };
     },
 
     removeImagesFromAlbum: async (albumId, imageIds) => {
@@ -2549,9 +2670,25 @@ export const useAppStore = create<AppState>((set, get) => {
       });
     },
 
-    setSlideshowOpen: (open, initialIndex = 0) => {
+    setSlideshowOpen: (open, initialIndex = 0, mode = 'album') => {
       if (!open) exitAllFullscreen();
-      set({ slideshowOpen: open, slideshowInitialIndex: Math.max(0, initialIndex) });
+      set(state => ({
+        slideshowOpen: open,
+        slideshowInitialIndex: Math.max(0, initialIndex),
+        slideshowMode: mode,
+        globalSliderConfig: {
+          ...state.globalSliderConfig,
+          scope: mode === 'global' ? 'all_app' : 'current_album',
+        },
+      }));
+    },
+    setGlobalSliderConfig: (partial) => {
+      set(state => ({
+        globalSliderConfig: {
+          ...state.globalSliderConfig,
+          ...partial,
+        },
+      }));
     },
     setContactSheetOpen: (open) => set({ contactSheetOpen: open }),
 

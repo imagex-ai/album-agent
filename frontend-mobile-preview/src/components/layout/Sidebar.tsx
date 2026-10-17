@@ -19,7 +19,9 @@ import {
   Film,
   Trash2,
   X,
-  Home
+  Home,
+  Flame,
+  Sparkles
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { translations } from '../../i18n/translations';
@@ -45,7 +47,7 @@ interface NavSection {
 
 export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseMobile }) => {
   const [collapsed, setCollapsed] = useState(false);
-  const { currentView, navigateToView, albums, videos, trashItems, jobs, logs, settings } = useAppStore();
+  const { currentView, navigateToView, setSlideshowOpen, albums, videos, trashItems, jobs, logs, settings } = useAppStore();
   const t = translations[settings.language].sidebar;
 
   const activeJobsCount = jobs.filter(j => j.status === 'active').length;
@@ -68,6 +70,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
       items: [
         { id: 'gallery' as ViewId, label: t.albumLibrary, icon: FolderHeart, badge: albums.length.toString() },
         { id: 'videos' as ViewId, label: t.videoGallery, icon: Film, badge: videos.length > 0 ? videos.length.toString() : null },
+        { id: 'shorts' as ViewId, label: t.shortsFeed || 'Shorts & Reels', icon: Flame, badge: 'HOT', badgeColor: 'bg-rose-500/20 text-rose-300 border border-rose-500/30' },
         { id: 'duplicates' as ViewId, label: t.duplicatesFinder, icon: Copy, badge: null },
         { id: 'trash' as ViewId, label: t.trash || 'Trash', icon: Trash2, badge: trashItems.length > 0 ? trashItems.length.toString() : null, badgeColor: 'bg-rose-500/20 text-rose-300 border border-rose-500/30' },
       ]
@@ -192,6 +195,21 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
             </div>
           </div>
         ))}
+      </div>
+
+      {/* Quick Global Dopamine Slider Launcher */}
+      <div className="px-3 pb-2">
+        <button
+          onClick={() => {
+            setSlideshowOpen(true, 0, 'global');
+            if (onCloseMobile) onCloseMobile();
+          }}
+          className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-xs font-bold bg-gradient-to-r from-brand-600/25 to-fuchsia-600/25 hover:from-brand-600/40 hover:to-fuchsia-600/40 text-brand-200 border border-brand-500/30 transition-all shadow-lg cursor-pointer"
+          title={t.globalSlider || 'Slider Global (Fotos/GIFs)'}
+        >
+          <Sparkles size={15} className="text-amber-300 shrink-0" />
+          {(!collapsed || isMobileOpen) && <span className="truncate">{t.globalSlider || 'Slider Global (Fotos/GIFs)'}</span>}
+        </button>
       </div>
 
       {/* Footer Status */}

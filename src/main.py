@@ -94,7 +94,7 @@ def main():
     parser.add_argument("--server", action="store_true", help="Launch FastAPI Web UI server")
     parser.add_argument("--no-window", action="store_true", help="Runs web server only, without opening desktop window")
     import os
-    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8000)), help="Port for web server (default 8000 or $PORT)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8100)), help="Port for web server (default 8100 or $PORT)")
     parser.add_argument("--host", type=str, default=os.environ.get("HOST", "0.0.0.0"), help="Host for web server (default 0.0.0.0)")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload on code change")
     parser.add_argument("--headed", action="store_true", help="Run browser in visible headed mode")
@@ -314,6 +314,17 @@ def main():
                     return self._is_fullscreen
 
             desktop_api = DesktopApi()
+
+            # Aguarda o servidor FastAPI uvicorn inicializar e escutar na porta antes de renderizar o WebView
+            import time
+            start_wait = time.time()
+            while time.time() - start_wait < 15:
+                try:
+                    with socket.create_connection(("127.0.0.1", args.port), timeout=0.3):
+                        break
+                except (ConnectionRefusedError, OSError):
+                    time.sleep(0.15)
+
             webview.create_window(
                 title="IMAGEX.AI - Media Extractor",
                 url=f"http://127.0.0.1:{args.port}",

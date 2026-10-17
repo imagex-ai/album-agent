@@ -12,6 +12,7 @@ import {
   Minimize,
   ChevronUp,
   ChevronDown,
+  ChevronLeft,
   Video,
   Smartphone,
   Monitor,
@@ -112,9 +113,19 @@ export const ShortsView: React.FC = () => {
     navigateToView,
     navigateToSavedItem,
     setSlideshowOpen,
+    openTabs,
     settings,
   } = useAppStore();
   const t = translations[settings.language];
+
+  const handleExitShorts = useCallback(() => {
+    const prev = openTabs.find(t => t.viewId !== 'shorts');
+    if (prev) {
+      navigateToView(prev.viewId, prev.albumId);
+    } else {
+      navigateToView('videos');
+    }
+  }, [openTabs, navigateToView]);
 
   const [mediaFilter, setMediaFilter] = useState<ShortsMediaFilter>('all');
   const [sequenceMode, setSequenceMode] = useState<ShortsSequenceMode>('random');
@@ -179,11 +190,22 @@ export const ShortsView: React.FC = () => {
 
   const containerHeightInit = () => {
     if (typeof window !== 'undefined' && window.innerHeight > 0) {
-      return Math.max(200, window.innerHeight - 56);
+      return Math.max(200, window.innerHeight);
     }
     return 0;
   };
   const [containerHeight, setContainerHeight] = useState<number>(containerHeightInit);
+
+  // Global Escape key listener to exit Shorts view
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        handleExitShorts();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleExitShorts]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const activeVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -900,34 +922,46 @@ export const ShortsView: React.FC = () => {
   return (
     <div className="relative w-full h-full bg-black overflow-hidden flex flex-col select-none">
       {/* Ultra-Clean Social Media Top Overlay Bar (TikTok / Reels Style) */}
-      <div className="absolute top-0 inset-x-0 z-30 pt-2.5 pb-6 px-3 sm:px-5 bg-gradient-to-b from-black/75 via-black/30 to-transparent pointer-events-none">
-        <div className="max-w-[540px] mx-auto flex items-center justify-between gap-2 pointer-events-auto">
-          {/* Left: Clean Category Tabs with Glowing Active Underline */}
-          <div className="flex items-center gap-3 sm:gap-4 min-w-0 overflow-x-auto no-scrollbar py-0.5">
-            {([
-              { key: 'all', label: t.shorts.tabAll },
-              { key: 'videos', label: t.shorts.tabVideos },
-              { key: 'photos', label: t.shorts.tabPhotos },
-              { key: 'gifs', label: t.shorts.tabGifs },
-            ] as { key: ShortsMediaFilter; label: string }[]).map(opt => {
-              const active = mediaFilter === opt.key;
-              return (
-                <button
-                  key={opt.key}
-                  onClick={() => setMediaFilter(opt.key)}
-                  className={`relative pb-1.5 text-[13px] sm:text-sm tracking-tight transition-all cursor-pointer shrink-0 ${
-                    active
-                      ? 'text-white font-extrabold drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)]'
-                      : 'text-white/60 hover:text-white/90 font-semibold drop-shadow-[0_1px_4px_rgba(0,0,0,0.85)]'
-                  }`}
-                >
-                  <span>{opt.label}</span>
-                  {active && (
-                    <span className="absolute bottom-0 inset-x-1 h-[2.5px] rounded-full bg-white shadow-[0_0_8px_rgba(255,255,255,0.9)]" />
-                  )}
-                </button>
-              );
-            })}
+      <div className="absolute top-0 inset-x-0 z-30 pt-2.5 pb-6 px-3 sm:px-5 bg-gradient-to-b from-black/80 via-black/35 to-transparent pointer-events-none">
+        <div className="max-w-[540px] mx-auto flex items-center justify-between gap-2 pointer-events-auto flex-nowrap">
+          {/* Left: Exit/Back Button + Clean Category Tabs with Glowing Active Underline */}
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-nowrap overflow-hidden">
+            <button
+              type="button"
+              onClick={handleExitShorts}
+              className="w-8 h-8 rounded-full bg-black/45 hover:bg-black/75 backdrop-blur-md border border-white/20 text-white/90 hover:text-white flex items-center justify-center transition-all cursor-pointer active:scale-90 shadow-lg shrink-0"
+              title={settings.language === 'pt-BR' ? 'Sair dos Shorts / Voltar (Esc)' : 'Exit Shorts / Back (Esc)'}
+              aria-label={settings.language === 'pt-BR' ? 'Sair dos Shorts' : 'Exit Shorts'}
+            >
+              <ChevronLeft size={18} className="mr-0.5" />
+            </button>
+
+            <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0 overflow-x-auto no-scrollbar py-0.5 flex-nowrap">
+              {([
+                { key: 'all', label: t.shorts.tabAll },
+                { key: 'videos', label: t.shorts.tabVideos },
+                { key: 'photos', label: t.shorts.tabPhotos },
+                { key: 'gifs', label: t.shorts.tabGifs },
+              ] as { key: ShortsMediaFilter; label: string }[]).map(opt => {
+                const active = mediaFilter === opt.key;
+                return (
+                  <button
+                    key={opt.key}
+                    onClick={() => setMediaFilter(opt.key)}
+                    className={`relative pb-1.5 text-[13px] sm:text-sm tracking-tight transition-all cursor-pointer shrink-0 whitespace-nowrap ${
+                      active
+                        ? 'text-white font-extrabold drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)]'
+                        : 'text-white/60 hover:text-white/90 font-semibold drop-shadow-[0_1px_4px_rgba(0,0,0,0.85)]'
+                    }`}
+                  >
+                    <span>{opt.label}</span>
+                    {active && (
+                      <span className="absolute bottom-0 inset-x-1 h-[2.5px] rounded-full bg-white shadow-[0_0_8px_rgba(255,255,255,0.9)]" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           {/* Right: Subtle Counter + Minimalist Glass Action Icons */}

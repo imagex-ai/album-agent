@@ -178,13 +178,17 @@ export const App: React.FC = () => {
 
       {/* Main Layout Area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
-        {/* Top Header */}
-        <TopHeader onOpenMobileMenu={() => setMobileMenuOpen(true)} />
+        {/* Top Header (Hidden in Shorts for full immersive view) */}
+        {currentView !== 'shorts' && (
+          <TopHeader onOpenMobileMenu={() => setMobileMenuOpen(true)} />
+        )}
 
-        {/* Multi-Tab Session Bar with Smooth Touch Scroll (hidden on mobile during full-screen Shorts) */}
-        <div className={currentView === 'shorts' ? 'hidden md:block shrink-0' : 'shrink-0'}>
-          <TopTabBar />
-        </div>
+        {/* Multi-Tab Session Bar with Smooth Touch Scroll (Hidden in Shorts) */}
+        {currentView !== 'shorts' && (
+          <div className="shrink-0">
+            <TopTabBar />
+          </div>
+        )}
 
         {/* Active View Container with Unified Safe Viewport Scroll */}
         <main

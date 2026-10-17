@@ -552,24 +552,46 @@ export const ShortsView: React.FC = () => {
     } catch (_) {}
   }, []);
 
-  // Safe universal autoplay executor with seamless browser policy recovery
+  // Safe universal autoplay executor with seamless browser policy recovery and instant climax seeking
   const playVideoSafely = useCallback((vid: HTMLVideoElement | null) => {
     if (!vid || isPausedRef.current) return;
     vid.muted = isMuted;
+
+    const currentItem = feedItems[activeIndexRef.current];
+    const target = currentItem ? getEffectiveHighlightStart(currentItem, highlightIndexMap[currentItem.id]) : 0;
+
+    const doSeekToClimax = () => {
+      if (target > 0 && Math.abs(vid.currentTime - target) > 1.0) {
+        try {
+          vid.currentTime = target;
+        } catch (_) {}
+      }
+    };
+
+    // Pre-seek if target is already known
+    if (target > 0 && Math.abs(vid.currentTime - target) > 1.0) {
+      try {
+        vid.currentTime = target;
+      } catch (_) {}
+    }
+
     const p = vid.play();
     if (p !== undefined) {
-      p.catch((err) => {
+      p.then(() => {
+        doSeekToClimax();
+      }).catch((err) => {
         // If unmuted playback is blocked by browser autoplay policy (NotAllowedError/SecurityError)
         // gracefully fall back to muted autoplay immediately so the feed keeps playing uninterrupted!
         if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
           vid.muted = true;
           setIsMuted(true);
-          vid.play().catch(() => {});
+          vid.play().then(() => {
+            doSeekToClimax();
+          }).catch(() => {});
         }
-        // Note: AbortError is normal during rapid scrolling or seeking; NEVER set isPaused = true!
       });
     }
-  }, [isMuted]);
+  }, [isMuted, feedItems, highlightIndexMap]);
 
   // Sync active video playback exclusively on the activeIndex element (R2)
   useEffect(() => {
@@ -586,20 +608,16 @@ export const ShortsView: React.FC = () => {
     const vid = activeVideoRef.current;
     if (!vid) return;
 
-    const target = getEffectiveHighlightStart(currentItem, highlightIndexMap[currentItem.id]);
-    if (target > 0 && Math.abs(vid.currentTime - target) > 0.5) {
-      try {
-        vid.currentTime = target;
-      } catch (_) {}
-    }
-
     if (isPaused) {
       vid.pause();
     } else {
-      // Seek-Before-Play: Only start playing if target is 0:00 OR if the video has already reached target!
-      if (target === 0 || Math.abs(vid.currentTime - target) <= 1.0) {
-        playVideoSafely(vid);
+      const target = getEffectiveHighlightStart(currentItem, highlightIndexMap[currentItem.id]);
+      if (target > 0 && Math.abs(vid.currentTime - target) > 1.0) {
+        try {
+          vid.currentTime = target;
+        } catch (_) {}
       }
+      playVideoSafely(vid);
     }
   }, [activeIndex, isPaused, feedItems, highlightIndexMap, playVideoSafely, teardownVideoElement]);
 
@@ -687,8 +705,11 @@ export const ShortsView: React.FC = () => {
       }
       previousVideoRef.current = el;
       activeVideoRef.current = el;
+      if (!isPausedRef.current) {
+        playVideoSafely(el);
+      }
     }
-  }, [teardownVideoElement]);
+  }, [teardownVideoElement, playVideoSafely]);
 
   // Convergence helper to ensure scroll snapping lands precisely on slide boundary
   const snapConvergence = useCallback((targetIndex: number, h: number) => {
@@ -1341,6 +1362,7 @@ export const ShortsView: React.FC = () => {
                             const target = getEffectiveHighlightStart(item, highlightIndexMap[item.id]);
                             return target > 0 ? `${item.mediaUrl}#t=${target}` : item.mediaUrl;
                           })()}
+                          autoPlay
                           playsInline
                           {...({ 'webkit-playsinline': 'true', 'x5-playsinline': 'true' } as any)}
                           preload="auto"
@@ -1349,27 +1371,24 @@ export const ShortsView: React.FC = () => {
                           onLoadedMetadata={(e) => {
                             const v = e.currentTarget;
                             const target = getEffectiveHighlightStart(item, highlightIndexMap[item.id]);
-                            if (target > 0) {
-                              if (Math.abs(v.currentTime - target) > 0.5) {
-                                try {
-                                  v.currentTime = target;
-                                } catch (_) {}
-                              }
-                            } else {
+                            if (target > 0 && Math.abs(v.currentTime - target) > 0.5) {
+                              try {
+                                v.currentTime = target;
+                              } catch (_) {}
+                            }
+                            if (!isPausedRef.current) {
                               playVideoSafely(v);
                             }
                           }}
                           onCanPlay={(e) => {
                             const v = e.currentTarget;
-                            const target = getEffectiveHighlightStart(item, highlightIndexMap[item.id]);
-                            if (target === 0 || Math.abs(v.currentTime - target) <= 1.0) {
+                            if (!isPausedRef.current) {
                               playVideoSafely(v);
                             }
                           }}
                           onSeeked={(e) => {
                             const v = e.currentTarget;
-                            const target = getEffectiveHighlightStart(item, highlightIndexMap[item.id]);
-                            if (target === 0 || v.currentTime >= target - 0.5) {
+                            if (!isPausedRef.current) {
                               playVideoSafely(v);
                             }
                           }}

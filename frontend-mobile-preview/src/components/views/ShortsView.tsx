@@ -222,6 +222,8 @@ export const ShortsView: React.FC = () => {
   activeIndexRef.current = activeIndex;
   const isPausedRef = useRef<boolean>(false);
   isPausedRef.current = isPaused;
+  const isMutedRef = useRef<boolean>(isMuted);
+  isMutedRef.current = isMuted;
   const containerHeightRef = useRef<number>(containerHeight);
   containerHeightRef.current = containerHeight;
 
@@ -552,10 +554,12 @@ export const ShortsView: React.FC = () => {
     } catch (_) {}
   }, []);
 
-  // Safe universal autoplay executor with seamless browser policy recovery and instant climax seeking
+  // Safe universal autoplay executor with seamless browser policy recovery and persistent audio preservation
   const playVideoSafely = useCallback((vid: HTMLVideoElement | null) => {
     if (!vid || isPausedRef.current) return;
-    vid.muted = isMuted;
+
+    // Apply user's current mute preference directly to DOM element
+    vid.muted = isMutedRef.current;
 
     const currentItem = feedItems[activeIndexRef.current];
     const target = currentItem ? getEffectiveHighlightStart(currentItem, highlightIndexMap[currentItem.id]) : 0;
@@ -579,19 +583,52 @@ export const ShortsView: React.FC = () => {
     if (p !== undefined) {
       p.then(() => {
         doSeekToClimax();
+        // If user wants audio, guarantee unmuted state on the actively playing element
+        if (!isMutedRef.current && vid.muted) {
+          vid.muted = false;
+        }
       }).catch((err) => {
-        // If unmuted playback is blocked by browser autoplay policy (NotAllowedError/SecurityError)
-        // gracefully fall back to muted autoplay immediately so the feed keeps playing uninterrupted!
+        // If unmuted playback is temporarily blocked by browser autoplay policy before metadata ready,
+        // fall back to playing muted, BUT NEVER set isMuted=true globally so user preference is preserved!
         if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
           vid.muted = true;
-          setIsMuted(true);
           vid.play().then(() => {
             doSeekToClimax();
+            // Once playback stream is active, restore unmuted audio if user previously unmuted
+            if (!isMutedRef.current) {
+              setTimeout(() => {
+                if (!isMutedRef.current && vid && !vid.paused) {
+                  vid.muted = false;
+                }
+              }, 60);
+            }
           }).catch(() => {});
         }
       });
     }
-  }, [isMuted, feedItems, highlightIndexMap]);
+  }, [feedItems, highlightIndexMap]);
+
+  // Synchronize live video element audio whenever isMuted changes
+  useEffect(() => {
+    if (activeVideoRef.current) {
+      activeVideoRef.current.muted = isMuted;
+    }
+  }, [isMuted]);
+
+  // Persistent mute/unmute toggle handler preserving audio across subsequent videos
+  const handleToggleMute = useCallback(() => {
+    setIsMuted(prev => {
+      const next = !prev;
+      isMutedRef.current = next;
+      if (activeVideoRef.current) {
+        activeVideoRef.current.muted = next;
+        if (!next && activeVideoRef.current.paused && !isPausedRef.current) {
+          activeVideoRef.current.play().catch(() => {});
+        }
+      }
+      return next;
+    });
+  }, []);
 
   // Sync active video playback exclusively on the activeIndex element (R2)
   useEffect(() => {
@@ -705,6 +742,7 @@ export const ShortsView: React.FC = () => {
       }
       previousVideoRef.current = el;
       activeVideoRef.current = el;
+      el.muted = isMutedRef.current;
       if (!isPausedRef.current) {
         playVideoSafely(el);
       }
@@ -828,7 +866,7 @@ export const ShortsView: React.FC = () => {
         setIsPaused(p => !p);
       } else if (e.key.toLowerCase() === 'm') {
         e.preventDefault();
-        setIsMuted(m => !m);
+        handleToggleMute();
       } else if (e.key.toLowerCase() === 'r') {
         e.preventDefault();
         setSequenceMode('random');
@@ -837,7 +875,7 @@ export const ShortsView: React.FC = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeIndex, scrollToIndex]);
+  }, [activeIndex, scrollToIndex, handleToggleMute]);
 
   const handleToggleFavorite = useCallback((item: ShortsItem) => {
     if (item.sourceVideoId) {
@@ -1591,7 +1629,7 @@ export const ShortsView: React.FC = () => {
                     {/* 2. Sound Mute/Unmute (for videos) OR Auto-Advance Toggle (for photos/GIFs) */}
                     {item.kind === 'video' ? (
                       <button
-                        onClick={() => setIsMuted(m => !m)}
+                        onClick={handleToggleMute}
                         className="flex flex-col items-center gap-0.5 group cursor-pointer active:scale-90 transition-transform"
                         title={isMuted ? 'Unmute (M)' : 'Mute (M)'}
                       >

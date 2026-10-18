@@ -145,6 +145,7 @@ export const ShortsView: React.FC = () => {
   const [highlightIndexMap, setHighlightIndexMap] = useState<Record<string, number>>({});
   const [highlightDuration, setHighlightDuration] = useState<number>(30);
   const [isAnalyzingActive, setIsAnalyzingActive] = useState<boolean>(false);
+  const [canPreloadNext, setCanPreloadNext] = useState<boolean>(false);
 
   const handleCycleHighlight = useCallback((item: ShortsItem) => {
     const list = (item.highlights && item.highlights.length > 0)
@@ -210,6 +211,7 @@ export const ShortsView: React.FC = () => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const activeVideoRef = useRef<HTMLVideoElement | null>(null);
   const previousVideoRef = useRef<HTMLVideoElement | null>(null);
+  const preloadedVideoRef = useRef<HTMLVideoElement | null>(null);
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const programmaticTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const singleTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -661,20 +663,35 @@ export const ShortsView: React.FC = () => {
   // On-demand background smart highlight detection with debounce to prevent flood on rapid swiping
   useEffect(() => {
     const item = feedItems[activeIndex];
-    if (!item || item.kind !== 'video' || !item.sourceVideoId) return;
+    if (!item || item.kind !== 'video' || !item.sourceVideoId) {
+      setIsAnalyzingActive(false);
+      const t = setTimeout(() => {
+        setCanPreloadNext(true);
+      }, 200);
+      return () => clearTimeout(t);
+    }
+
     if (item.startTime !== undefined && item.startTime > 0 && item.highlights && item.highlights.length > 0) {
       setIsAnalyzingActive(false);
-      return;
+      const t = setTimeout(() => {
+        setCanPreloadNext(true);
+      }, 200);
+      return () => clearTimeout(t);
     }
 
     let isMounted = true;
     setIsAnalyzingActive(true);
+    setCanPreloadNext(false);
+
     const timer = setTimeout(() => {
       fetch(`/api/videos/${encodeURIComponent(item.sourceVideoId || '')}/smart-highlight?desired_window=${highlightDuration}`)
         .then(res => res.json())
         .then(data => {
           if (!isMounted) return;
           setIsAnalyzingActive(false);
+          // Highlight loading completed: initiate next video preload below
+          setCanPreloadNext(true);
+
           if (!data?.smart_highlight) return;
           const sh = data.smart_highlight;
           const start = sh.highlight_start > 0 ? sh.highlight_start : (sh.intro_end > 0 ? sh.intro_end : 0);
@@ -711,6 +728,7 @@ export const ShortsView: React.FC = () => {
         .catch(() => {
           if (isMounted) {
             setIsAnalyzingActive(false);
+            setCanPreloadNext(true);
             const vid = activeVideoRef.current;
             if (vid && !isPausedRef.current) {
               playVideoSafely(vid);
@@ -724,6 +742,83 @@ export const ShortsView: React.FC = () => {
       clearTimeout(timer);
     };
   }, [activeIndex, feedItems, highlightIndexMap, highlightDuration, playVideoSafely]);
+
+  // Preload smart highlights and media for the NEXT video below in the feed
+  useEffect(() => {
+    if (!canPreloadNext) return;
+    const nextIdx = activeIndex + 1;
+    if (nextIdx >= feedItems.length) return;
+
+    const nextItem = feedItems[nextIdx];
+    if (!nextItem) return;
+
+    // If next item is a photo or gif, preload image into browser cache
+    if (nextItem.kind === 'photo' || nextItem.kind === 'gif') {
+      if (nextItem.mediaUrl) {
+        const preImg = new Image();
+        preImg.src = nextItem.mediaUrl;
+      }
+      return;
+    }
+
+    if (nextItem.kind !== 'video' || !nextItem.sourceVideoId) return;
+
+    const hasHighlights = Boolean(
+      (nextItem.highlights && nextItem.highlights.length > 0) ||
+      (nextItem.startTime && nextItem.startTime > 0)
+    );
+
+    // If highlights already exist, ensure the preloaded video is queued at climax
+    if (hasHighlights) {
+      const target = getEffectiveHighlightStart(nextItem, highlightIndexMap[nextItem.id]);
+      const preVid = preloadedVideoRef.current;
+      if (preVid && target > 0) {
+        try {
+          if (Math.abs(preVid.currentTime - target) > 0.5) {
+            preVid.currentTime = target;
+          }
+        } catch (_) {}
+      }
+      return;
+    }
+
+    // Background fetch smart highlight for the next video
+    let isMounted = true;
+    fetch(`/api/videos/${encodeURIComponent(nextItem.sourceVideoId)}/smart-highlight?desired_window=${highlightDuration}`)
+      .then(res => res.json())
+      .then(data => {
+        if (!isMounted || !data?.smart_highlight) return;
+        const sh = data.smart_highlight;
+        const start = sh.highlight_start > 0 ? sh.highlight_start : (sh.intro_end > 0 ? sh.intro_end : 0);
+        if (start > 0) {
+          nextItem.startTime = start;
+          nextItem.endTime = sh.highlight_end || nextItem.endTime;
+          nextItem.introEnd = sh.intro_end;
+          nextItem.highlightScore = sh.highlight_score;
+          nextItem.isSmartHighlight = true;
+          if (Array.isArray(sh.highlights)) {
+            nextItem.highlights = sh.highlights;
+          }
+          setHighlightIndexMap(prev => ({
+            ...prev,
+            [nextItem.id]: prev[nextItem.id] !== undefined ? prev[nextItem.id] : 0
+          }));
+          const preVid = preloadedVideoRef.current;
+          if (preVid) {
+            try {
+              if (Math.abs(preVid.currentTime - start) > 0.5) {
+                preVid.currentTime = start;
+              }
+            } catch (_) {}
+          }
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
+  }, [canPreloadNext, activeIndex, feedItems, highlightDuration, highlightIndexMap]);
 
   // Explicit hardware decoder teardown on component unmount
   useEffect(() => {
@@ -1337,6 +1432,9 @@ export const ShortsView: React.FC = () => {
           {/* Mounted Windowed Slides (R1, R2, R3) */}
           {mountedItems.map(({ item, idx }) => {
             const isActive = idx === activeIndex;
+            const isNext = idx === activeIndex + 1;
+            const isPreloadingNext = isNext && canPreloadNext;
+            const shouldMountVideo = isActive || isPreloadingNext;
             const cleanCaption = formatCleanCaption(item.title);
             const isCaptionExpanded = expandedCaptionId === item.id;
             const creatorLabel = item.folder || item.subtitle || 'Galeria';
@@ -1371,7 +1469,7 @@ export const ShortsView: React.FC = () => {
                   <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-transparent to-black/80" />
                 </div>
 
-                {/* Center Media Container (R2: exactly 1 active <video> in DOM) */}
+                {/* Center Media Container (R2: active video + 1 preloaded next video in DOM) */}
                 <div className="relative w-full h-full max-w-[540px] mx-auto flex items-center justify-center overflow-hidden sm:my-1.5 sm:rounded-3xl sm:border sm:border-white/10 shadow-2xl bg-black">
                   {item.kind === 'video' ? (
                     <div className="relative w-full h-full flex items-center justify-center">
@@ -1391,21 +1489,21 @@ export const ShortsView: React.FC = () => {
                         </div>
                       )}
 
-                      {/* Active Video Stream */}
-                      {isActive && (
+                      {/* Video Stream: Active or Next Preloading */}
+                      {shouldMountVideo && (
                         <video
                           key={item.id}
-                          ref={setVideoRef}
+                          ref={isActive ? setVideoRef : (el) => { if (isNext) preloadedVideoRef.current = el; }}
                           src={(() => {
                             const target = getEffectiveHighlightStart(item, highlightIndexMap[item.id]);
                             return target > 0 ? `${item.mediaUrl}#t=${target}` : item.mediaUrl;
                           })()}
-                          autoPlay
+                          autoPlay={isActive}
                           playsInline
                           {...({ 'webkit-playsinline': 'true', 'x5-playsinline': 'true' } as any)}
                           preload="auto"
                           loop={!autoAdvance}
-                          muted={isMuted}
+                          muted={isActive ? isMuted : true}
                           onLoadedMetadata={(e) => {
                             const v = e.currentTarget;
                             const target = getEffectiveHighlightStart(item, highlightIndexMap[item.id]);
@@ -1414,34 +1512,35 @@ export const ShortsView: React.FC = () => {
                                 v.currentTime = target;
                               } catch (_) {}
                             }
-                            if (!isPausedRef.current) {
+                            if (isActive && !isPausedRef.current) {
                               playVideoSafely(v);
                             }
                           }}
                           onCanPlay={(e) => {
                             const v = e.currentTarget;
-                            if (!isPausedRef.current) {
+                            if (isActive && !isPausedRef.current) {
                               playVideoSafely(v);
                             }
                           }}
                           onSeeked={(e) => {
                             const v = e.currentTarget;
-                            if (!isPausedRef.current) {
+                            if (isActive && !isPausedRef.current) {
                               playVideoSafely(v);
                             }
                           }}
                           onTimeUpdate={(e) => {
+                            if (!isActive) return;
                             const v = e.currentTarget;
                             if (v.duration > 0) {
                               setVideoProgress((v.currentTime / v.duration) * 100);
                             }
                           }}
                           onEnded={() => {
-                            if (autoAdvance) {
+                            if (isActive && autoAdvance) {
                               scrollToIndex(idx + 1);
                             }
                           }}
-                          className={`relative z-10 w-full h-full ${
+                          className={`${isActive ? 'relative z-10' : 'absolute inset-0 opacity-0 pointer-events-none'} w-full h-full ${
                             fitMode === 'cover' ? 'object-cover' : 'object-contain'
                           }`}
                         />

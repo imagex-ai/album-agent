@@ -102,6 +102,31 @@ function getEffectiveHighlightStart(item?: ShortsItem, hlIdx?: number): number {
   return 0;
 }
 
+function checkVideoFullyLoaded(v: HTMLVideoElement | null): boolean {
+  if (!v || !v.duration || v.duration <= 0) return false;
+  try {
+    const buf = v.buffered;
+    if (!buf || buf.length === 0) return false;
+
+    // 1. Fully downloaded to end of file
+    for (let i = 0; i < buf.length; i++) {
+      if (buf.end(i) >= v.duration - 0.5) {
+        return true;
+      }
+    }
+
+    // 2. High-priority forward buffer satisfied (at least 30s ahead of current playback)
+    if (v.readyState >= 4) {
+      for (let i = 0; i < buf.length; i++) {
+        if (buf.start(i) <= v.currentTime && buf.end(i) >= Math.min(v.duration - 0.5, v.currentTime + 30)) {
+          return true;
+        }
+      }
+    }
+  } catch (_) {}
+  return false;
+}
+
 export const ShortsView: React.FC = () => {
   const {
     videos,
@@ -145,7 +170,8 @@ export const ShortsView: React.FC = () => {
   const [highlightIndexMap, setHighlightIndexMap] = useState<Record<string, number>>({});
   const [highlightDuration, setHighlightDuration] = useState<number>(30);
   const [isAnalyzingActive, setIsAnalyzingActive] = useState<boolean>(false);
-  const [canPreloadNext, setCanPreloadNext] = useState<boolean>(false);
+  const [isActiveMediaReady, setIsActiveMediaReady] = useState<boolean>(false);
+  const canPreloadNext = isActiveMediaReady && !isAnalyzingActive;
 
   const handleCycleHighlight = useCallback((item: ShortsItem) => {
     const list = (item.highlights && item.highlights.length > 0)
@@ -660,28 +686,37 @@ export const ShortsView: React.FC = () => {
     }
   }, [activeIndex, isPaused, feedItems, highlightIndexMap, playVideoSafely, teardownVideoElement]);
 
+  // Track active slide media buffering readiness: guarantees active video is fully loaded before next video starts
+  useEffect(() => {
+    setIsActiveMediaReady(false);
+    const item = feedItems[activeIndex];
+    if (!item) return;
+
+    if (item.kind !== 'video') {
+      return;
+    }
+
+    const vid = activeVideoRef.current;
+    if (vid && checkVideoFullyLoaded(vid)) {
+      setIsActiveMediaReady(true);
+    }
+  }, [activeIndex, feedItems]);
+
   // On-demand background smart highlight detection with debounce to prevent flood on rapid swiping
   useEffect(() => {
     const item = feedItems[activeIndex];
     if (!item || item.kind !== 'video' || !item.sourceVideoId) {
       setIsAnalyzingActive(false);
-      const t = setTimeout(() => {
-        setCanPreloadNext(true);
-      }, 200);
-      return () => clearTimeout(t);
+      return;
     }
 
     if (item.startTime !== undefined && item.startTime > 0 && item.highlights && item.highlights.length > 0) {
       setIsAnalyzingActive(false);
-      const t = setTimeout(() => {
-        setCanPreloadNext(true);
-      }, 200);
-      return () => clearTimeout(t);
+      return;
     }
 
     let isMounted = true;
     setIsAnalyzingActive(true);
-    setCanPreloadNext(false);
 
     const timer = setTimeout(() => {
       fetch(`/api/videos/${encodeURIComponent(item.sourceVideoId || '')}/smart-highlight?desired_window=${highlightDuration}`)
@@ -689,8 +724,6 @@ export const ShortsView: React.FC = () => {
         .then(data => {
           if (!isMounted) return;
           setIsAnalyzingActive(false);
-          // Highlight loading completed: initiate next video preload below
-          setCanPreloadNext(true);
 
           if (!data?.smart_highlight) return;
           const sh = data.smart_highlight;
@@ -728,7 +761,6 @@ export const ShortsView: React.FC = () => {
         .catch(() => {
           if (isMounted) {
             setIsAnalyzingActive(false);
-            setCanPreloadNext(true);
             const vid = activeVideoRef.current;
             if (vid && !isPausedRef.current) {
               playVideoSafely(vid);
@@ -1512,20 +1544,51 @@ export const ShortsView: React.FC = () => {
                                 v.currentTime = target;
                               } catch (_) {}
                             }
-                            if (isActive && !isPausedRef.current) {
-                              playVideoSafely(v);
+                            if (isActive) {
+                              if (checkVideoFullyLoaded(v)) {
+                                setIsActiveMediaReady(true);
+                              }
+                              if (!isPausedRef.current) {
+                                playVideoSafely(v);
+                              }
                             }
                           }}
                           onCanPlay={(e) => {
                             const v = e.currentTarget;
-                            if (isActive && !isPausedRef.current) {
-                              playVideoSafely(v);
+                            if (isActive) {
+                              if (checkVideoFullyLoaded(v)) {
+                                setIsActiveMediaReady(true);
+                              }
+                              if (!isPausedRef.current) {
+                                playVideoSafely(v);
+                              }
+                            }
+                          }}
+                          onCanPlayThrough={(e) => {
+                            if (isActive) {
+                              const v = e.currentTarget;
+                              if (checkVideoFullyLoaded(v)) {
+                                setIsActiveMediaReady(true);
+                              }
+                            }
+                          }}
+                          onProgress={(e) => {
+                            if (isActive) {
+                              const v = e.currentTarget;
+                              if (checkVideoFullyLoaded(v)) {
+                                setIsActiveMediaReady(true);
+                              }
                             }
                           }}
                           onSeeked={(e) => {
                             const v = e.currentTarget;
-                            if (isActive && !isPausedRef.current) {
-                              playVideoSafely(v);
+                            if (isActive) {
+                              if (checkVideoFullyLoaded(v)) {
+                                setIsActiveMediaReady(true);
+                              }
+                              if (!isPausedRef.current) {
+                                playVideoSafely(v);
+                              }
                             }
                           }}
                           onTimeUpdate={(e) => {
@@ -1534,10 +1597,16 @@ export const ShortsView: React.FC = () => {
                             if (v.duration > 0) {
                               setVideoProgress((v.currentTime / v.duration) * 100);
                             }
+                            if (!isActiveMediaReady && checkVideoFullyLoaded(v)) {
+                              setIsActiveMediaReady(true);
+                            }
                           }}
                           onEnded={() => {
-                            if (isActive && autoAdvance) {
-                              scrollToIndex(idx + 1);
+                            if (isActive) {
+                              setIsActiveMediaReady(true);
+                              if (autoAdvance) {
+                                scrollToIndex(idx + 1);
+                              }
                             }
                           }}
                           className={`${isActive ? 'relative z-10' : 'absolute inset-0 opacity-0 pointer-events-none'} w-full h-full ${
@@ -1550,6 +1619,11 @@ export const ShortsView: React.FC = () => {
                     <img
                       src={item.mediaUrl}
                       alt={item.title}
+                      onLoad={() => {
+                        if (isActive) {
+                          setIsActiveMediaReady(true);
+                        }
+                      }}
                       className={`w-full h-full transition-transform duration-[4000ms] ease-out ${
                         fitMode === 'cover' ? 'object-cover' : 'object-contain'
                       } ${isActive && !isPaused ? 'scale-105' : 'scale-100'}`}

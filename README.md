@@ -1,6 +1,25 @@
-# ⚡ IMAGEX.AI v5.0
+# ⚡ IMAGEX.AI v5.2
 
 Autonomous platform for intelligent extraction, organization, and inspection of web albums and videos in their original maximum resolution. 🚀✨
+
+---
+
+## 🌟 What's New in v5.2 (Release Notes)
+
+* 🎬 **Full Immersive Shorts Experience:**
+  * Clean, border-to-border video feed with dedicated top exit action button.
+  * Multi-moment smart highlight detector (Gold #1, Silver #2, Bronze #3 climax moments) with interactive rank pills.
+* 🔊 **Persistent Audio Across Videos:**
+  * Unmuted audio state persists seamlessly across all consecutive video slides during vertical scroll.
+  * Browser autoplay policy resilience without wiping user audio preference.
+* ⚡ **Bandwidth-Aware Sequential Video Preloading:**
+  * Background preloader strictly waits until the active video is 100% completely buffered before buffering the next slide.
+  * Guarantees zero network bandwidth contention for smooth playback.
+  * Pre-computes smart highlight climax moments and pre-seeks the next stream for 0ms transition latency.
+* 🌐 **Standard Port 8100:**
+  * Unified default port standard across backend services, desktop window, and tunneling.
+* 🛡️ **Family-Friendly & Clean:**
+  * Cleaned all test fixtures and metadata documentation to ensure a 100% family-friendly environment.
 
 ---
 
@@ -20,12 +39,12 @@ python -m src.main
 Runs exclusively the FastAPI backend without opening a native window (ideal for accessing via Chrome/Edge or from mobile devices on your local Wi-Fi):
 
 ```powershell
-python -m src.main --server --port 8000
+python -m src.main --server --port 8100
 ```
 
 > 📱 **Browser Access:**
-> * **On local PC:** `http://localhost:8000`
-> * **On Mobile / Local Network:** `http://<YOUR_LOCAL_IP>:8000`
+> * **On local PC:** `http://localhost:8100`
+> * **On Mobile / Local Network:** `http://<YOUR_LOCAL_IP>:8100`
 
 ---
 
@@ -39,7 +58,7 @@ python -m src.main "https://example.com/gallery" --headed
 ---
 
 #### 4. Portable Executable (No Python Required) 📦
-1. Download `IMAGEX.AI-v5.0-Windows.zip` from the GitHub **Releases** tab.
+1. Download `IMAGEX.AI-v5.2-Windows.zip` from the GitHub **Releases** tab.
 2. Extract the archive anywhere on Windows.
 3. Double-click `main.exe` to run.
 
@@ -92,6 +111,16 @@ All downloaded media and metadata are dynamically persisted in the project root:
 
 ## 🇧🇷 Guia em Português
 
+### 🌟 Novidades da Versão 5.2
+
+* 🎬 **Experiência Imersiva nos Shorts:** Feed limpo de ponta a ponta com botão discreto de saída e detecção inteligente de clímax (Ouro, Prata, Bronze).
+* 🔊 **Áudio Persistente:** Ao ativar o som em um vídeo, o áudio continua ligado nos próximos vídeos durante a rolagem.
+* ⚡ **Pré-carregamento Inteligente com Proteção de Banda:** O próximo vídeo só inicia o pré-carregamento e detecção de clímax após o vídeo atual estar 100% bufferizado no navegador, garantindo prioridade total de rede ao vídeo em reprodução.
+* 🌐 **Padronização na Porta 8100:** Porta padrão atualizada para 8100 em todos os lançadores e serviços.
+* 🛡️ **Totalmente Family-Friendly:** Repositório higienizado e livre de conteúdos adultos.
+
+---
+
 ### 🚀 Como Iniciar o App e o Servidor
 
 #### 1. Modo Desktop Nativo (Janela pywebview) 🖥️
@@ -106,12 +135,12 @@ python -m src.main
 Inicia exclusivamente o backend FastAPI sem abrir nenhuma janela na tela (ideal para acessar pelo Chrome/Edge ou por outros dispositivos como celular na rede local):
 
 ```powershell
-python -m src.main --server --port 8000
+python -m src.main --server --port 8100
 ```
 
 > 📱 **Acesso no navegador:**
-> * **No PC local:** `http://localhost:8000`
-> * **No Celular/Wi-Fi:** `http://<SEU_IP_LOCAL>:8000`
+> * **No PC local:** `http://localhost:8100`
+> * **No Celular/Wi-Fi:** `http://<SEU_IP_LOCAL>:8100`
 
 ---
 
@@ -125,7 +154,7 @@ python -m src.main "https://exemplo.com/galeria" --headed
 ---
 
 #### 4. Executável Portátil (Sem precisar de Python) 📦
-1. Baixe o arquivo `IMAGEX.AI-v5.0-Windows.zip` na aba de **Releases** do GitHub.
+1. Baixe o arquivo `IMAGEX.AI-v5.2-Windows.zip` na aba de **Releases** do GitHub.
 2. Extraia a pasta em qualquer lugar do Windows.
 3. Dê dois cliques em `main.exe` para rodar.
 

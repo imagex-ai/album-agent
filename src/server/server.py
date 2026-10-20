@@ -7454,7 +7454,7 @@ async def get_keys_status():
         "huggingface": {
             "is_set": bool(raw_hf),
             "masked_token": _mask_secret(raw_hf),
-            "repo_id": raw_repo or "lokkmorant/album-data",
+            "repo_id": raw_repo or "",
             "is_connected": hf_connected,
             "error": hf_error
         }

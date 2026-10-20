@@ -22,10 +22,15 @@ def get_env_var(name: str) -> str:
 
 def main():
     token = get_env_var("HF_TOKEN")
-    repo_id = get_env_var("HF_DATASET_REPO") or "lokkmorant/album-data"
+    repo_id = get_env_var("HF_DATASET_REPO")
 
     if not token:
         print("[ERRO] HF_TOKEN não encontrado no ambiente ou no arquivo .env!")
+        sys.exit(1)
+
+    if not repo_id:
+        print("[ERRO] HF_DATASET_REPO não configurado no ambiente ou no arquivo .env!")
+        print("[AVISO] O upload para o Hugging Face só é permitido quando HF_DATASET_REPO estiver configurado explicitamente (ex: 'usuario/seu-dataset').")
         sys.exit(1)
 
     print(f"==================================================")

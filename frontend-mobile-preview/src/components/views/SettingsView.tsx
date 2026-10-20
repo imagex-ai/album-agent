@@ -466,7 +466,7 @@ export const SettingsView: React.FC = () => {
             <div className="p-2.5 rounded-xl bg-surface/80 border border-border space-y-1">
               <div className="flex items-center justify-between text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
                 <span>{isEn ? 'Server Token:' : 'Token no Servidor:'}</span>
-                <span className="text-cyan-400 font-mono lowercase">{keysData?.huggingface.repo_id || 'lokkmorant/album-data'}</span>
+                <span className="text-cyan-400 font-mono lowercase">{keysData?.huggingface.repo_id || (isEn ? 'not configured' : 'não configurado')}</span>
               </div>
               <div className="font-mono text-xs text-slate-200">
                 {keysData?.huggingface.masked_token || <span className="text-slate-500 italic">{t.noKeySet}</span>}

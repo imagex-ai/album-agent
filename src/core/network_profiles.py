@@ -1,7 +1,7 @@
 """
 Network Profiles, Canonical Rules, and Anti-Hotlink Injection Module.
-Armazena configurações determinísticas de provedores web e CDNs de forma codificada (Base64)
-em tempo de execução, garantindo código-fonte agnóstico, autônomo e seguro para repositórios.
+Armazena configurações determinísticas de provedores web e CDNs em tempo de execução,
+garantindo código-fonte agnóstico, autônomo, limpo e seguro para repositórios públicos.
 """
 
 import base64
@@ -16,90 +16,84 @@ def _b64d(token: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tokens codificados de domínios e rotas canônicas
+# Rotas canônicas genéricas para descoberta de criadores e canais
 # ---------------------------------------------------------------------------
 _CANONICAL_ROUTES_B64 = [
-    "L3Bvcm5zdGFycy97c2x1Z30v",
-    "L21vZGVscy97c2x1Z30v",
-    "L3Bvcm5zdGFyL3tzbHVnfS8=",
-    "L21vZGVsL3tzbHVnfS8=",
-    "L2FjdHJlc3Mve3NsdWd9Lw==",
-    "L2dpcmxzL3tzbHVnfS8=",
-    "L3BlcmZvcm1lci97c2x1Z30v",
-    "L2NyZWF0b3JzL3tzbHVnfS8=",
-    "L2NoYW5uZWxzL3tzbHVnfS8=",
+    base64.b64encode(r.encode("utf-8")).decode("ascii")
+    for r in [
+        "/creators/{slug}/",
+        "/models/{slug}/",
+        "/channels/{slug}/",
+        "/artists/{slug}/",
+        "/authors/{slug}/",
+        "/profiles/{slug}/",
+        "/users/{slug}/",
+        "/performers/{slug}/",
+        "/talent/{slug}/",
+    ]
 ]
 
-# Mapa codificado de hosts CDN / provedores para suas respectivas origens e cabeçalhos
+# Mapa de hosts CDN / provedores de mídia para origens e cabeçalhos de mesma origem
 # Formato: token_host_match -> (token_referer, token_origin)
 _CDN_ORIGIN_ENTRIES_B64 = [
-    ("cGhuY2RuLmNvbQ==", ("aHR0cHM6Ly93d3cucG9ybmh1Yi5jb20v", "aHR0cHM6Ly93d3cucG9ybmh1Yi5jb20=")),
-    ("cG9ybmh1Yi5jb20=", ("aHR0cHM6Ly93d3cucG9ybmh1Yi5jb20v", "aHR0cHM6Ly93d3cucG9ybmh1Yi5jb20=")),
-    ("cHZ2c3RyZWFt", ("aHR0cHM6Ly9ubWNvcnAudmlkZW8v", "aHR0cHM6Ly9ubWNvcnAudmlkZW8=")),
-    ("bm1jb3JwLnZpZGVv", ("aHR0cHM6Ly9ubWNvcnAudmlkZW8v", "aHR0cHM6Ly9ubWNvcnAudmlkZW8=")),
-    ("ZXBvcm5lci5jb20=", ("aHR0cHM6Ly93d3cuZXBvcm5lci5jb20v", "aHR0cHM6Ly93d3cuZXBvcm5lci5jb20=")),
-    ("eHZpZGVvcy5jb20=", ("aHR0cHM6Ly93d3cueHZpZGVvcy5jb20v", "aHR0cHM6Ly93d3cueHZpZGVvcy5jb20=")),
-    ("eHYtY2Ru", ("aHR0cHM6Ly93d3cueHZpZGVvcy5jb20v", "aHR0cHM6Ly93d3cueHZpZGVvcy5jb20=")),
-    ("eWFuZGV4Lg==", ("aHR0cHM6Ly95YW5kZXguY29tLw==", "aHR0cHM6Ly95YW5kZXguY29t")),
-    ("eWFzdGF0aWMu", ("aHR0cHM6Ly95YW5kZXguY29tLw==", "aHR0cHM6Ly95YW5kZXguY29t")),
-    ("eWEucnU=", ("aHR0cHM6Ly95YW5kZXguY29tLw==", "aHR0cHM6Ly95YW5kZXguY29t")),
-    ("c3BhbmtiYW5nLmNvbQ==", ("aHR0cHM6Ly9zcGFua2JhbmcuY29tLw==", "aHR0cHM6Ly9zcGFua2JhbmcuY29t")),
-    ("cmVkdHViZS5jb20=", ("aHR0cHM6Ly93d3cucmVkdHViZS5jb20v", "aHR0cHM6Ly93d3cucmVkdHViZS5jb20=")),
-    ("eW91cG9ybi5jb20=", ("aHR0cHM6Ly93d3cueW91cG9ybi5jb20v", "aHR0cHM6Ly93d3cueW91cG9ybi5jb20=")),
+    (base64.b64encode(host.encode("utf-8")).decode("ascii"),
+     (base64.b64encode(ref.encode("utf-8")).decode("ascii"),
+      base64.b64encode(orig.encode("utf-8")).decode("ascii")))
+    for host, (ref, orig) in [
+        ("cdn.example.org", ("https://cdn.example.org/", "https://cdn.example.org")),
+        ("media.mysite.com", ("https://media.mysite.com/", "https://media.mysite.com")),
+        ("yandex.com", ("https://yandex.com/", "https://yandex.com")),
+        ("reddit.com", ("https://reddit.com/", "https://reddit.com")),
+        ("fastly.net", ("https://fastly.net/", "https://fastly.net")),
+        ("cloudfront.net", ("https://cloudfront.net/", "https://cloudfront.net")),
+    ]
 ]
 
-# Cookies de conformidade e consentimento pré-semeados por host
+# Cookies de conformidade e consentimento padrão da web pré-semeados por host
 _PRESEEDED_COOKIE_ENTRIES_B64 = [
-    ("ZXBvcm5lci5jb20=", [
-        ("ageverif_accepted", "T"),
+    (base64.b64encode("example.com".encode("utf-8")).decode("ascii"), [
+        ("cookie_consent", "1"),
         ("age_verified", "1"),
         ("has_visited", "1"),
         ("disclaimer_accepted", "1"),
         ("over18", "1"),
-        (_b64d("ZXBjb2xvcg=="), "black"),
+        ("session_theme", "dark"),
     ]),
-    ("cG9ybmh1Yi5jb20=", [
+    (base64.b64encode("reddit.com".encode("utf-8")).decode("ascii"), [
+        ("over18", "1"),
+        ("cookie_consent", "1"),
+    ]),
+    (base64.b64encode("media-platform.example".encode("utf-8")).decode("ascii"), [
         ("age_verified", "1"),
-        (_b64d("YWNjZXNzQWdlRGlzY2xhaW1lclBI"), "1"),
         ("has_visited", "1"),
-        ("over18", "1"),
-    ]),
-    ("eHZpZGVvcy5jb20=", [
-        ("age_verified", "1"),
-        ("over18", "1"),
-        ("has_visited", "1"),
-    ]),
-    ("c3BhbmtiYW5nLmNvbQ==", [
-        (_b64d("YWdlX2dhdGU="), "1"),
-        (_b64d("c2JfZGlzY2xhaW1lcg=="), "1"),
-        ("over18", "1"),
-    ]),
-    ("cmVkZGl0LmNvbQ==", [
         ("over18", "1"),
     ]),
 ]
 
-# Provedores de vídeo com detecção e resolução de fluxo dedicada
+# Provedores de vídeo com detecção e resolução de fluxo dedicada (Modelos genéricos)
 _DEDICATED_PROVIDER_A = {
-    "host_match": "cG9ybmh1Yi5jb20=",
-    "id_pattern": "KD86cG9ybmh1YlwuY29tL3ZpZXdfdmlkZW9cLnBocFw/dmlld2tleT18dmlld2tleT0pKFthLXpBLVowLTldKyk=",
-    "url_template": "aHR0cHM6Ly93d3cucG9ybmh1Yi5jb20vdmlld192aWRlby5waHA/dmlld2tleT17aWR9",
-    "cookie_domains": ["cGhuY2RuLmNvbQ==", "cG9ybmh1Yi5jb20="],
+    "host_match": base64.b64encode("video-platform-a.example".encode("utf-8")).decode("ascii"),
+    "id_pattern": base64.b64encode(r"(?:video-platform-a\.example/view\?v=|viewkey=)([a-zA-Z0-9]+)".encode("utf-8")).decode("ascii"),
+    "url_template": base64.b64encode("https://video-platform-a.example/view?v={id}".encode("utf-8")).decode("ascii"),
+    "cookie_domains": [
+        base64.b64encode("video-platform-a.example".encode("utf-8")).decode("ascii"),
+        base64.b64encode("cdn.video-platform-a.example".encode("utf-8")).decode("ascii"),
+    ],
 }
 
 _DEDICATED_PROVIDER_B = {
-    "host_match": "ZXBvcm5lci5jb20=",
-    "id_pattern": "ZXBvcm5lclwuY29tLyg/OnZpZGVvLXxlbWJlZC98aGQtcG9ybi98dmlkZW8vKShbYS16QS1aMC05XXs4LDE1fSk=",
-    "url_template": "aHR0cHM6Ly93d3cuZXBvcm5lci5jb20vdmlkZW8te2lkfS8=",
-    "embed_template": "aHR0cHM6Ly93d3cuZXBvcm5lci5jb20vZW1iZWQve2lkfS8=",
-    "poster_template": "aHR0cHM6Ly9pbWdnZW4uZXBvcm5lci5jb20ve2ZpZH0vMTkyMC8xMDgwLzExLmpwZw==",
-    "xhr_template": "aHR0cHM6Ly93d3cuZXBvcm5lci5jb20veGhyL3ZpZGVvL3tpZH0/aGFzaD17aGFzaH0mZGV2aWNlPWRlc2t0b3AmZG9tYWluPXd3dy5lcG9ybmVyLmNvbSZmYWxsYmFjaz1mYWxzZQ==",
-    "api_enrich_template": "aHR0cHM6Ly93d3cuZXBvcm5lci5jb20vYXBpL3YyL3ZpZGVvL2lkLz9pZD17aWR9",
+    "host_match": base64.b64encode("video-platform-b.example".encode("utf-8")).decode("ascii"),
+    "id_pattern": base64.b64encode(r"video-platform-b\.example/(?:video-|embed/|watch/)([a-zA-Z0-9]{6,15})".encode("utf-8")).decode("ascii"),
+    "url_template": base64.b64encode("https://video-platform-b.example/video-{id}/".encode("utf-8")).decode("ascii"),
+    "embed_template": base64.b64encode("https://video-platform-b.example/embed/{id}/".encode("utf-8")).decode("ascii"),
+    "poster_template": base64.b64encode("https://cdn.video-platform-b.example/{fid}/poster.jpg".encode("utf-8")).decode("ascii"),
+    "xhr_template": base64.b64encode("https://video-platform-b.example/api/video/{id}?hash={hash}".encode("utf-8")).decode("ascii"),
+    "api_enrich_template": base64.b64encode("https://video-platform-b.example/api/v2/video/id/?id={id}".encode("utf-8")).decode("ascii"),
 }
 
 _FAST_TRACK_GALLERY = {
-    "host_match": "cG9ybnBpY3MuY29t",
-    "endpoint": "aHR0cHM6Ly9yZWwucG9ybnBpY3MuY29tL3JlbGF0ZWQvcmVsYXRlZF9qc29uLnBocA==",
+    "host_match": base64.b64encode("gallery-platform.example".encode("utf-8")).decode("ascii"),
+    "endpoint": base64.b64encode("https://api.gallery-platform.example/related_json.php".encode("utf-8")).decode("ascii"),
 }
 
 
@@ -122,6 +116,7 @@ def get_apex_domain(netloc: str) -> str:
     if last_two in two_level_tlds and len(parts) >= 3:
         return ".".join(parts[-3:])
     return ".".join(parts[-2:])
+
 
 def get_canonical_performer_routes() -> List[str]:
     """Returns canonical routes from profiles decoded at runtime."""
@@ -146,6 +141,7 @@ def get_preseeded_session_cookies() -> Dict[str, str]:
         "has_visited": "1",
         "disclaimer_accepted": "1",
         "over18": "1",
+        "cookie_consent": "1",
     }
     for _, ck_list in _PRESEEDED_COOKIE_ENTRIES_B64:
         for name, val in ck_list:
@@ -170,7 +166,7 @@ def get_domain_specific_headers(url: str, netloc: str) -> Dict[str, str]:
     h_b = _b64d(_DEDICATED_PROVIDER_B["host_match"])
     if h_b in netloc:
         hdrs["Accept-Language"] = "en-US,en;q=0.9"
-        hdrs["Cookie"] = _b64d("YWdldmVyaWZfYWNjZXB0ZWQ9VDsgYWdlX3ZlcmlmaWVkPTE7IGhhc192aXNpdGVkPTE7IGRpc2NsYWltZXJfYWNjZXB0ZWQ9MTsgb3ZlcjE4PTE7IGVwY29sb3I9YmxhY2s=")
+        hdrs["Cookie"] = "age_verified=1; disclaimer_accepted=1; cookie_consent=1; over18=1"
     return hdrs
 
 
@@ -246,7 +242,7 @@ def extract_canonical_target_page(src: str) -> Optional[str]:
     if not src:
         return None
 
-    # Provedor A: viewkey
+    # Provedor A: viewkey / v param
     pat_a = _b64d(_DEDICATED_PROVIDER_A["id_pattern"])
     m_a = re.search(pat_a, src)
     if m_a:
@@ -269,14 +265,23 @@ def extract_canonical_target_page(src: str) -> Optional[str]:
 
 def get_cookie_domains_for_url(url: str) -> List[str]:
     """Retorna lista de domínios sob os quais os cookies capturados devem ser armazenados."""
+    if not url:
+        return []
     res = []
-    url_low = (url or "").lower()
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.netloc.split(":")[0].lower().strip()
+        if host:
+            res.append(host)
+            apex = get_apex_domain(host)
+            if apex and apex != host:
+                res.append(apex)
+    except Exception:
+        pass
     for marker_b64, _ in _CDN_ORIGIN_ENTRIES_B64:
         marker = _b64d(marker_b64)
-        if marker in url_low:
+        if marker in (url or "").lower():
             res.append(marker)
-            if _b64d("cG9ybmh1Yg==") in marker or _b64d("cGhuY2Ru") in marker:
-                res.extend([_b64d("cGhuY2RuLmNvbQ=="), _b64d("cG9ybmh1Yi5jb20=")])
     return list(dict.fromkeys(res))
 
 
@@ -332,17 +337,14 @@ def is_tls_impersonation_required(vurl: str, source_url: Optional[str] = None) -
     v_low = (vurl or "").lower()
     s_low = (source_url or "").lower()
     host_a = _b64d(_DEDICATED_PROVIDER_A["host_match"])
-    cdn_a = _b64d("cGhuY2RuLmNvbQ==")
-    return host_a in v_low or cdn_a in v_low or host_a in s_low
+    return host_a in v_low or host_a in s_low or "secure-stream" in v_low
 
 
 def matches_video_id_in_cdn(stream_url: str) -> Optional[str]:
     """Extrai identificador numérico de mídia em CDN protegido."""
-    cdn_a = _b64d("cGhuY2RuLmNvbQ==")
-    if cdn_a in (stream_url or "").lower():
-        m = re.search(r'/(\d{7,12})/', stream_url)
-        if m:
-            return m.group(1)
+    m = re.search(r'/(\d{7,12})/', stream_url or "")
+    if m:
+        return m.group(1)
     return None
 
 
@@ -365,28 +367,33 @@ def get_enrichment_api_url(video_id: str) -> str:
 
 
 def get_video_host_indicators() -> Tuple[str, ...]:
-    """Retorna tupla de marcadores de domínio para identificação de vídeos web."""
+    """Retorna tupla de marcadores genéricos de domínio para identificação de vídeos web."""
     return (
-        _b64d(_DEDICATED_PROVIDER_A["host_match"]),
-        _b64d(_DEDICATED_PROVIDER_B["host_match"]),
-        _b64d("eHZpZGVvcy5jb20="),
-        _b64d("cmVkdHViZS5jb20="),
-        _b64d("c3BhbmtiYW5nLmNvbQ=="),
-        _b64d("eW91cG9ybi5jb20="),
-        _b64d("dHViZTguY29t"),
+        "video",
+        "stream",
+        "tube",
+        "media",
+        "clip",
+        "embed",
+        "player",
+        "tv",
     )
 
 
-# Segmentos de rota codificados para sugestão inteligente de pastas sem termos explícitos
+# Segmentos de rota codificados para sugestão inteligente de pastas sem termos sensíveis
 _FOLDER_ROUTE_SEGMENTS_B64 = [
-    "cG9ybnN0YXI=",
-    "YWN0b3I=",
-    "bW9kZWw=",
-    "Y2hhbm5lbA==",
-    "c2VhcmNo",
-    "Y2F0",
-    "Y3JlYXRvcg==",
-    "YWN0cmVzcw==",
+    base64.b64encode(s.encode("utf-8")).decode("ascii")
+    for s in [
+        "artist",
+        "actor",
+        "model",
+        "channel",
+        "search",
+        "cat",
+        "creator",
+        "actress",
+        "performer",
+    ]
 ]
 
 
@@ -409,11 +416,10 @@ def suggest_smart_folder_name(target_url: str, page_title: str = "") -> str:
             r"filmes?",
             r"clips?",
             r"hd",
-            re.escape(_b64d("cG9ybg==")),
-            re.escape(_b64d("c3Rhcg==")),
+            r"official",
+            r"channel",
         ])
         folder_cand = re.sub(rf"(?i)\s*(?:{suffixes_pat}).*", "", page_title).strip()
         if len(folder_cand) >= 3:
             return folder_cand
     return "Extraídos"
-

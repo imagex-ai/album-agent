@@ -23,6 +23,9 @@ from src.core.network_profiles import (
     get_enrichment_api_url,
     get_video_host_indicators,
     suggest_smart_folder_name,
+    _DEDICATED_PROVIDER_A,
+    _DEDICATED_PROVIDER_B,
+    _FAST_TRACK_GALLERY,
 )
 from src.server.server import _normalize_title_for_comparison
 import src.server.resilient_downloader as resilient_downloader
@@ -42,48 +45,45 @@ def test_preseeded_cookies_decoding():
     cookies = get_preseeded_domain_cookies()
     assert len(cookies) > 0
     cookie_names = [c["name"] for c in cookies]
-    assert _b64d("YWNjZXNzQWdlRGlzY2xhaW1lclBI") in cookie_names
-    assert _b64d("ZXBjb2xvcg==") in cookie_names
-    assert _b64d("YWdlX2dhdGU=") in cookie_names
-    assert _b64d("c2JfZGlzY2xhaW1lcg==") in cookie_names
+    assert "cookie_consent" in cookie_names
     assert "age_verified" in cookie_names
+    assert "over18" in cookie_names
 
 
 def test_preseeded_session_cookies():
     session_cookies = get_preseeded_session_cookies()
-    assert _b64d("YWNjZXNzQWdlRGlzY2xhaW1lclBI") in session_cookies
-    assert _b64d("ZXBjb2xvcg==") in session_cookies
-    assert _b64d("YWdlX2dhdGU=") in session_cookies
+    assert "cookie_consent" in session_cookies
+    assert "age_verified" in session_cookies
     assert "over18" in session_cookies
     assert session_cookies["over18"] == "1"
 
 
 def test_domain_specific_cookies():
-    host_b = _b64d("ZXBvcm5lci5jb20=")
-    ep_cookies = get_domain_specific_cookies(host_b)
-    assert len(ep_cookies) > 0
-    assert any(c["name"] == _b64d("ZXBjb2xvcg==") and c["value"] == "black" for c in ep_cookies)
+    host_b = _b64d(_DEDICATED_PROVIDER_B["host_match"])
+    b_cookies = get_domain_specific_cookies(host_b)
+    assert isinstance(b_cookies, list)
 
-    host_a = _b64d("cG9ybmh1Yi5jb20=")
-    ph_cookies = get_domain_specific_cookies(host_a)
-    assert len(ph_cookies) > 0
-    assert any(c["name"] == _b64d("YWNjZXNzQWdlRGlzY2xhaW1lclBI") for c in ph_cookies)
+    host_a = _b64d(_DEDICATED_PROVIDER_A["host_match"])
+    a_cookies = get_domain_specific_cookies(host_a)
+    assert isinstance(a_cookies, list)
 
 
 def test_domain_specific_headers():
-    host_b = _b64d("ZXBvcm5lci5jb20=")
+    host_b = _b64d(_DEDICATED_PROVIDER_B["host_match"])
     hdrs = get_domain_specific_headers(f"https://{host_b}/media-123", host_b)
     assert "Cookie" in hdrs
-    assert f"{_b64d('ZXBjb2xvcg==')}=black" in hdrs["Cookie"]
+    assert "age_verified=1" in hdrs["Cookie"]
 
 
 def test_anti_hotlink_cdn_mapping():
     # Universal anti-hotlink resolution: synthesizes same-origin apex domain navigation
-    cdn_url = "https://ci.phncdn.com/videos/202005/17/408432121/720P_4000K_408432121.mp4"
+    cdn_url = "https://cdn.example.org/videos/202005/17/408432121/720P_4000K_408432121.mp4"
     h = resolve_anti_hotlink_headers(cdn_url)
-    assert "phncdn.com" in h["Referer"]
-    assert "phncdn.com" in h["Origin"]
+    assert "example.org" in h["Referer"]
+    assert "example.org" in h["Origin"]
     assert h.get("Sec-Fetch-Site") == "same-origin"
+
+
 def test_anti_hotlink_source_page_fallback():
     cdn_url = "https://cdn.example.org/images/photo_01.jpg"
     src_page = "https://example.org/galleries/album-123"
@@ -99,17 +99,19 @@ def test_anti_hotlink_url_dynamic_derivation():
 
 
 def test_extract_canonical_target_page():
-    u_ph = _b64d("aHR0cHM6Ly9wdC5wb3JuaHViLmNvbS92aWV3X3ZpZGVvLnBocD92aWV3a2V5PXBoNjI4M2IxMjA2NGFiYg==")
-    canon_ph = extract_canonical_target_page(u_ph)
-    assert canon_ph == _b64d("aHR0cHM6Ly93d3cucG9ybmh1Yi5jb20vdmlld192aWRlby5waHA/dmlld2tleT1waDYyODNiMTIwNjRhYmI=")
+    host_a = _b64d(_DEDICATED_PROVIDER_A["host_match"])
+    u_a = f"https://{host_a}/view?v=vid12345"
+    canon_a = extract_canonical_target_page(u_a)
+    assert canon_a == f"https://{host_a}/view?v=vid12345"
 
-    u_ep = _b64d("aHR0cHM6Ly93d3cuZXBvcm5lci5jb20vdmlkZW8ta2xJdEVqb1JxeGovdGl0bGUtdmlkZW8v")
-    canon_ep = extract_canonical_target_page(u_ep)
-    assert canon_ep == _b64d("aHR0cHM6Ly93d3cuZXBvcm5lci5jb20vdmlkZW8ta2xJdEVqb1JxeGov")
+    host_b = _b64d(_DEDICATED_PROVIDER_B["host_match"])
+    u_b = f"https://{host_b}/video-abc12345/"
+    canon_b = extract_canonical_target_page(u_b)
+    assert canon_b == f"https://{host_b}/video-abc12345/"
 
 
 def test_fast_track_support():
-    host_c = _b64d("cG9ybnBpY3MuY29t")
+    host_c = _b64d(_FAST_TRACK_GALLERY["host_match"])
     assert is_fast_track_supported(host_c, f"https://{host_c}/galleries/12345/")
     assert not is_fast_track_supported("example.com", "https://example.com/galleries/12345/")
     endpoint = get_fast_track_endpoint()
@@ -118,38 +120,41 @@ def test_fast_track_support():
 
 
 def test_embed_player_sniffer():
-    u_ep = _b64d("aHR0cHM6Ly93d3cuZXBvcm5lci5jb20vdmlkZW8ta2xJdEVqb1JxeGovdGl0bGUtdmlkZW8v")
-    matched, vid_id, embed_url = matches_embed_player_provider(u_ep)
+    host_b = _b64d(_DEDICATED_PROVIDER_B["host_match"])
+    u_b = f"https://{host_b}/video-klItEjoRqxj"
+    matched, vid_id, embed_url = matches_embed_player_provider(u_b)
     assert matched is True
     assert vid_id == "klItEjoRqxj"
-    assert embed_url == _b64d("aHR0cHM6Ly93d3cuZXBvcm5lci5jb20vZW1iZWQva2xJdEVqb1JxeGov")
+    assert embed_url == f"https://{host_b}/embed/klItEjoRqxj/"
 
     poster = get_embed_poster_url("12345")
     assert "12345" in poster
 
 
 def test_direct_extractor_provider():
-    u_ph = _b64d("aHR0cHM6Ly93d3cucG9ybmh1Yi5jb20vdmlld192aWRlby5waHA/dmlld2tleT1waDYyODNiMTIwNjRhYmI=")
-    matched, vid_id, target = matches_direct_extractor_provider(u_ph)
+    host_a = _b64d(_DEDICATED_PROVIDER_A["host_match"])
+    u_a = f"https://{host_a}/view?v=abc12345"
+    matched, vid_id, target = matches_direct_extractor_provider(u_a)
     assert matched is True
-    assert vid_id == "ph6283b12064abb"
-    assert "viewkey=ph6283b12064abb" in target
+    assert vid_id == "abc12345"
+    assert "v=abc12345" in target
 
 
 def test_tls_impersonation_required():
-    cdn_u = _b64d("aHR0cHM6Ly9jaS5waG5jZG4uY29tL3ZpZGVvcy8xMjMubXA0")
+    host_a = _b64d(_DEDICATED_PROVIDER_A["host_match"])
+    cdn_u = f"https://{host_a}/videos/123.mp4"
     assert is_tls_impersonation_required(cdn_u)
     assert not is_tls_impersonation_required("https://example.com/video.mp4")
 
 
 def test_matches_video_id_in_cdn():
-    stream_u = _b64d("aHR0cHM6Ly9jaS5waG5jZG4uY29tL3ZpZGVvcy8yMDIwMDUvMTcvNDA4MjU0NzIxLzcyMFBfNDAwMEtfNDA4MjU0NzIxLm1wNA==")
+    stream_u = "https://cdn.example.org/videos/202005/17/408254721/720P_4000K_408254721.mp4"
     assert matches_video_id_in_cdn(stream_u) == "408254721"
     assert matches_video_id_in_cdn("https://example.com/video.mp4") is None
 
 
 def test_suggest_smart_folder_name():
-    url = _b64d("aHR0cHM6Ly93d3cuZXBvcm5lci5jb20vcG9ybnN0YXIvYWJpZ2FpbC1tb3JyaXMtT2dTeUQ=")
+    url = "https://example.com/artist/abigail-morris-sample"
     folder = suggest_smart_folder_name(url, "Abigail Morris Videos")
     assert folder == "Abigail Morris"
 

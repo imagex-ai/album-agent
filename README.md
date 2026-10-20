@@ -18,8 +18,8 @@ Autonomous platform for intelligent extraction, organization, and inspection of 
   * Pre-computes smart highlight climax moments and pre-seeks the next stream for 0ms transition latency.
 * 🌐 **Standard Port 8100:**
   * Unified default port standard across backend services, desktop window, and tunneling.
-* 🛡️ **Family-Friendly & Clean:**
-  * Cleaned all test fixtures and metadata documentation to ensure a 100% family-friendly environment.
+* 🛡️ **Clean & Modular Architecture:**
+  * Standardized test fixtures, network profiles, and decoupled provider integrations.
 
 ---
 
@@ -117,7 +117,7 @@ All downloaded media and metadata are dynamically persisted in the project root:
 * 🔊 **Áudio Persistente:** Ao ativar o som em um vídeo, o áudio continua ligado nos próximos vídeos durante a rolagem.
 * ⚡ **Pré-carregamento Inteligente com Proteção de Banda:** O próximo vídeo só inicia o pré-carregamento e detecção de clímax após o vídeo atual estar 100% bufferizado no navegador, garantindo prioridade total de rede ao vídeo em reprodução.
 * 🌐 **Padronização na Porta 8100:** Porta padrão atualizada para 8100 em todos os lançadores e serviços.
-* 🛡️ **Totalmente Family-Friendly:** Repositório higienizado e livre de conteúdos adultos.
+* 🛡️ **Arquitetura Limpa e Modular:** Padronização de perfis de rede, suíte de testes e desacoplamento de provedores.
 
 ---
 

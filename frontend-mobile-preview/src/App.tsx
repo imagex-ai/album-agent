@@ -79,6 +79,26 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', handleGlobalKeys);
   }, []);
 
+  // Global mouse-wheel horizontal scroll for any horizontal overflow-x-auto bar
+  useEffect(() => {
+    const handleGlobalWheel = (e: WheelEvent) => {
+      if (e.deltaY === 0 || e.shiftKey) return;
+      const target = e.target as HTMLElement | null;
+      if (!target || typeof target.closest !== 'function') return;
+      const hScrollEl = target.closest('.overflow-x-auto') as HTMLElement | null;
+      if (!hScrollEl) return;
+      // Only hijack vertical wheel if this container overflows horizontally and does NOT overflow vertically
+      const canScrollHorizontally = hScrollEl.scrollWidth > hScrollEl.clientWidth + 2;
+      const canScrollVertically = hScrollEl.scrollHeight > hScrollEl.clientHeight + 8;
+      if (canScrollHorizontally && !canScrollVertically) {
+        e.preventDefault();
+        hScrollEl.scrollLeft += e.deltaY;
+      }
+    };
+    window.addEventListener('wheel', handleGlobalWheel, { passive: false });
+    return () => window.removeEventListener('wheel', handleGlobalWheel);
+  }, []);
+
   // Sync initial tab from URL hash on load (e.g. /#/videos, /#/gallery, /#/extractor)
   useEffect(() => {
     const parseHash = () => {

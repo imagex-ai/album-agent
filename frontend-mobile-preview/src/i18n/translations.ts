@@ -258,7 +258,16 @@ const rawTranslations: Record<Language, any> = {
       couldNotQueueVideos: "Não foi possível enfileirar os vídeos.",
       couldNotQueueVideo: "Não foi possível enfileirar o vídeo.",
       failedConnectServer: "Falha ao conectar com o servidor.",
-      saveCountVideosFolder: "Salvar {count} Vídeos na Pasta"
+      saveCountVideosFolder: "Salvar {count} Vídeos na Pasta",
+      saveModeLabel: "Modo:",
+      modeStreamFast: "Stream na Galeria (0 MB • Rápido)",
+      modeStreamFastTitle: "Salva na Galeria de Vídeos instantaneamente via Stream Web sem baixar arquivos pesados no PC",
+      modeLocalData: "Baixar na pasta Data (Local)",
+      modeLocalDataTitle: "Baixa o arquivo .mp4 completo para a pasta data/videos/ no seu PC",
+      saveSelectedBtn: "Salvar Selecionados",
+      saveSelectedVideosBtn: "Salvar Selecionados ({count} vídeos)",
+      streamQueuedTitle: "Vídeos Salvos na Galeria (Stream)",
+      streamQueuedMsg: "{count} vídeo(s) adicionados à Galeria em modo Stream (0 MB local) na pasta \"{folder}\"."
     },
     extractor: {
       title: "Central de Extração Autônoma de Mídia",
@@ -311,7 +320,12 @@ const rawTranslations: Record<Language, any> = {
       videosExtractedSuccess: "Vídeos extraídos com sucesso!",
       albumExtractedSuccess: "Álbum salvo com sucesso!",
       videoNotificationTitle: "Vídeo(s) Extraído(s) com Sucesso!",
-      albumNotificationTitle: "Álbum Extraído com Sucesso!"
+      albumNotificationTitle: "Álbum Extraído com Sucesso!",
+      videoStorageModeLabel: "Armazenamento do Vídeo:",
+      videoModeStreamFast: "Stream na Galeria (0 MB • Instantâneo)",
+      videoModeStreamFastDesc: "Salva na galeria sem baixar arquivo .mp4 no PC",
+      videoModeLocalData: "Salvar na pasta Data (Local)",
+      videoModeLocalDataDesc: "Baixa o arquivo .mp4 físico para data/videos/"
     },
     gallery: {
       title: "Biblioteca de Álbuns Salvos",
@@ -514,7 +528,16 @@ const rawTranslations: Record<Language, any> = {
       expandVideo: "Expandir Vídeo (Player Grande)",
       closePlayer: "Fechar Reprodutor",
       deselectVideo: "Desmarcar vídeo",
-      selectVideo: "Selecionar vídeo"
+      selectVideo: "Selecionar vídeo",
+      saveLocalData: "Salvar na pasta Data (Local)",
+      saveLocalDataTitle: "Baixar e armazenar cópia física .mp4 na pasta data/videos/ para stream local ultrarrápido",
+      badgeWebStream: "Stream Web (0 MB)",
+      badgeLocalData: "Local (Data)",
+      storageDestLabel: "Destino do Armazenamento:",
+      storageStreamTitle: "Stream na Galeria (URL)",
+      storageStreamDesc: "Sem download no PC (0 MB em disco)",
+      storageLocalTitle: "Baixar na pasta Data (Local)",
+      storageLocalDesc: "Salva arquivo .mp4 em data/videos/"
     },
     settings: {
       title: "Preferências do Sistema",
@@ -973,7 +996,11 @@ const rawTranslations: Record<Language, any> = {
       removeConfirm: "Deseja remover este item do álbum?",
       savingToDownloads: "Salvando \"{filename}\" diretamente na pasta Downloads...",
       fileSavedInDownloads: "✓ Arquivo salvo na pasta Downloads: \"{filename}\".",
-      failSaveFile: "Falha ao salvar arquivo no disco."
+      failSaveFile: "Falha ao salvar arquivo no disco.",
+      saveStreamToGallery: "Salvar na Galeria (Stream • 0 MB)",
+      saveLocalToData: "Baixar na pasta Data (Local)",
+      saveVideosStreamStarted: "Salvando na Galeria (Stream)",
+      saveVideosStreamStartedMsg: "{count} vídeo(s) estão sendo salvos em modo Stream (0 MB local) na pasta \"{folder}\"."
     },
     dock: {
       activeExtraction: "Extração Ativa em Segundo Plano:",
@@ -1299,7 +1326,14 @@ const rawTranslations: Record<Language, any> = {
       saveVideo: "Salvar Vídeo",
       videoSavedSuccess: "Vídeo Salvo com Sucesso!",
       extraction100Success: "Extração 100% Concluída!",
-      pausedByUser: "Pausado pelo usuário"
+      pausedByUser: "Pausado pelo usuário",
+      savingStreamStage: "Registrando stream na galeria (0 MB local)...",
+      savingLocalStage: "Iniciando download local na pasta Data...",
+      videoStreamSavedTitle: "Salvando na Galeria (Stream)",
+      videoLocalDownloadTitle: "Download Local Iniciado",
+      videoSavingProgressMsg: "\"{title}\" está sendo salvo na pasta \"{folder}\".",
+      videoSaveStartErrorTitle: "Erro ao Iniciar Salvamento",
+      videoSaveStartErrorMsg: "Não foi possível salvar o vídeo."
     },
     shorts: {
       title: "Shorts & Reels",
@@ -1633,7 +1667,16 @@ const rawTranslations: Record<Language, any> = {
       couldNotQueueVideos: "Could not queue videos.",
       couldNotQueueVideo: "Could not queue video.",
       failedConnectServer: "Failed to connect to server.",
-      saveCountVideosFolder: "Save {count} Videos to Folder"
+      saveCountVideosFolder: "Save {count} Videos to Folder",
+      saveModeLabel: "Mode:",
+      modeStreamFast: "Stream in Gallery (0 MB • Fast)",
+      modeStreamFastTitle: "Saves to Video Gallery instantly via Web Stream without downloading heavy files to your PC",
+      modeLocalData: "Download to Data folder (Local)",
+      modeLocalDataTitle: "Downloads the full .mp4 file to the data/videos/ folder on your PC",
+      saveSelectedBtn: "Save Selected",
+      saveSelectedVideosBtn: "Save Selected ({count} videos)",
+      streamQueuedTitle: "Videos Saved to Gallery (Stream)",
+      streamQueuedMsg: "{count} video(s) added to Gallery in Stream mode (0 MB local) in folder \"{folder}\"."
     },
     extractor: {
       title: "Autonomous Media Extraction Hub",
@@ -1686,7 +1729,12 @@ const rawTranslations: Record<Language, any> = {
       videosExtractedSuccess: "Videos extracted successfully!",
       albumExtractedSuccess: "Album saved successfully!",
       videoNotificationTitle: "Video(s) Extracted Successfully!",
-      albumNotificationTitle: "Album Extracted Successfully!"
+      albumNotificationTitle: "Album Extracted Successfully!",
+      videoStorageModeLabel: "Video Storage Mode:",
+      videoModeStreamFast: "Stream in Gallery (0 MB • Instant)",
+      videoModeStreamFastDesc: "Saves to gallery without downloading .mp4 file to PC",
+      videoModeLocalData: "Save to Data folder (Local)",
+      videoModeLocalDataDesc: "Downloads physical .mp4 file to data/videos/"
     },
     gallery: {
       title: "Saved Albums Library",
@@ -1889,7 +1937,16 @@ const rawTranslations: Record<Language, any> = {
       expandVideo: "Expand Video (Large Player)",
       closePlayer: "Close Player",
       deselectVideo: "Deselect video",
-      selectVideo: "Select video"
+      selectVideo: "Select video",
+      saveLocalData: "Save to Data folder (Local)",
+      saveLocalDataTitle: "Download and store physical .mp4 copy in data/videos/ folder for ultra-fast local streaming",
+      badgeWebStream: "Web Stream (0 MB)",
+      badgeLocalData: "Local (Data)",
+      storageDestLabel: "Storage Destination:",
+      storageStreamTitle: "Stream in Gallery (URL)",
+      storageStreamDesc: "No PC download (0 MB on disk)",
+      storageLocalTitle: "Download to Data folder (Local)",
+      storageLocalDesc: "Saves .mp4 file in data/videos/"
     },
     settings: {
       title: "System Settings",
@@ -2348,7 +2405,11 @@ const rawTranslations: Record<Language, any> = {
       removeConfirm: "Do you want to remove this item from the album?",
       savingToDownloads: "Saving \"{filename}\" directly to Downloads folder...",
       fileSavedInDownloads: "✓ File saved to Downloads folder: \"{filename}\".",
-      failSaveFile: "Failed to save file to disk."
+      failSaveFile: "Failed to save file to disk.",
+      saveStreamToGallery: "Save to Gallery (Stream • 0 MB)",
+      saveLocalToData: "Download to Data folder (Local)",
+      saveVideosStreamStarted: "Saving to Gallery (Stream)",
+      saveVideosStreamStartedMsg: "{count} video(s) are being saved in Stream mode (0 MB local) to folder \"{folder}\"."
     },
     dock: {
       activeExtraction: "Active Background Extraction:",
@@ -2674,7 +2735,14 @@ const rawTranslations: Record<Language, any> = {
       saveVideo: "Save Video",
       videoSavedSuccess: "Video Saved Successfully!",
       extraction100Success: "Extraction 100% Completed!",
-      pausedByUser: "Paused by user"
+      pausedByUser: "Paused by user",
+      savingStreamStage: "Registering stream in gallery (0 MB local)...",
+      savingLocalStage: "Starting local download to Data folder...",
+      videoStreamSavedTitle: "Saving to Gallery (Stream)",
+      videoLocalDownloadTitle: "Local Download Started",
+      videoSavingProgressMsg: "\"{title}\" is being saved to folder \"{folder}\".",
+      videoSaveStartErrorTitle: "Error Starting Save",
+      videoSaveStartErrorMsg: "Could not save the video."
     },
     shorts: {
       title: "Shorts & Reels",

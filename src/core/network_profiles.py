@@ -238,26 +238,45 @@ def resolve_anti_hotlink_headers(
 
 
 def extract_canonical_target_page(src: str) -> Optional[str]:
-    """Identifica padrões de vídeo e constrói a URL canônica da página principal."""
+    """Identifica padrões de vídeo e constrói a URL canônica da página principal preservando o domínio original."""
     if not src:
         return None
 
+    parsed = urllib.parse.urlparse(src) if (src.startswith("http://") or src.startswith("https://")) else None
+    host = parsed.netloc.lower() if parsed and parsed.netloc else ""
+    origin = f"{parsed.scheme}://{parsed.netloc}" if host else ""
+
     # Provedor A: viewkey / v param
+    host_a = _b64d(_DEDICATED_PROVIDER_A["host_match"])
     pat_a = _b64d(_DEDICATED_PROVIDER_A["id_pattern"])
     m_a = re.search(pat_a, src)
     if m_a:
-        tpl_a = _b64d(_DEDICATED_PROVIDER_A["url_template"])
-        return tpl_a.format(id=m_a.group(1))
+        vid_id = m_a.group(1)
+        if host_a in host:
+            tpl_a = _b64d(_DEDICATED_PROVIDER_A["url_template"])
+            return tpl_a.format(id=vid_id)
+        if origin:
+            path = parsed.path if parsed and parsed.path else "/view_video.php"
+            param = "viewkey" if "viewkey=" in src else "v"
+            return f"{origin}{path}?{param}={vid_id}"
+        return None
 
-    # Provedor B: video slug
+    # Provedor B: video slug (/video-{id}, /embed/{id}, /watch/{id})
+    host_b = _b64d(_DEDICATED_PROVIDER_B["host_match"])
     pat_b = _b64d(_DEDICATED_PROVIDER_B["id_pattern"])
-    m_b = re.search(pat_b, src) or re.search(r"video-([a-zA-Z0-9]{6,})", src)
+    m_b = re.search(pat_b, src) or re.search(r"/(?:video-|embed/|watch/)([a-zA-Z0-9]{6,15})", src)
     if m_b:
-        tpl_b = _b64d(_DEDICATED_PROVIDER_B["url_template"])
-        return tpl_b.format(id=m_b.group(1))
+        vid_id = m_b.group(1)
+        if host_b in host:
+            tpl_b = _b64d(_DEDICATED_PROVIDER_B["url_template"])
+            return tpl_b.format(id=vid_id)
+        if origin:
+            if "/embed/" in src:
+                return f"{origin}/video-{vid_id}/"
+            return src
+        return None
 
-    h_b = _b64d(_DEDICATED_PROVIDER_B["host_match"])
-    if f"{h_b}/video" in src:
+    if f"{host_b}/video" in src:
         return src
 
     return None
@@ -298,36 +317,59 @@ def get_fast_track_endpoint() -> str:
 
 def matches_embed_player_provider(url: str) -> Tuple[bool, Optional[str], Optional[str]]:
     """Verifica se a URL é compatível com sniffer rápido de embed player."""
+    if not url:
+        return False, None, None
     pat_b = _b64d(_DEDICATED_PROVIDER_B["id_pattern"])
     m = re.search(pat_b, url)
     if m:
         vid_id = m.group(1)
         embed_tpl = _b64d(_DEDICATED_PROVIDER_B["embed_template"])
         return True, vid_id, embed_tpl.format(id=vid_id)
+    m_dyn = re.search(r"(https?://[^/]+)/(?:video-|embed/)([a-zA-Z0-9]{8,15})(?:/|$)", url)
+    if m_dyn:
+        origin, vid_id = m_dyn.group(1), m_dyn.group(2)
+        return True, vid_id, f"{origin}/embed/{vid_id}/"
     return False, None, None
 
 
-def get_embed_poster_url(video_fid: str) -> str:
+def get_embed_poster_url(video_fid: str, page_url: Optional[str] = None) -> str:
     """Gera URL de pôster de alta resolução."""
+    if page_url and (page_url.startswith("http://") or page_url.startswith("https://")):
+        parsed = urllib.parse.urlparse(page_url)
+        host_b = _b64d(_DEDICATED_PROVIDER_B["host_match"])
+        if parsed.netloc and host_b not in parsed.netloc:
+            apex = get_apex_domain(parsed.netloc)
+            return f"{parsed.scheme}://imggen.{apex}/{video_fid}/1920/1080/11.jpg"
     tpl = _b64d(_DEDICATED_PROVIDER_B["poster_template"])
     return tpl.format(fid=video_fid)
 
 
-def get_embed_xhr_url(vid_id: str, encoded_hash: str) -> str:
+def get_embed_xhr_url(vid_id: str, encoded_hash: str, page_url: Optional[str] = None) -> str:
     """Gera URL de consulta XHR do fluxo de vídeo."""
+    if page_url and (page_url.startswith("http://") or page_url.startswith("https://")):
+        parsed = urllib.parse.urlparse(page_url)
+        host_b = _b64d(_DEDICATED_PROVIDER_B["host_match"])
+        if parsed.netloc and host_b not in parsed.netloc:
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            return f"{origin}/xhr/video/{vid_id}?hash={encoded_hash}&device=desktop&domain={parsed.netloc}&fallback=false"
     tpl = _b64d(_DEDICATED_PROVIDER_B["xhr_template"])
     return tpl.format(id=vid_id, hash=encoded_hash)
 
 
 def matches_direct_extractor_provider(url: str) -> Tuple[bool, Optional[str], Optional[str]]:
     """Verifica se a URL é compatível com extrator dedicado via yt-dlp."""
+    if not url:
+        return False, None, None
     pat_a = _b64d(_DEDICATED_PROVIDER_A["id_pattern"])
     m = re.search(pat_a, url)
     host_a = _b64d(_DEDICATED_PROVIDER_A["host_match"])
     if m or host_a in url:
         vid_id = m.group(1) if m else "media_item"
-        tpl_a = _b64d(_DEDICATED_PROVIDER_A["url_template"])
-        target_page = tpl_a.format(id=vid_id) if m else url
+        if host_a in url or not (url.startswith("http://") or url.startswith("https://")):
+            tpl_a = _b64d(_DEDICATED_PROVIDER_A["url_template"])
+            target_page = tpl_a.format(id=vid_id) if m else url
+        else:
+            target_page = extract_canonical_target_page(url) or url
         return True, vid_id, target_page
     return False, None, None
 
@@ -356,12 +398,19 @@ def is_static_preview_upgradeable(url_text: str) -> bool:
 
 def matches_enrichment_provider(url: str) -> bool:
     """Verifica se o item é elegível para enriquecimento de metadados por API."""
+    if not url:
+        return False
     h_b = _b64d(_DEDICATED_PROVIDER_B["host_match"])
-    return h_b in (url or "").lower()
+    return h_b in url.lower() or bool(re.search(r"https?://[^/]+/video-[a-zA-Z0-9]{8,15}", url))
 
 
-def get_enrichment_api_url(video_id: str) -> str:
+def get_enrichment_api_url(video_id: str, page_url: Optional[str] = None) -> str:
     """Retorna URL da API de enriquecimento de metadados."""
+    if page_url and (page_url.startswith("http://") or page_url.startswith("https://")):
+        parsed = urllib.parse.urlparse(page_url)
+        host_b = _b64d(_DEDICATED_PROVIDER_B["host_match"])
+        if parsed.netloc and host_b not in parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}/api/v2/video/id/?id={video_id}"
     tpl = _b64d(_DEDICATED_PROVIDER_B["api_enrich_template"])
     return tpl.format(id=video_id)
 

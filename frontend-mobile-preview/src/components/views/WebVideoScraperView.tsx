@@ -47,6 +47,7 @@ export const WebVideoScraperView: React.FC = () => {
     addNotification,
     navigateToView,
     syncJobs,
+    syncVideos,
     webScraperState,
     setWebScraperState,
     clearWebScraperState,
@@ -58,6 +59,7 @@ export const WebVideoScraperView: React.FC = () => {
   const isEn = settings.language === 'en-US';
 
   const { url, scanResult, selectedIds, targetFolder, errorMsg } = webScraperState;
+  const saveLocally = Boolean(webScraperState.saveLocally);
   const activeTab = webScraperState.activeTab || 'main';
   const viewLayout = webScraperState.viewLayout || 'albums';
   const videoAlbums: VideoScraperAlbum[] = webScraperState.videoAlbums || [];
@@ -433,7 +435,8 @@ export const WebVideoScraperView: React.FC = () => {
       return;
     }
 
-    if (settings.askFolderOnSave) {
+    const prefilledFolder = targetFolder.trim();
+    if (!prefilledFolder && settings.askFolderOnSave) {
       setFolderModalState({
         isOpen: true,
         mode: 'album_batch',
@@ -443,7 +446,7 @@ export const WebVideoScraperView: React.FC = () => {
       executeBatchSave(
         selectedVideosFromSelectedAlbums,
         true,
-        targetFolder.trim() || settings.defaultVideoFolder || 'Extraídos'
+        prefilledFolder || settings.defaultVideoFolder || 'Extraídos'
       );
     }
   };
@@ -453,7 +456,8 @@ export const WebVideoScraperView: React.FC = () => {
     const videosToDownload = album.videos.filter(v => selSet.has(v.id));
     if (videosToDownload.length === 0 || isBatchSaving) return;
 
-    if (settings.askFolderOnSave) {
+    const prefilledFolder = targetFolder.trim() || (album.suggestedFolder || '').trim();
+    if (!prefilledFolder && settings.askFolderOnSave) {
       setFolderModalState({
         isOpen: true,
         mode: 'album_batch',
@@ -463,7 +467,7 @@ export const WebVideoScraperView: React.FC = () => {
       executeBatchSave(
         videosToDownload,
         true,
-        targetFolder.trim() || album.suggestedFolder || settings.defaultVideoFolder || 'Extraídos'
+        prefilledFolder || settings.defaultVideoFolder || 'Extraídos'
       );
     }
   };
@@ -502,13 +506,14 @@ export const WebVideoScraperView: React.FC = () => {
       return;
     }
 
-    if (settings.askFolderOnSave) {
+    const prefilledFolder = targetFolder.trim() || (scanResult.suggested_folder || '').trim();
+    if (!prefilledFolder && settings.askFolderOnSave) {
       setFolderModalState({
         isOpen: true,
         mode: 'batch'
       });
     } else {
-      executeBatchSave(selectedVideos, true, targetFolder.trim() || settings.defaultVideoFolder || 'Extraídos');
+      executeBatchSave(selectedVideos, true, prefilledFolder || settings.defaultVideoFolder || 'Extraídos');
     }
   };
 
@@ -523,7 +528,8 @@ export const WebVideoScraperView: React.FC = () => {
     soundEffects.click(settings.soundEnabled);
 
     try {
-      const res = await backendApi.batchSaveVideos(videosToSave, folderToUse, 2, skipExisting);
+      const streamOnly = !saveLocally;
+      const res = await backendApi.batchSaveVideos(videosToSave, folderToUse, 2, skipExisting, streamOnly);
       if (res.success) {
         // Marcação otimista imediata para cada vídeo salvo
         videosToSave.forEach(v => {
@@ -557,12 +563,18 @@ export const WebVideoScraperView: React.FC = () => {
 
         addNotification({
           type: 'success',
-          title: t.backgroundDownloads,
-          message: res.message || t.queueVideosMsg.replace('{count}', String(videosToSave.length)).replace('{folder}', folderToUse)
+          title: streamOnly ? t.streamQueuedTitle : t.backgroundDownloads,
+          message: streamOnly
+            ? t.streamQueuedMsg.replace('{count}', String(videosToSave.length)).replace('{folder}', folderToUse)
+            : t.queueVideosMsg.replace('{count}', String(videosToSave.length)).replace('{folder}', folderToUse)
         });
         soundEffects.success(settings.soundEnabled);
         await syncJobs();
         triggerJobsPollingLoop();
+        if (streamOnly) {
+          setTimeout(() => syncVideos(), 1800);
+          setTimeout(() => syncVideos(), 4500);
+        }
       } else {
         addNotification({
           type: 'error',
@@ -586,7 +598,7 @@ export const WebVideoScraperView: React.FC = () => {
   const isVideoSaving = (item: ScannedVideoItem) => {
     return savingSingleId === item.id || jobs.some(j =>
       (j.status === 'active' || j.status === 'queued') &&
-      (j.mode === 'video_save' || (j.mode as string) === 'video_downloader') &&
+      (j.mode === 'video_save' || (j.mode as string) === 'video_downloader' || (j.mode as string) === 'video_stream_register') &&
       ((item.title && j.title.toLowerCase().includes(item.title.toLowerCase())) ||
        (item.url && j.url && j.url === item.url) ||
        (j.id && j.id.includes(item.id)))
@@ -608,14 +620,15 @@ export const WebVideoScraperView: React.FC = () => {
       if (!proceed) return;
     }
 
-    if (settings.askFolderOnSave) {
+    const prefilledFolder = targetFolder.trim() || (scanResult?.suggested_folder || '').trim();
+    if (!prefilledFolder && settings.askFolderOnSave) {
       setFolderModalState({
         isOpen: true,
         mode: 'single',
         targetVideo: item
       });
     } else {
-      handleSaveSingleVideo(item, targetFolder.trim() || settings.defaultVideoFolder || 'Extraídos');
+      handleSaveSingleVideo(item, prefilledFolder || settings.defaultVideoFolder || 'Extraídos');
     }
   };
 
@@ -626,7 +639,8 @@ export const WebVideoScraperView: React.FC = () => {
 
     soundEffects.click(settings.soundEnabled);
     try {
-      const res = await backendApi.batchSaveVideos([item], folderToUse, 2);
+      const streamOnly = !saveLocally;
+      const res = await backendApi.batchSaveVideos([item], folderToUse, 2, true, streamOnly);
       if (res.success) {
         markItemAsSavedOptimistically({
           url: item.url || item.stream_url,
@@ -656,12 +670,16 @@ export const WebVideoScraperView: React.FC = () => {
 
         addNotification({
           type: 'success',
-          title: t.savingVideoBackground,
+          title: streamOnly ? t.streamQueuedTitle : t.savingVideoBackground,
           message: `"${item.title}" (${folderToUse})`
         });
         soundEffects.success(settings.soundEnabled);
         await syncJobs();
         triggerJobsPollingLoop();
+        if (streamOnly) {
+          setTimeout(() => syncVideos(), 1800);
+          setTimeout(() => syncVideos(), 4000);
+        }
       } else {
         addNotification({
           type: 'error',
@@ -873,6 +891,45 @@ export const WebVideoScraperView: React.FC = () => {
                   <span>{isEn ? `All Videos Grid (${allVideos.length})` : `Grade de Vídeos (${allVideos.length})`}</span>
                 </button>
               </div>
+
+              {/* Storage Mode Switcher: Web Stream (0 MB default) vs Local Data Download */}
+              <div className="flex flex-wrap items-center gap-1.5 bg-slate-950/90 p-1.5 rounded-xl border border-border text-xs font-bold">
+                <span className="text-[10px] font-mono uppercase text-slate-400 px-2">
+                  {t.saveModeLabel}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setWebScraperState({ saveLocally: false });
+                    soundEffects.click(settings.soundEnabled);
+                  }}
+                  className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
+                    !saveLocally
+                      ? 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-400/50'
+                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border border-slate-700/70'
+                  }`}
+                  title={t.modeStreamFastTitle}
+                >
+                  <Sparkles size={13} />
+                  <span>{t.modeStreamFast}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setWebScraperState({ saveLocally: true });
+                    soundEffects.click(settings.soundEnabled);
+                  }}
+                  className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
+                    saveLocally
+                      ? 'bg-violet-600 text-white shadow-sm ring-1 ring-violet-400/50'
+                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border border-slate-700/70'
+                  }`}
+                  title={t.modeLocalDataTitle}
+                >
+                  <Download size={13} />
+                  <span>{t.modeLocalData}</span>
+                </button>
+              </div>
             </div>
 
             {/* Selection & Batch Download Buttons (Context-aware for Albums Mode vs Videos Mode) */}
@@ -921,9 +978,7 @@ export const WebVideoScraperView: React.FC = () => {
                     <>
                       <Save size={13} />
                       <span>
-                        {isEn
-                          ? `Download Selected (${selectedVideosFromSelectedAlbums.length} videos)`
-                          : `Baixar Selecionados (${selectedVideosFromSelectedAlbums.length} vídeos)`}
+                        {t.saveSelectedVideosBtn.replace('{count}', String(selectedVideosFromSelectedAlbums.length))}
                       </span>
                     </>
                   )}
@@ -976,7 +1031,7 @@ export const WebVideoScraperView: React.FC = () => {
                   ) : (
                     <>
                       <Save size={13} />
-                      <span>{t.downloadSelected} ({selectedIds.length})</span>
+                      <span>{saveLocally ? t.downloadSelected : t.saveSelectedBtn} ({selectedIds.length})</span>
                     </>
                   )}
                 </button>

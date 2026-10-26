@@ -74,8 +74,8 @@ async def test_pause_and_resume_all_jobs_endpoints():
             assert data_resume["success"] is True
             assert ctrl1.is_paused is False
             assert ctrl2.is_paused is False
-            assert _active_jobs[j1]["status"] == "active"
-            assert _active_jobs[j2]["status"] == "active"
+            assert _active_jobs[j1]["status"] in ("active", "running")
+            assert _active_jobs[j2]["status"] in ("active", "running")
     finally:
         _job_controllers.pop(j1, None)
         _job_controllers.pop(j2, None)

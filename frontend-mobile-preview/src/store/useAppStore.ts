@@ -262,6 +262,7 @@ interface AppState {
   clearCompletedJobs: () => Promise<void> | void;
   pauseAllJobs: () => Promise<void>;
   resumeAllJobs: () => Promise<void>;
+  retryAllFailedJobs: () => Promise<void>;
   clearActiveJob: () => void;
   subscribeToJob: (sessionId: string, url: string) => void;
   retryJob: (job: ExtractionJob) => Promise<boolean>;
@@ -315,7 +316,7 @@ interface AppState {
   // Extractor Media Filter
   mediaTypeFilter: 'all' | 'images' | 'videos' | 'gifs';
   setMediaTypeFilter: (filter: 'all' | 'images' | 'videos' | 'gifs') => void;
-  saveExtractedVideoToGallery: (videoUrl: string, title?: string, folder?: string, sourceUrl?: string, thumbnailUrl?: string) => Promise<boolean>;
+  saveExtractedVideoToGallery: (videoUrl: string, title?: string, folder?: string, sourceUrl?: string, thumbnailUrl?: string, streamOnly?: boolean) => Promise<boolean>;
 
   // Multi-Album Persistent State & Actions
   multiAlbumState: {
@@ -388,7 +389,7 @@ interface AppState {
 }
 
 export const mapServerJobToExtractionJob = (raw: any): ExtractionJob => {
-  const isVideoSave = raw.mode === 'video_save' || raw.engine_type === 'video_downloader';
+  const isVideoSave = raw.mode === 'video_save' || raw.engine_type === 'video_downloader' || raw.engine_type === 'video_stream_register';
   const isFinished = raw.status === 'completed';
   const progStatus = String(raw.progress?.status || '');
   const isCancelled = raw.status === 'cancelled' || progStatus.toLowerCase().includes('cancelad');
@@ -408,6 +409,7 @@ export const mapServerJobToExtractionJob = (raw: any): ExtractionJob => {
     progStatus.includes('Reconectando') ||
     progStatus.includes('motor resiliente') ||
     progStatus.includes('Resolvendo') ||
+    progStatus.includes('Registrando') ||
     progStatus.includes('Gerando miniatura') ||
     progStatus.includes('Iniciando') ||
     progStatus.includes('Inspecionada') ||
@@ -1109,8 +1111,12 @@ export const useAppStore = create<AppState>((set, get) => {
             return oldJ && oldJ.status !== 'completed';
           });
 
+          if (justCompletedJobs.length === 0 && hadActiveVideoJobs && !stillHasActiveVideoJobs) {
+            await get().syncVideos();
+          }
+
           for (const cj of justCompletedJobs) {
-            const isVid = (cj.mode as string) === 'video_save' || (cj.mode as string) === 'video_downloader';
+            const isVid = (cj.mode as string) === 'video_save' || (cj.mode as string) === 'video_downloader' || (cj.mode as string) === 'video_stream_register';
             if (isVid) {
               await get().syncVideos();
               const curLang = (get().settings?.language || 'pt-BR') as 'pt-BR' | 'en-US';
@@ -1118,7 +1124,7 @@ export const useAppStore = create<AppState>((set, get) => {
               get().addNotification({
                 title: tStore?.videoSavedTitle || (curLang === 'en-US' ? 'Video Saved to Gallery' : 'Vídeo Salvo na Galeria'),
                 message: (tStore?.videoSavedMsg || '"{title}" foi salvo com sucesso na pasta "{folder}".')
-                  .replace('{title}', cj.title.replace(/^Salvar Vídeo:\s*/, ''))
+                  .replace('{title}', cj.title.replace(/^(?:Salvar Vídeo|Save Video):\s*/i, ''))
                   .replace('{folder}', cj.folder || (curLang === 'en-US' ? 'Extracted' : 'Extraídos')),
                 type: 'success',
                 linkViewId: 'videos'
@@ -2224,10 +2230,30 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         await backendApi.resumeJob(id);
       } catch (_) {}
+      const nowIso = new Date().toISOString();
       set(state => {
-        const updatedJobs = state.jobs.map(j => (j.id === id ? { ...j, status: 'active' as const, currentStage: 'Retomando download...' } : j));
+        const updatedJobs = state.jobs.map(j =>
+          j.id === id
+            ? {
+                ...j,
+                status: 'active' as const,
+                startTime: nowIso,
+                durationSeconds: 0,
+                currentStage: getIsEn() ? 'Connecting & resolving Full HD stream...' : 'Conectando e resolvendo stream Full HD...'
+              }
+            : j
+        );
         const activeJobs = updatedJobs.filter(j => j.status === 'active' || j.status === 'paused');
-        const updatedActive = state.activeJob?.id === id ? { ...state.activeJob, status: 'active' as const, currentStage: 'Retomando download...' } : state.activeJob;
+        const updatedActive =
+          state.activeJob?.id === id
+            ? {
+                ...state.activeJob,
+                status: 'active' as const,
+                startTime: nowIso,
+                durationSeconds: 0,
+                currentStage: getIsEn() ? 'Connecting & resolving Full HD stream...' : 'Conectando e resolvendo stream Full HD...'
+              }
+            : state.activeJob;
         const nextDismissed = state.dismissedDockJobIds.filter(dId => dId !== id);
         if (typeof window !== 'undefined') {
           try {
@@ -2242,9 +2268,10 @@ export const useAppStore = create<AppState>((set, get) => {
           dismissedDockJobIds: nextDismissed
         };
       });
+      triggerJobsPollingLoop();
       setTimeout(() => {
         get().syncJobs();
-      }, 500);
+      }, 400);
       get().addNotification({
         title: 'Job Retomado',
         message: `A tarefa #${id} foi retomada com sucesso.`,
@@ -2254,11 +2281,77 @@ export const useAppStore = create<AppState>((set, get) => {
 
     retryJob: async (job: ExtractionJob) => {
       const isVideoSave = (job.mode as string) === 'video_save' || (job.mode as string) === 'video_downloader';
+      const stageMsg = isVideoSave
+        ? (getIsEn() ? 'Connecting & resolving Full HD stream...' : 'Conectando e resolvendo stream Full HD...')
+        : (getIsEn() ? 'Re-running extraction in background...' : 'Re-executando extração em segundo plano...');
+      const nowIso = new Date().toISOString();
+      const shouldResetStale99 = job.progressPercent >= 99;
+
+      // Optimistically transition the clicked card in-place so the user gets immediate visual feedback
+      set(state => {
+        const updatedJobs = state.jobs.map(j =>
+          j.id === job.id
+            ? {
+                ...j,
+                status: 'active' as const,
+                startTime: nowIso,
+                durationSeconds: 0,
+                throughputMbps: 0,
+                downloadedBytes: shouldResetStale99 ? 0 : j.downloadedBytes,
+                totalBytes: shouldResetStale99 ? 0 : j.totalBytes,
+                currentStage: stageMsg,
+                progressPercent: shouldResetStale99 ? 0 : (j.progressPercent > 0 && j.progressPercent < 99 ? j.progressPercent : 5)
+              }
+            : j
+        );
+        const activeJobs = updatedJobs.filter(j => j.status === 'active' || j.status === 'paused');
+        const nextDismissed = state.dismissedDockJobIds.filter(dId => dId !== job.id);
+        if (typeof window !== 'undefined') {
+          try {
+            localStorage.setItem('imagex_dismissed_dock_jobs', JSON.stringify(nextDismissed));
+          } catch (_) {}
+        }
+        return {
+          jobs: updatedJobs,
+          activeJob:
+            state.activeJob?.id === job.id
+              ? { ...state.activeJob, status: 'active' as const, startTime: nowIso, durationSeconds: 0, currentStage: stageMsg }
+              : state.activeJob,
+          activeJobs,
+          sessionJobIds: Array.from(new Set([...state.sessionJobIds, job.id])),
+          dismissedDockJobIds: nextDismissed
+        };
+      });
+
+      // Attempt in-place resume/relaunch on the backend first (preserves session_id and partial files)
+      try {
+        const resumedInPlace = await backendApi.resumeJob(job.id);
+        if (resumedInPlace) {
+          if (!isVideoSave) {
+            get().subscribeToJob(job.id, job.url);
+          }
+          triggerJobsPollingLoop();
+          setTimeout(() => {
+            get().syncJobs();
+          }, 400);
+          get().addNotification({
+            title: getIsEn() ? 'Re-execution Started' : 'Re-execução Iniciada',
+            message: getIsEn()
+              ? `Task "${job.title || job.url}" restarted in background.`
+              : `A tarefa "${job.title || job.url}" foi reiniciada em segundo plano.`,
+            type: 'info'
+          });
+          return true;
+        }
+      } catch (_) {}
+
+      // Fallback if job record was not found on backend (e.g., deleted externally)
       if (isVideoSave) {
-        get().dismissDockJob(job.id);
+        const cleanTitle = (job.title || 'video_extraido').replace(/^(?:Save Video:\s*|Salvar Vídeo:\s*)+/i, '').trim() || 'video_extraido';
+        await get().deleteJob(job.id);
         return await get().saveExtractedVideoToGallery(
           job.url,
-          job.title.replace(/^Salvar Vídeo:\s*/, ''),
+          cleanTitle,
           job.folder || 'Extraídos'
         );
       }
@@ -2279,6 +2372,7 @@ export const useAppStore = create<AppState>((set, get) => {
         );
 
         if (res && res.session_id) {
+          await get().deleteJob(job.id);
           let fallbackTitle = job.url;
           try {
             fallbackTitle = `Extração: ${new URL(job.url.startsWith('http') ? job.url : 'https://' + job.url).hostname}`;
@@ -2303,7 +2397,6 @@ export const useAppStore = create<AppState>((set, get) => {
             folder: job.folder || 'Geral'
           };
 
-          get().dismissDockJob(job.id);
           get().addJob(newJob);
           get().subscribeToJob(res.session_id, job.url);
           triggerJobsPollingLoop();
@@ -2398,10 +2491,41 @@ export const useAppStore = create<AppState>((set, get) => {
           activeJobs: updated.filter(j => j.status === 'active' || j.status === 'paused')
         };
       });
+      triggerJobsPollingLoop();
+      setTimeout(() => {
+        get().syncJobs();
+      }, 400);
       get().addNotification({
         title: 'Fila Retomada',
         message: 'Tarefas pausadas foram retomadas com sucesso.',
         type: 'success'
+      });
+    },
+
+    retryAllFailedJobs: async () => {
+      try {
+        await backendApi.retryAllFailedJobs();
+      } catch (_) {}
+      set(state => {
+        const updated = state.jobs.map(j => {
+          if (j.status === 'failed' || j.status === 'cancelled') {
+            return { ...j, status: 'active' as any, currentStage: 'Na fila de re-execução em lote...' };
+          }
+          return j;
+        });
+        return {
+          jobs: updated,
+          activeJobs: updated.filter(j => j.status === 'active' || j.status === 'paused')
+        };
+      });
+      triggerJobsPollingLoop();
+      setTimeout(() => {
+        get().syncJobs();
+      }, 400);
+      get().addNotification({
+        title: getIsEn() ? 'Batch Retry Started' : 'Re-execução em Lote Iniciada',
+        message: getIsEn() ? 'All failed and cancelled tasks have been re-queued.' : 'Todas as tarefas com falha ou canceladas foram reenfileiradas.',
+        type: 'info'
       });
     },
 
@@ -3202,35 +3326,39 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ mediaTypeFilter: filter });
     },
 
-    saveExtractedVideoToGallery: async (videoUrl: string, title?: string, folder?: string, sourceUrl?: string, thumbnailUrl?: string) => {
+    saveExtractedVideoToGallery: async (videoUrl: string, title?: string, folder?: string, sourceUrl?: string, thumbnailUrl?: string, streamOnly: boolean = true) => {
       const { settings } = get();
+      const curLang = (settings?.language || 'pt-BR') as 'pt-BR' | 'en-US';
+      const tStore: any = translations[curLang]?.store || translations['pt-BR']?.store || {};
+      const effFolder = folder || tStore.defaultVideoFolder || 'Extraídos';
+      const effTitle = title || tStore.saveVideo || 'Vídeo';
       try {
-        const result = await backendApi.saveExtractedVideoToGallery(videoUrl, title, folder, sourceUrl, thumbnailUrl);
+        const result = await backendApi.saveExtractedVideoToGallery(videoUrl, title, effFolder, sourceUrl, thumbnailUrl, streamOnly);
         if (result.success && result.job_id) {
           const newJob: ExtractionJob = {
             id: result.job_id,
             url: videoUrl,
-            title: `Salvar Vídeo: ${title || 'Vídeo Extraído'}`,
+            title: `${tStore.saveVideo || 'Salvar Vídeo'}: ${effTitle}`,
             status: 'active',
             mode: 'video_save' as any,
             progressPercent: 1,
             discoveredImagesCount: 1,
             resolvedOriginalCount: 0,
             failedCount: 0,
-            currentStage: 'Iniciando download em segundo plano...',
+            currentStage: streamOnly ? (tStore.savingStreamStage || '') : (tStore.savingLocalStage || ''),
             startTime: new Date().toISOString(),
             durationSeconds: 0,
             throughputMbps: 0,
             fps: 60,
-            aiModel: 'Direct Stream Downloader',
-            folder: folder || 'Extraídos'
+            aiModel: streamOnly ? 'Web Stream Registry (0 MB)' : 'Direct Stream Downloader',
+            folder: effFolder
           };
 
           // Marcação imediata no estado otimista da UI para exibir a tag Salvo em [Pasta] na hora
           get().markItemAsSavedOptimistically({
             url: videoUrl,
             title,
-            folder: folder || 'Extraídos',
+            folder: effFolder,
             targetId: result.job_id,
             targetView: 'videos'
           });
@@ -3243,32 +3371,39 @@ export const useAppStore = create<AppState>((set, get) => {
             dismissedDockJobIds: state.dismissedDockJobIds.filter(id => id !== result.job_id!)
           }));
           get().addNotification({
-            title: 'Download Iniciado em 2º Plano',
-            message: get().settings?.language === 'en-US' ? `"${title || 'Video'}" is being saved. Follow progress in Tasks.` : `"${title || 'Vídeo'}" está sendo salvo. Acompanhe o progresso na Gestão de Tarefas.`,
+            title: streamOnly ? (tStore.videoStreamSavedTitle || '') : (tStore.videoLocalDownloadTitle || ''),
+            message: (tStore.videoSavingProgressMsg || '"{title}" ({folder})')
+              .replace('{title}', effTitle)
+              .replace('{folder}', effFolder),
             type: 'info'
           });
           triggerJobsPollingLoop();
+          if (streamOnly) {
+            setTimeout(() => get().syncVideos(), 2500);
+          }
           return true;
         } else if (result.success) {
           get().markItemAsSavedOptimistically({
             url: videoUrl,
             title,
-            folder: folder || 'Extraídos',
+            folder: effFolder,
             targetId: result.video?.id,
             targetView: 'videos'
           });
           soundEffects.success(settings.soundEnabled);
           await get().syncVideos();
           get().addNotification({
-            title: 'Vídeo Salvo na Galeria',
-            message: `"${title || 'Vídeo'}" foi salvo na pasta "${folder || 'Extraídos'}".`,
+            title: tStore.videoSavedTitle || '',
+            message: (tStore.videoSavedMsg || '"{title}" -> "{folder}"')
+              .replace('{title}', effTitle)
+              .replace('{folder}', effFolder),
             type: 'success'
           });
           return true;
         } else {
           get().addNotification({
-            title: 'Erro ao Iniciar Salvamento',
-            message: result.error || (get().settings?.language === 'en-US' ? 'Could not start video download.' : 'Não foi possível iniciar o download do vídeo.'),
+            title: tStore.videoSaveStartErrorTitle || '',
+            message: result.error || (tStore.videoSaveStartErrorMsg || ''),
             type: 'error'
           });
           return false;

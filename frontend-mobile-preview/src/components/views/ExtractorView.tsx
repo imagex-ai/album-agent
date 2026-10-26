@@ -78,6 +78,7 @@ export const ExtractorView: React.FC = () => {
     return 'classic';
   });
   const [isExtracting, setIsExtracting] = useState(false);
+  const [downloadVideosLocally, setDownloadVideosLocally] = useState(false);
   const [folderModalState, setFolderModalState] = useState<{
     isOpen: boolean;
     mode: 'single' | 'batch';
@@ -165,7 +166,8 @@ export const ExtractorView: React.FC = () => {
         settings.maxConcurrency || 3,
         settings.antiBotDelayMs || 500,
         effectiveMediaType,
-        folder
+        folder,
+        downloadVideosLocally
       );
       if (res && res.session_id) {
         const jobId = res.session_id;
@@ -355,7 +357,9 @@ export const ExtractorView: React.FC = () => {
         settings.maxConcurrency || 3,
         settings.antiBotDelayMs || 500,
         effectiveMediaType,
-        folder
+        folder,
+        'medium',
+        downloadVideosLocally
       );
 
       if (batchJobs && batchJobs.length > 0) {
@@ -527,10 +531,49 @@ export const ExtractorView: React.FC = () => {
           </div>
 
           {mediaTypeFilter === 'videos' && (
-            <p className="text-xs text-violet-300/90 pt-1 flex items-center gap-1">
-              <Film size={12} className="shrink-0 text-violet-400" />
-              <span><strong>{settings.language === "en-US" ? "Video Mode:" : "Modo Vídeo:"}</strong> {t.videoModeDesc}</span>
-            </p>
+            <div className="pt-2 space-y-2 border-t border-border/50">
+              <p className="text-xs text-violet-300/90 flex items-center gap-1">
+                <Film size={12} className="shrink-0 text-violet-400" />
+                <span><strong>{settings.language === "en-US" ? "Video Mode:" : "Modo Vídeo:"}</strong> {t.videoModeDesc}</span>
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                  {t.videoStorageModeLabel}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDownloadVideosLocally(false);
+                    soundEffects.click(settings.soundEnabled);
+                  }}
+                  title={t.videoModeStreamFastDesc}
+                  className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    !downloadVideosLocally
+                      ? 'bg-emerald-600/20 text-emerald-300 border-emerald-500/60 shadow-sm'
+                      : 'bg-surface text-slate-400 border-border hover:text-slate-200'
+                  }`}
+                >
+                  <Sparkles size={12} />
+                  <span>{t.videoModeStreamFast}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDownloadVideosLocally(true);
+                    soundEffects.click(settings.soundEnabled);
+                  }}
+                  title={t.videoModeLocalDataDesc}
+                  className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    downloadVideosLocally
+                      ? 'bg-violet-600/25 text-violet-300 border-violet-500/60 shadow-sm'
+                      : 'bg-surface text-slate-400 border-border hover:text-slate-200'
+                  }`}
+                >
+                  <Download size={12} />
+                  <span>{t.videoModeLocalData}</span>
+                </button>
+              </div>
+            </div>
           )}
           {mediaTypeFilter === 'gifs' && (
             <p className="text-xs text-amber-300/90 pt-1 flex items-center gap-1">

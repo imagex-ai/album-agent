@@ -89,6 +89,29 @@ html, body, #root {
 }
 
 /* Custom Scrollbars */
+.custom-scrollbar {
+  --scrollbar-thumb: rgba(139, 92, 246, 0.45);
+  --scrollbar-track: rgba(15, 23, 42, 0.35);
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+@supports not (scrollbar-color: auto) {
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 9999px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;

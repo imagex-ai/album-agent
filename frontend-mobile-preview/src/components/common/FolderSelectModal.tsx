@@ -58,14 +58,16 @@ export const FolderSelectModal: React.FC<FolderSelectModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Clean and deduplicate folders list including store folders and newly created folders
+  // Clean and deduplicate folders list including pre-suggested/current folder, store folders, and newly created folders
   const storeFolders = (initialMediaType === 'video' ? (videoFolders || []) : (albumFolders || [])).map(f => f.name);
   const folders = Array.from(new Set([
+    ...(currentFolder ? [currentFolder.trim()] : []),
+    ...(defaultFolder ? [defaultFolder.trim()] : []),
     defaultFallbackFolder,
     ...(existingFolders || []).filter(Boolean),
     ...storeFolders.filter(Boolean),
     ...createdFolders.filter(Boolean)
-  ]));
+  ])).filter(Boolean);
 
   const handleConfirm = async () => {
     let finalFolder = selectedFolder.trim();

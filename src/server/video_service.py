@@ -9,6 +9,7 @@ import json
 import shutil
 import hashlib
 import time
+import threading
 import logging
 import subprocess
 
@@ -538,9 +539,9 @@ class CloudStorageManager:
             return resolve_url
         except Exception as e:
             err_str = str(e)
-            if "429" in err_str or "rate limit" in err_str.lower() or "commit quota" in err_str.lower():
+            if "429" in err_str or "401" in err_str or "rate limit" in err_str.lower() or "commit quota" in err_str.lower() or "invalid username or password" in err_str.lower():
                 self._rate_limited_until = time.time() + 1500.0  # 25 min backoff
-                print(f"[CloudStorage] Cota de commits da Hugging Face atingida (429). Pausando uploads remotos por 25 minutos.")
+                print(f"[CloudStorage] Upload remoto pausado temporariamente ({err_str[:80]}).")
             else:
                 print(f"[CloudStorage] Upload failed to Hugging Face ({norm_path}): {e}")
             return None
@@ -697,6 +698,8 @@ class VideoService:
         self.base_dir = base_dir
         self.metadata_file = os.path.join(self.base_dir, "videos_metadata.json")
         self.thumbnails_dir = os.path.join(self.base_dir, ".thumbnails")
+        self._meta_lock = threading.RLock()
+        self._last_hf_meta_sync = 0.0
         self._ensure_storage_initialized()
         self._migrate_origins()
 
@@ -828,28 +831,44 @@ class VideoService:
 
     def _load_metadata(self) -> Dict[str, Any]:
         """Loads videos metadata JSON."""
-        if not os.path.exists(self.metadata_file):
-            return {}
-        try:
-            with open(self.metadata_file, "r", encoding="utf-8") as fp:
-                return json.load(fp)
-        except Exception:
-            return {}
+        with self._meta_lock:
+            if not os.path.exists(self.metadata_file):
+                return {}
+            try:
+                with open(self.metadata_file, "r", encoding="utf-8") as fp:
+                    return json.load(fp)
+            except Exception:
+                return {}
 
     def _save_metadata(self, data: Dict[str, Any]):
         """Persists videos metadata to local disk AND mirrors to HF for persistence across restarts."""
+        with self._meta_lock:
+            try:
+                tmp_path = f"{self.metadata_file}.{os.getpid()}.{threading.get_ident()}.tmp"
+                with open(tmp_path, "w", encoding="utf-8") as fp:
+                    json.dump(data, fp, indent=2, ensure_ascii=False)
+                try:
+                    os.replace(tmp_path, self.metadata_file)
+                except PermissionError:
+                    with open(self.metadata_file, "w", encoding="utf-8") as fp:
+                        json.dump(data, fp, indent=2, ensure_ascii=False)
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"Error saving videos metadata locally: {e}")
+
+        # Async-style: mirror to HF in background thread (throttled to avoid concurrent HF flood)
         try:
-            with open(self.metadata_file, "w", encoding="utf-8") as fp:
-                json.dump(data, fp, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"Error saving videos metadata locally: {e}")
-        # Async-style: mirror to HF in background thread to avoid blocking uploads
-        try:
-            import threading
-            def _sync():
-                cloud_storage.upload_json(data, "metadata/videos_metadata.json")
-            t = threading.Thread(target=_sync, daemon=True)
-            t.start()
+            now = time.time()
+            if now - getattr(self, "_last_hf_meta_sync", 0.0) >= 5.0:
+                self._last_hf_meta_sync = now
+                snapshot = dict(data)
+                def _sync():
+                    cloud_storage.upload_json(snapshot, "metadata/videos_metadata.json")
+                t = threading.Thread(target=_sync, daemon=True)
+                t.start()
         except Exception as e:
             print(f"[VideoService] Error starting metadata sync to HF: {e}")
 
@@ -905,97 +924,99 @@ class VideoService:
         highlights: Optional[List[Dict[str, Any]]] = None,
         heatmap_data: Optional[List[Dict[str, Any]]] = None
     ):
-        meta = self._load_metadata()
-        entry = meta.get(vid_id, {}) if vid_id else {}
-        if file_path:
-            rel_path = os.path.relpath(file_path, self.base_dir).replace("\\", "/")
-            if not vid_id:
-                vid_id = self._find_video_id(rel_path, meta)
-                entry = meta.get(vid_id, {})
-        else:
-            rel_path = entry.get("rel_path")
-            if not rel_path or ("remote_" in rel_path and not entry.get("cloud_url")):
-                matched_disk = self._find_disk_file_by_id(vid_id) if vid_id else None
-                if matched_disk:
-                    rel_path = matched_disk
-                else:
-                    rel_path = rel_path or f"{folder or 'Geral'}/remote_{vid_id or int(time.time())}.mp4"
-            if not vid_id:
-                vid_id = self._get_video_id(rel_path)
-                entry = meta.get(vid_id, {})
-
-        if title is not None:
-            entry["title"] = title
-        if folder is not None:
-            entry["folder"] = folder
-        if is_favorite is not None:
-            entry["is_favorite"] = is_favorite
-        if storage_location is not None:
-            entry["storage_location"] = storage_location
-        elif "storage_location" not in entry or entry.get("storage_location") == "render_local":
-            entry["storage_location"] = "local"
-        if cloud_url is not None:
-            entry["cloud_url"] = cloud_url
-        if stream_url is not None:
-            entry["custom_stream_url"] = stream_url
-        if file_size_bytes is not None:
-            entry["file_size_bytes"] = file_size_bytes
-        if width is not None:
-            entry["width"] = width
-        if height is not None:
-            entry["height"] = height
-        if fps is not None:
-            entry["fps"] = fps
-        if duration_seconds is not None:
-            entry["duration_seconds"] = duration_seconds
-        if source_url is not None:
-            entry["source_url"] = source_url
-        if source_id is not None:
-            entry["source_id"] = source_id
-        if source_thumbnail_url is not None:
-            entry["source_thumbnail_url"] = source_thumbnail_url
-
-        if intro_end is not None:
-            entry["intro_end"] = round(float(intro_end), 2)
-        if highlight_start is not None:
-            entry["highlight_start"] = round(float(highlight_start), 2)
-        if highlight_end is not None:
-            entry["highlight_end"] = round(float(highlight_end), 2)
-        if highlight_score is not None:
-            entry["highlight_score"] = round(float(highlight_score), 2)
-        if highlights is not None:
-            entry["highlights"] = highlights
-        if heatmap_data is not None:
-            entry["heatmap_data"] = heatmap_data
-
-        if source_origin is not None:
-            entry["source_origin"] = source_origin
-        elif "source_origin" not in entry or entry.get("source_origin") is None:
-            eff_surl = source_url or entry.get("source_url") or ""
-            eff_sid = source_id or entry.get("source_id") or ""
-            eff_folder = folder or entry.get("folder") or ""
-            eff_f_norm = "".join(c for c in unicodedata.normalize("NFKD", eff_folder) if not unicodedata.combining(c)).lower()
-            if (eff_surl and (eff_surl.startswith("http://") or eff_surl.startswith("https://"))) or eff_sid or eff_f_norm.startswith("extra"):
-                entry["source_origin"] = "web"
+        with self._meta_lock:
+            meta = self._load_metadata()
+            entry = meta.get(vid_id, {}) if vid_id else {}
+            if file_path:
+                rel_path = os.path.relpath(file_path, self.base_dir).replace("\\", "/")
+                if not vid_id:
+                    vid_id = self._find_video_id(rel_path, meta)
+                    entry = meta.get(vid_id, {})
             else:
-                entry["source_origin"] = "pc"
+                rel_path = entry.get("rel_path")
+                if not rel_path or ("remote_" in rel_path and not entry.get("cloud_url")):
+                    matched_disk = self._find_disk_file_by_id(vid_id) if vid_id else None
+                    if matched_disk:
+                        rel_path = matched_disk
+                    else:
+                        rel_path = rel_path or f"{folder or 'Geral'}/remote_{vid_id or int(time.time())}.mp4"
+                if not vid_id:
+                    vid_id = self._get_video_id(rel_path)
+                    entry = meta.get(vid_id, {})
 
+            if title is not None:
+                entry["title"] = title
+            if folder is not None:
+                entry["folder"] = folder
+            if is_favorite is not None:
+                entry["is_favorite"] = is_favorite
+            if storage_location is not None:
+                entry["storage_location"] = storage_location
+            elif "storage_location" not in entry or entry.get("storage_location") == "render_local":
+                entry["storage_location"] = "local"
+            if cloud_url is not None:
+                entry["cloud_url"] = cloud_url
+            if stream_url is not None:
+                entry["custom_stream_url"] = stream_url
+            if file_size_bytes is not None:
+                entry["file_size_bytes"] = file_size_bytes
+            if width is not None:
+                entry["width"] = width
+            if height is not None:
+                entry["height"] = height
+            if fps is not None:
+                entry["fps"] = fps
+            if duration_seconds is not None:
+                entry["duration_seconds"] = duration_seconds
+            if source_url is not None:
+                entry["source_url"] = source_url
+            if source_id is not None:
+                entry["source_id"] = source_id
+            if source_thumbnail_url is not None:
+                entry["source_thumbnail_url"] = source_thumbnail_url
 
-        # Auto-probe if missing dimensions and local file exists
-        if file_path and os.path.exists(file_path) and (not entry.get("width") or not entry.get("height")):
-            p = probe_video_file(file_path)
-            if p["width"] > 0:
-                entry["width"] = p["width"]
-                entry["height"] = p["height"]
-                entry["fps"] = p["fps"]
-                entry["duration_seconds"] = p["duration_seconds"]
+            if intro_end is not None:
+                entry["intro_end"] = round(float(intro_end), 2)
+            if highlight_start is not None:
+                entry["highlight_start"] = round(float(highlight_start), 2)
+            if highlight_end is not None:
+                entry["highlight_end"] = round(float(highlight_end), 2)
+            if highlight_score is not None:
+                entry["highlight_score"] = round(float(highlight_score), 2)
+            if highlights is not None:
+                entry["highlights"] = highlights
+            if heatmap_data is not None:
+                entry["heatmap_data"] = heatmap_data
 
-        entry["id"] = vid_id
-        entry["rel_path"] = rel_path
+            if source_origin is not None:
+                entry["source_origin"] = source_origin
+            elif "source_origin" not in entry or entry.get("source_origin") is None:
+                eff_surl = source_url or entry.get("source_url") or ""
+                eff_sid = source_id or entry.get("source_id") or ""
+                eff_folder = folder or entry.get("folder") or ""
+                eff_f_norm = "".join(c for c in unicodedata.normalize("NFKD", eff_folder) if not unicodedata.combining(c)).lower()
+                if (eff_surl and (eff_surl.startswith("http://") or eff_surl.startswith("https://"))) or eff_sid or eff_f_norm.startswith("extra"):
+                    entry["source_origin"] = "web"
+                else:
+                    entry["source_origin"] = "pc"
 
-        meta[vid_id] = entry
-        self._save_metadata(meta)
-        return vid_id
+            # Auto-probe if missing dimensions and local file exists
+            if file_path and os.path.exists(file_path) and (not entry.get("width") or not entry.get("height")):
+                p = probe_video_file(file_path)
+                if p["width"] > 0:
+                    entry["width"] = p["width"]
+                    entry["height"] = p["height"]
+                    entry["fps"] = p["fps"]
+                    entry["duration_seconds"] = p["duration_seconds"]
+
+            entry["id"] = vid_id
+            entry["rel_path"] = rel_path
+            if "created_at" not in entry or not entry["created_at"]:
+                entry["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            meta[vid_id] = entry
+            self._save_metadata(meta)
+            return vid_id
 
     def list_folders(self) -> List[Dict[str, Any]]:
         """Lists all physical and metadata folders, properly counting both local and HF cloud videos, deduplicating phantom variants."""
@@ -1134,7 +1155,8 @@ class VideoService:
                         "highlight_score": entry_meta.get("highlight_score", 0.0),
                         "highlights": entry_meta.get("highlights", []),
                         "source_url": entry_meta.get("source_url"),
-                        "source_id": entry_meta.get("source_id")
+                        "source_id": entry_meta.get("source_id"),
+                        "source_thumbnail_url": entry_meta.get("source_thumbnail_url")
                     })
 
 
@@ -1194,7 +1216,8 @@ class VideoService:
                     "highlight_score": entry_meta.get("highlight_score", 0.0),
                     "highlights": entry_meta.get("highlights", []),
                     "source_url": entry_meta.get("source_url"),
-                    "source_id": entry_meta.get("source_id")
+                    "source_id": entry_meta.get("source_id"),
+                    "source_thumbnail_url": entry_meta.get("source_thumbnail_url")
                 })
 
 
@@ -1241,7 +1264,7 @@ class VideoService:
                 "storage_location": entry.get("storage_location", "local"),
                 "source_origin": entry.get("source_origin") or ("web" if (entry.get("source_url") or entry.get("source_id") or entry.get("custom_stream_url") or "".join(c for c in unicodedata.normalize("NFKD", entry.get("folder", "")) if not unicodedata.combining(c)).lower().startswith("extra")) else "pc"),
                 "cloud_url": entry.get("cloud_url"),
-                "stream_url": entry.get("custom_stream_url") or f"/api/videos/{video_id}/stream",
+                "stream_url": (f"/api/videos/{video_id}/stream" if exists else (entry.get("custom_stream_url") or f"/api/videos/{video_id}/stream")),
                 "download_url": f"/api/videos/{video_id}/download",
                 "thumbnail_url": f"/api/videos/{video_id}/thumbnail",
                 "width": entry.get("width") or 0,
@@ -1255,6 +1278,7 @@ class VideoService:
                 "highlights": entry.get("highlights", []),
                 "source_url": entry.get("source_url"),
                 "source_id": entry.get("source_id"),
+                "source_thumbnail_url": entry.get("source_thumbnail_url"),
                 "full_path": full_path if exists else None
             }
 

@@ -34,12 +34,49 @@ export const JobHistoryView: React.FC = () => {
   const { settings } = useAppStore();
   const isEn = settings?.language === 'en-US';
   const tJobs: any = translations[settings.language].jobHistory || {};
-  const { jobs, navigateToView, cancelJob, deleteJob, clearCompletedJobs, addLog, pauseJob, resumeJob, retryJob } = useAppStore();
+  const {
+    jobs,
+    navigateToView,
+    cancelJob,
+    deleteJob,
+    clearCompletedJobs,
+    addLog,
+    pauseJob,
+    resumeJob,
+    retryJob,
+    pauseAllJobs,
+    resumeAllJobs,
+    retryAllFailedJobs,
+    highlightedItemId
+  } = useAppStore();
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'completed' | 'cancelled'>('all');
   const [search, setSearch] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [inspectedJob, setInspectedJob] = useState<ExtractionJob | null>(null);
   const [nowTime, setNowTime] = useState(Date.now());
+
+  // Scroll to highlighted job card when navigating from MiniTaskDock ("View Tasks")
+  React.useEffect(() => {
+    if (!highlightedItemId) return;
+    if (statusFilter !== 'all') setStatusFilter('all');
+    if (search !== '') setSearch('');
+
+    const scrollToTargetJob = () => {
+      const el = document.querySelector(`[data-job-id="${highlightedItemId}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return true;
+      }
+      return false;
+    };
+
+    const t1 = setTimeout(scrollToTargetJob, 80);
+    const t2 = setTimeout(scrollToTargetJob, 260);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [highlightedItemId]);
 
   // Live timer ticker for active jobs (updates every 500ms)
   React.useEffect(() => {
@@ -52,15 +89,17 @@ export const JobHistoryView: React.FC = () => {
   }, [jobs]);
 
   const formatDuration = (seconds: number) => {
-    if (seconds <= 0) return '0s';
-    if (seconds < 60) return `${seconds}s`;
-    const mins = Math.floor(seconds / 60);
-    const remSecs = seconds % 60;
+    const rounded = Math.round(seconds);
+    if (rounded <= 0) return '0s';
+    if (rounded < 60) return `${rounded}s`;
+    const mins = Math.floor(rounded / 60);
+    const remSecs = rounded % 60;
     return remSecs > 0 ? `${mins}m ${remSecs}s` : `${mins}m`;
   };
 
   const isJobActive = (job: ExtractionJob) => {
     if (job.status === 'completed') return false;
+    if (job.status === 'cancelled' || job.status === 'failed') return false;
     if (job.status === 'active' || job.status === 'queued' || job.status === 'paused') return true;
 
     const stage = (job.currentStage || '').toLowerCase();
@@ -82,7 +121,6 @@ export const JobHistoryView: React.FC = () => {
       stage.includes('buscando');
 
     if (hasActiveStage) return true;
-    if (job.status === 'cancelled' || job.status === 'failed') return false;
 
     return (
       (!!job.downloadedBytes && job.downloadedBytes > 0 && job.progressPercent < 100) ||
@@ -103,6 +141,8 @@ export const JobHistoryView: React.FC = () => {
   };
 
   const activeCount = jobs.filter(j => isJobActive(j)).length;
+  const pausedCount = jobs.filter(j => j.status === 'paused').length;
+  const runningCount = jobs.filter(j => j.status === 'active' || j.status === 'queued').length;
   const completedCount = jobs.filter(j => j.status === 'completed').length;
   const cancelledCount = jobs.filter(j => !isJobActive(j) && j.status !== 'completed' && (j.status === 'cancelled' || j.status === 'failed')).length;
 
@@ -185,6 +225,36 @@ export const JobHistoryView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2 w-full sm:w-auto overflow-x-auto no-scrollbar">
+          {pausedCount > 0 && (
+            <button
+              onClick={resumeAllJobs}
+              className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-colors shrink-0"
+              title={isEn ? `Resume all ${pausedCount} paused tasks` : `Retomar todas as ${pausedCount} tarefas pausadas`}
+            >
+              <Play size={13} />
+              <span>{isEn ? `Resume Paused (${pausedCount})` : `Retomar Pausados (${pausedCount})`}</span>
+            </button>
+          )}
+          {cancelledCount > 0 && (
+            <button
+              onClick={retryAllFailedJobs}
+              className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-colors shrink-0"
+              title={isEn ? `Retry all ${cancelledCount} failed/cancelled tasks` : `Re-executar todas as ${cancelledCount} tarefas com falha`}
+            >
+              <RotateCcw size={13} />
+              <span>{isEn ? `Retry Failed (${cancelledCount})` : `Re-executar Falhos (${cancelledCount})`}</span>
+            </button>
+          )}
+          {runningCount > 0 && (
+            <button
+              onClick={pauseAllJobs}
+              className="px-3 py-1.5 rounded-xl bg-surface-elevated hover:bg-amber-950/40 border border-border text-xs font-semibold text-amber-300 flex items-center gap-1.5 transition-colors shrink-0"
+              title={isEn ? 'Pause all running tasks' : 'Pausar todas as tarefas em andamento'}
+            >
+              <Pause size={13} />
+              <span>{isEn ? 'Pause All' : 'Pausar Todos'}</span>
+            </button>
+          )}
           <button
             onClick={() => navigateToView('extractor')}
             className="px-3.5 py-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-glow-brand transition-colors shrink-0"
@@ -316,11 +386,17 @@ export const JobHistoryView: React.FC = () => {
             const isActive = isJobActive(job) && !isQueued && !isPaused;
             const isCancelled = !isCompleted && !isActive && !isQueued && !isPaused && (job.status === 'cancelled' || job.status === 'failed');
             const isVideoSave = (job.mode as string) === 'video_save' || (job.mode as string) === 'video_downloader';
+            const isHighlighted = highlightedItemId === job.id;
 
             return (
               <div
                 key={job.id}
-                className="glass-panel p-4 sm:p-5 rounded-3xl border border-border space-y-3.5 hover:border-slate-700 transition-all shadow-sm"
+                data-job-id={job.id}
+                className={`glass-panel p-4 sm:p-5 rounded-3xl border space-y-3.5 transition-all shadow-sm ${
+                  isHighlighted
+                    ? 'border-brand-400 ring-2 ring-brand-400/70 bg-brand-950/30 shadow-glow-brand'
+                    : 'border-border hover:border-slate-700'
+                }`}
               >
                 {/* Header Row */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
@@ -501,13 +577,23 @@ export const JobHistoryView: React.FC = () => {
                   )}
 
                   {isQueued && (
-                    <button
-                      onClick={() => cancelJob(job.id)}
-                      className="px-4 py-2 rounded-xl bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 font-bold text-xs flex items-center gap-1.5 transition-colors"
-                    >
-                      <XCircle size={14} />
-                      <span>{isEn ? "Remove from Queue" : "Remover da Fila"}</span>
-                    </button>
+                    <>
+                      <button
+                        onClick={() => resumeJob(job.id)}
+                        className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm transition-colors"
+                        title={isEn ? "Start this task immediately with priority" : "Iniciar esta tarefa agora com prioridade"}
+                      >
+                        <Play size={14} />
+                        <span>{isEn ? "Start Now" : "Baixar Agora"}</span>
+                      </button>
+                      <button
+                        onClick={() => cancelJob(job.id)}
+                        className="px-4 py-2 rounded-xl bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 font-bold text-xs flex items-center gap-1.5 transition-colors"
+                      >
+                        <XCircle size={14} />
+                        <span>{isEn ? "Remove from Queue" : "Remover da Fila"}</span>
+                      </button>
+                    </>
                   )}
 
                   {isCompleted && (

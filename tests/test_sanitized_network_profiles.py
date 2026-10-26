@@ -183,3 +183,159 @@ def test_normalize_title_for_comparison():
 def test_resilient_downloader_import():
     assert hasattr(resilient_downloader, "download_video_resilient")
     assert hasattr(resilient_downloader, "logger")
+
+
+def test_dynamic_origin_preservation_for_any_domain():
+    # Ensures real domains are preserved dynamically instead of being replaced with .example
+    custom_url = "https://www.media-portal-host.org/video-AbCdEf12345/sample-clip"
+    canon = extract_canonical_target_page(custom_url)
+    assert canon == custom_url
+    assert ".example" not in canon
+
+    matched, vid_id, embed_url = matches_embed_player_provider(custom_url)
+    assert matched is True
+    assert vid_id == "AbCdEf12345"
+    assert embed_url == "https://www.media-portal-host.org/embed/AbCdEf12345/"
+
+    xhr = get_embed_xhr_url("AbCdEf12345", "hash999", custom_url)
+    assert xhr.startswith("https://www.media-portal-host.org/xhr/video/AbCdEf12345")
+
+    viewkey_url = "https://stream-hub-site.net/view_video.php?viewkey=vk987654321"
+    canon_vk = extract_canonical_target_page(viewkey_url)
+    assert canon_vk == viewkey_url
+    assert ".example" not in canon_vk
+
+    matched_d, vid_d, target_d = matches_direct_extractor_provider(viewkey_url)
+    assert matched_d is True
+    assert vid_d == "vk987654321"
+    assert target_d == viewkey_url
+
+
+@pytest.mark.asyncio
+async def test_relaunch_job_in_place_sanitizes_and_queues(monkeypatch, tmp_path):
+    from src.server import server
+
+    fake_jid = "save_vid_test_999"
+    fake_target = str(tmp_path / "Save Video Save Video Sample Clip.mp4")
+
+    monkeypatch.setitem(
+        server._active_jobs,
+        fake_jid,
+        {
+            "session_id": fake_jid,
+            "url": "https://www.media-portal-host.org/video-AbCdEf12345/sample-clip",
+            "mode": "video_save",
+            "engine_type": "video_downloader",
+            "status": "error",
+            "error": "Previous error",
+            "folder": "TestFolder",
+            "target_path": fake_target,
+            "progress": {
+                "current": 0,
+                "total": 100,
+                "percent": 0,
+                "title": "Save Video: Save Video: Sample Clip",
+                "status": "Erro anterior",
+            },
+        },
+    )
+
+    called_args = {}
+
+    async def fake_resolve(vid_id, page_url):
+        called_args["resolved_from"] = (vid_id, page_url)
+        return "https://cdn.media-portal-host.org/streams/1080p.mp4"
+
+    async def fake_download(**kwargs):
+        called_args["download_kwargs"] = kwargs
+
+    monkeypatch.setattr(server, "_resolve_best_video_stream", fake_resolve)
+    monkeypatch.setattr(server, "_run_video_download_task", fake_download)
+    monkeypatch.setattr(server, "_save_jobs_to_disk", lambda *a, **kw: None)
+
+    ok = await server._relaunch_job_in_place(fake_jid)
+    assert ok is True
+    job = server._active_jobs[fake_jid]
+    assert job["status"] == "running"
+    assert "error" not in job
+    assert job["progress"]["title"] == "Save Video: Sample Clip"
+    assert "Save Video" not in job["target_path"]
+
+    ctrl = server._job_controllers.get(fake_jid)
+    assert ctrl is not None
+    await ctrl.task
+
+    assert called_args["resolved_from"] == (
+        "AbCdEf12345",
+        "https://www.media-portal-host.org/video-AbCdEf12345/sample-clip",
+    )
+    assert called_args["download_kwargs"]["vurl"] == "https://cdn.media-portal-host.org/streams/1080p.mp4"
+    assert called_args["download_kwargs"]["clean_title"] == "Sample Clip"
+
+    server._active_jobs.pop(fake_jid, None)
+    server._job_controllers.pop(fake_jid, None)
+
+
+@pytest.mark.asyncio
+async def test_relaunch_job_resets_stale_99_when_file_missing(monkeypatch, tmp_path):
+    from src.server import server
+
+    fake_jid = "save_vid_stale_99"
+    missing_target = str(tmp_path / "Missing_File_After_Error.mp4")
+
+    monkeypatch.setitem(
+        server._active_jobs,
+        fake_jid,
+        {
+            "session_id": fake_jid,
+            "url": "https://www.media-portal-host.org/video-XyZ987654/sample-clip-2",
+            "mode": "video_save",
+            "engine_type": "video_downloader",
+            "status": "error",
+            "error": "cannot access local variable 'downloaded_heatmap'",
+            "started_at": "2026-10-23 00:00:00 UTC",
+            "downloaded_bytes": 633119990,
+            "total_bytes": 633119990,
+            "folder": "TestFolder",
+            "target_path": missing_target,
+            "progress": {
+                "current": 633119990,
+                "total": 633119990,
+                "percent": 99,
+                "downloaded_bytes": 633119990,
+                "total_bytes": 633119990,
+                "title": "Save Video: Sample Clip 2",
+                "status": "Erro: cannot access local variable 'downloaded_heatmap'",
+            },
+        },
+    )
+
+    async def fake_resolve(vid_id, page_url):
+        return "https://cdn.media-portal-host.org/streams/1080p_2.mp4"
+
+    async def fake_download(**kwargs):
+        pass
+
+    monkeypatch.setattr(server, "_resolve_best_video_stream", fake_resolve)
+    monkeypatch.setattr(server, "_run_video_download_task", fake_download)
+    monkeypatch.setattr(server, "_save_jobs_to_disk", lambda *a, **kw: None)
+
+    ok = await server._relaunch_job_in_place(fake_jid, priority=True)
+    assert ok is True
+    job = server._active_jobs[fake_jid]
+    assert job["downloaded_bytes"] == 0
+    assert job["total_bytes"] == 0
+    assert job["progress"]["percent"] == 0
+    assert job["progress"]["downloaded_bytes"] == 0
+    assert job["started_at"] != "2026-10-23 00:00:00 UTC"
+
+    ctrl = server._job_controllers.get(fake_jid)
+    if ctrl:
+        await ctrl.task
+
+    server._active_jobs.pop(fake_jid, None)
+    server._job_controllers.pop(fake_jid, None)
+
+
+
+

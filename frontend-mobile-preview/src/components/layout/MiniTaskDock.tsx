@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   X,
   ExternalLink,
@@ -6,6 +6,9 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  ChevronLeft,
+  ChevronRight,
+  LayoutGrid,
   Layers,
   Clock,
   Film,
@@ -39,10 +42,13 @@ export const MiniTaskDock: React.FC = () => {
     sessionJobIds,
     dismissedDockJobIds,
     dismissDockJob,
-    dismissAllDockJobs
+    dismissAllDockJobs,
+    setHighlightedItemId
   } = useAppStore();
 
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [wrapTasks, setWrapTasks] = useState<boolean>(false);
+  const tasksScrollRef = useRef<HTMLDivElement | null>(null);
   const t = translations[settings.language]?.dock || translations['en-US'].dock;
   const isEn = settings.language === 'en-US';
 
@@ -216,73 +222,131 @@ export const MiniTaskDock: React.FC = () => {
       <div className="glass-panel-elevated rounded-2xl p-2.5 sm:p-3 sm:px-4 flex flex-col gap-2 border border-brand-500/30 shadow-2xl bg-surface/95 backdrop-blur-xl">
         {/* Horizontal tabs/pills switcher bar */}
         {dockJobs.length > 0 && (
-          <div className="flex items-center gap-1.5 overflow-x-auto max-w-full pb-1 border-b border-border/40 no-scrollbar touch-scroll">
-            <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider shrink-0 flex items-center gap-1 mr-1">
+          <div className="flex items-center gap-1.5 max-w-full pb-1.5 border-b border-border/40">
+            <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider shrink-0 flex items-center gap-1 mr-0.5">
               <Layers size={11} className="text-brand-400" />
               {t.tasksHeader} ({dockJobs.length}):
             </span>
-            {dockJobs.map((j) => {
-              const isCurrent = j.id === focusedJob.id;
-              const isJobComp = isJobCompleted(j);
-              const isJobQue = isJobQueued(j);
-              const isJobPau = j.status === 'paused';
-              const isJobFail = j.status === 'failed';
-              const isJobCanc = j.status === 'cancelled';
-              const pillProgress = Math.max(0, Math.min(100, Number(j.progressPercent) || 0));
 
-              return (
-                <div
-                  key={j.id}
-                  className={`group px-2 py-0.5 rounded-lg text-[10px] font-medium transition-all shrink-0 flex items-center gap-1.5 ${
-                    isCurrent
-                      ? 'bg-brand-500/30 text-brand-300 border border-brand-500/50 shadow-sm font-semibold'
-                      : 'bg-surface-elevated/70 text-slate-400 hover:text-slate-200 hover:bg-surface-elevated border border-transparent'
+            {!wrapTasks && dockJobs.length > 3 && (
+              <button
+                type="button"
+                onClick={() => tasksScrollRef.current?.scrollBy({ left: -260, behavior: 'smooth' })}
+                className="shrink-0 p-1 rounded-lg bg-surface-elevated hover:bg-surface-hover border border-border text-slate-300 hover:text-white transition-colors cursor-pointer"
+                title={isEn ? 'Scroll tasks left' : 'Rolar tarefas para a esquerda'}
+              >
+                <ChevronLeft size={13} />
+              </button>
+            )}
+
+            <div
+              ref={tasksScrollRef}
+              onWheel={(e) => {
+                if (!wrapTasks && tasksScrollRef.current && e.deltaY !== 0) {
+                  const el = tasksScrollRef.current;
+                  if (el.scrollWidth > el.clientWidth) {
+                    e.preventDefault();
+                    el.scrollLeft += e.deltaY;
+                  }
+                }
+              }}
+              className={`flex-1 flex items-center gap-1.5 min-w-0 py-0.5 ${
+                wrapTasks
+                  ? 'flex-wrap max-h-36 overflow-y-auto custom-scrollbar'
+                  : 'overflow-x-auto custom-scrollbar touch-scroll scroll-smooth'
+              }`}
+            >
+              {dockJobs.map((j) => {
+                const isCurrent = j.id === focusedJob.id;
+                const isJobComp = isJobCompleted(j);
+                const isJobQue = isJobQueued(j);
+                const isJobPau = j.status === 'paused';
+                const isJobFail = j.status === 'failed';
+                const isJobCanc = j.status === 'cancelled';
+                const pillProgress = Math.max(0, Math.min(100, Number(j.progressPercent) || 0));
+
+                return (
+                  <div
+                    key={j.id}
+                    className={`group px-2 py-0.5 rounded-lg text-[10px] font-medium transition-all shrink-0 flex items-center gap-1.5 ${
+                      isCurrent
+                        ? 'bg-brand-500/30 text-brand-300 border border-brand-500/50 shadow-sm font-semibold'
+                        : 'bg-surface-elevated/70 text-slate-400 hover:text-slate-200 hover:bg-surface-elevated border border-transparent'
+                    }`}
+                  >
+                    <button
+                      onClick={() => {
+                        setSelectedJobId(j.id);
+                        setActiveJobById(j.id);
+                      }}
+                      className="flex items-center gap-1.5 min-w-0 cursor-pointer"
+                      title={j.title}
+                    >
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                          isJobComp
+                            ? 'bg-emerald-400'
+                            : isJobFail
+                            ? 'bg-rose-400'
+                            : isJobCanc
+                            ? 'bg-slate-400'
+                            : isJobQue || isJobPau
+                            ? 'bg-amber-400'
+                            : 'bg-brand-400 animate-pulse'
+                        }`}
+                      />
+                      <span className="truncate max-w-[100px] sm:max-w-[140px]">{j.title}</span>
+                      <span className="font-mono text-[9px] text-slate-400">
+                        {isJobComp ? '100%' : isJobFail ? (isEn ? 'Failed' : 'Falhou') : isJobCanc ? (isEn ? 'Cancelled' : 'Cancelado') : isJobQue ? t.inQueuePill : isJobPau ? t.paused : `${pillProgress}%`}
+                      </span>
+                    </button>
+
+                    {/* Individual tab close button */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        dismissDockJob(j.id);
+                        if (selectedJobId === j.id) {
+                          setSelectedJobId(null);
+                        }
+                      }}
+                      className="p-0.5 rounded hover:bg-surface-hover text-slate-400 hover:text-rose-300 transition-colors ml-0.5 cursor-pointer"
+                      title={t.dismissTask}
+                    >
+                      <X size={10} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            {dockJobs.length > 3 && (
+              <div className="flex items-center gap-1 shrink-0">
+                {!wrapTasks && (
+                  <button
+                    type="button"
+                    onClick={() => tasksScrollRef.current?.scrollBy({ left: 260, behavior: 'smooth' })}
+                    className="p-1 rounded-lg bg-surface-elevated hover:bg-surface-hover border border-border text-slate-300 hover:text-white transition-colors cursor-pointer"
+                    title={isEn ? 'Scroll tasks right' : 'Rolar tarefas para a direita'}
+                  >
+                    <ChevronRight size={13} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setWrapTasks(prev => !prev)}
+                  className={`px-2 py-1 rounded-lg border text-[10px] font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
+                    wrapTasks
+                      ? 'bg-violet-600 text-white border-violet-500'
+                      : 'bg-surface-elevated hover:bg-surface-hover border-border text-slate-300 hover:text-white'
                   }`}
+                  title={isEn ? (wrapTasks ? 'Single row scroll' : 'Show all tasks wrapped') : (wrapTasks ? 'Mostrar em linha única' : 'Expandir todas as tarefas')}
                 >
-                  <button
-                    onClick={() => {
-                      setSelectedJobId(j.id);
-                      setActiveJobById(j.id);
-                    }}
-                    className="flex items-center gap-1.5 min-w-0"
-                    title={j.title}
-                  >
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                        isJobComp
-                          ? 'bg-emerald-400'
-                          : isJobFail
-                          ? 'bg-rose-400'
-                          : isJobCanc
-                          ? 'bg-slate-400'
-                          : isJobQue || isJobPau
-                          ? 'bg-amber-400'
-                          : 'bg-brand-400 animate-pulse'
-                      }`}
-                    />
-                    <span className="truncate max-w-[100px] sm:max-w-[140px]">{j.title}</span>
-                    <span className="font-mono text-[9px] text-slate-400">
-                      {isJobComp ? '100%' : isJobFail ? (isEn ? 'Failed' : 'Falhou') : isJobCanc ? (isEn ? 'Cancelled' : 'Cancelado') : isJobQue ? t.inQueuePill : isJobPau ? t.paused : `${pillProgress}%`}
-                    </span>
-                  </button>
-
-                  {/* Individual tab close button */}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      dismissDockJob(j.id);
-                      if (selectedJobId === j.id) {
-                        setSelectedJobId(null);
-                      }
-                    }}
-                    className="p-0.5 rounded hover:bg-surface-hover text-slate-400 hover:text-rose-300 transition-colors ml-0.5"
-                    title={t.dismissTask}
-                  >
-                    <X size={10} />
-                  </button>
-                </div>
-              );
-            })}
+                  <LayoutGrid size={11} />
+                  <span className="hidden sm:inline">{wrapTasks ? (isEn ? 'Compact' : 'Compactar') : (isEn ? 'All' : 'Ver Todas')}</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -429,13 +493,21 @@ export const MiniTaskDock: React.FC = () => {
             {!isCompleted && !isFailed && !isCancelled && (
               <button
                 onClick={() => {
+                  const targetJobId = focusedJob.id;
+                  setActiveJobById(targetJobId);
+                  setHighlightedItemId(targetJobId);
+                  setTimeout(() => {
+                    if (useAppStore.getState().highlightedItemId === targetJobId) {
+                      setHighlightedItemId(null);
+                    }
+                  }, 5000);
                   if (isVideo) {
                     navigateToView('job-history');
                   } else {
                     navigateToView('live-monitor');
                   }
                 }}
-                className="px-2 sm:px-3.5 py-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-[11px] sm:text-xs font-semibold flex items-center gap-1 sm:gap-1.5 transition-colors shadow-glow-brand whitespace-nowrap"
+                className="px-2 sm:px-3.5 py-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-[11px] sm:text-xs font-semibold flex items-center gap-1 sm:gap-1.5 transition-colors shadow-glow-brand whitespace-nowrap cursor-pointer"
               >
                 <ExternalLink size={12} className="shrink-0" />
                 <span>{isVideo ? t.viewTasks : t.viewLive}</span>

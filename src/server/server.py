@@ -27,6 +27,8 @@ if getattr(sys, 'frozen', False):
 import re
 import time
 import json
+import hashlib
+import threading
 import logging
 import asyncio
 import io
@@ -385,17 +387,66 @@ def _load_jobs_from_disk(clear_zombies: bool = False):
                 cnt = j.get("resolved_count") or j.get("progress", {}).get("current") or 8
                 j["duration_seconds"] = round(max(3.5, cnt * 1.6), 1)
 
+        # Sanitize duplicated "Save Video: Save Video: ..." prefixes from legacy retries
+        if isinstance(j.get("progress"), dict):
+            raw_t = j["progress"].get("title") or ""
+            if re.match(r"^(?:Save Video:\s*|Salvar Vídeo:\s*){2,}", raw_t, flags=re.I):
+                stripped = re.sub(r"^(?:Save Video:\s*|Salvar Vídeo:\s*)+", "", raw_t, flags=re.I).strip()
+                j["progress"]["title"] = f"Save Video: {stripped}" if stripped else "Save Video"
+                updated = True
+
+        t_path = j.get("target_path") or ""
+        if t_path and re.search(r"(?:Save Video\s+|Salvar Vídeo\s+)", os.path.basename(t_path), flags=re.I):
+            clean_bname = re.sub(r"^(?:Save Video\s+|Salvar Vídeo\s+)+", "", os.path.basename(t_path), flags=re.I).strip()
+            if clean_bname:
+                j["target_path"] = os.path.join(os.path.dirname(t_path), clean_bname)
+                updated = True
+
     # Interrupted jobs at app shutdown are placed on PAUSE on initial boot
     if clear_zombies and not _startup_zombies_cleared:
         _startup_zombies_cleared = True
+        # Remove orphan duplicate failed retry records when an original record for the same (url, folder) exists
+        canonical_keys = set()
+        duplicate_error_jids = []
         for jid, j in list(_active_jobs.items()):
-            if jid in _job_controllers:
+            u = (j.get("source_url") or j.get("url") or "").strip()
+            fld = (j.get("folder") or "").strip()
+            if not u:
                 continue
-            if j.get("status") in ("running", "queued", "active"):
-                j["status"] = "paused"
-                if isinstance(j.get("progress"), dict):
-                    j["progress"]["status"] = "Pausado (aguardando retomada manual)"
-                updated = True
+            key = (u, fld)
+            if j.get("status") in ("completed", "paused", "running", "active"):
+                canonical_keys.add(key)
+
+        seen_error_keys = set(canonical_keys)
+        for jid, j in sorted(_active_jobs.items(), key=lambda kv: kv[1].get("started_at", "")):
+            u = (j.get("source_url") or j.get("url") or "").strip()
+            fld = (j.get("folder") or "").strip()
+            if not u:
+                continue
+            key = (u, fld)
+            if j.get("status") in ("error", "failed"):
+                if key in seen_error_keys:
+                    duplicate_error_jids.append(jid)
+                else:
+                    seen_error_keys.add(key)
+
+        for dup_id in duplicate_error_jids:
+            _active_jobs.pop(dup_id, None)
+            updated = True
+
+    # Any job marked as running/queued/active on disk that has NO live controller in memory
+    # is an orphan from a previous process or interrupted queue and must be placed on pause
+    # so the UI never displays a deceptive "Na fila de retomada..." or "Running" state forever.
+    for jid, j in list(_active_jobs.items()):
+        ctrl = _job_controllers.get(jid)
+        has_live_ctrl = bool(ctrl and hasattr(ctrl, "is_active") and ctrl.is_active())
+        if has_live_ctrl:
+            continue
+        if j.get("status") in ("running", "queued", "active"):
+            j["status"] = "paused"
+            if isinstance(j.get("progress"), dict):
+                j["progress"]["status"] = "Pausado (aguardando retomada manual)"
+            updated = True
 
     if updated:
         _save_jobs_to_disk()
@@ -403,6 +454,7 @@ def _load_jobs_from_disk(clear_zombies: bool = False):
 
 
 _last_hf_jobs_sync = 0.0
+_jobs_disk_lock = threading.Lock()
 
 
 def _save_jobs_to_disk(sync_hf: bool = False):
@@ -412,17 +464,29 @@ def _save_jobs_to_disk(sync_hf: bool = False):
     preventing 429 Too Many Requests (128 commits/hour limit).
     """
     global _last_hf_jobs_sync
-    try:
-        tmp_file = JOBS_FILE + ".tmp"
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(_active_jobs, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_file, JOBS_FILE)
+    with _jobs_disk_lock:
+        try:
+            snapshot = dict(_active_jobs)
+            tmp_file = f"{JOBS_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, indent=2, ensure_ascii=False)
+            try:
+                os.replace(tmp_file, JOBS_FILE)
+            except PermissionError:
+                with open(JOBS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(snapshot, f, indent=2, ensure_ascii=False)
+                try:
+                    os.remove(tmp_file)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"Could not save jobs to disk: {e}")
 
+    try:
         now = time.time()
         should_sync = sync_hf or (now - _last_hf_jobs_sync >= 300.0)
         if should_sync:
             try:
-                import threading
                 from src.server.video_service import cloud_storage as _cs
                 if _cs.is_connected():
                     _last_hf_jobs_sync = now
@@ -984,6 +1048,7 @@ class AnalyzeRequest(BaseModel):
     media_type_filter: Optional[str] = "all"  # "all", "images", "videos", "gifs"
     folder: Optional[str] = "Geral"
     selected_image_urls: Optional[List[str]] = None
+    download_locally: Optional[bool] = False
 
 
 class BatchAnalyzeRequest(BaseModel):
@@ -999,6 +1064,7 @@ class BatchAnalyzeRequest(BaseModel):
     media_type_filter: Optional[str] = "all"
     folder: Optional[str] = "Geral"
     priority: Optional[str] = "medium"
+    download_locally: Optional[bool] = False
 
 
 class CopilotRespondRequest(BaseModel):
@@ -2030,6 +2096,12 @@ async def _re_resolve_video_stream(target_page: str, target_height: Optional[int
         info = await asyncio.to_thread(_extract)
     except Exception as exc:
         logger.warning(f"Auto re-resolution yt-dlp failed for {target_page}: {exc}")
+        try:
+            fallback_stream = await _resolve_best_video_stream("vid", target_page)
+            if fallback_stream:
+                return fallback_stream, None
+        except Exception:
+            pass
         return None, None
 
     if extracted_cookies:
@@ -2109,14 +2181,21 @@ async def proxy_video_stream(
         upstream_req = client.build_request("GET", url, headers=upstream_headers)
         upstream_resp = await client.send(upstream_req, stream=True)
 
-        # Se upstream retornar erro de link expirado ou não autorizado (401, 403, 404, 410, 470, 472, 500, 502, 503, 504), tentar re-resolver (exceto 416 que é range do cliente)
-        if upstream_resp.status_code in (401, 403, 404, 410, 470, 472, 500, 502, 503, 504) or (400 <= upstream_resp.status_code < 500 and upstream_resp.status_code != 416):
-            logger.info(f"Stream returned HTTP {upstream_resp.status_code}. Attempting automatic re-resolution...")
+        # Se upstream retornar erro de link expirado/não autorizado OU página HTML em vez de mídia, tentar re-resolver
+        upstream_ct = upstream_resp.headers.get("content-type", "").lower()
+        is_html_response = "text/html" in upstream_ct
+        if is_html_response or upstream_resp.status_code in (401, 403, 404, 410, 470, 472, 500, 502, 503, 504) or (400 <= upstream_resp.status_code < 500 and upstream_resp.status_code != 416):
+            logger.info(f"Stream returned HTTP {upstream_resp.status_code} (ct={upstream_ct}). Attempting automatic re-resolution...")
             await upstream_resp.aclose()
 
+            old_url = url
             target_page, target_height, found_album_id, found_img = _extract_video_info_from_url_or_albums(url, referer)
+            if not target_page and is_html_response and url.startswith("http"):
+                target_page = url
             if target_page:
                 fresh_url, info = await _re_resolve_video_stream(target_page, target_height)
+                if not fresh_url:
+                    fresh_url = await _resolve_best_video_stream("vid", target_page)
                 if fresh_url:
                     logger.info(f"Successfully re-resolved fresh stream: {fresh_url[:60]}... for height {target_height}")
                     url = fresh_url
@@ -2129,6 +2208,19 @@ async def proxy_video_stream(
 
                     upstream_req = client.build_request("GET", url, headers=upstream_headers)
                     upstream_resp = await client.send(upstream_req, stream=True)
+
+                    # Persist renewed stream URL in Video Gallery metadata if matching entry exists
+                    try:
+                        v_meta = video_service._load_metadata()
+                        meta_updated = False
+                        for _vid, ventry in v_meta.items():
+                            if ventry.get("custom_stream_url") == old_url or (target_page and ventry.get("source_url") == target_page):
+                                ventry["custom_stream_url"] = fresh_url
+                                meta_updated = True
+                        if meta_updated:
+                            video_service._save_metadata(v_meta)
+                    except Exception:
+                        pass
 
                     if found_album_id and info:
                         alb = _completed_albums.get(found_album_id)
@@ -2186,6 +2278,8 @@ async def proxy_video_stream(
         if upstream_resp.status_code >= 400:
             await upstream_resp.aclose()
             await client.aclose()
+            res_headers.pop("content-length", None)
+            res_headers.pop("content-type", None)
             raise HTTPException(status_code=upstream_resp.status_code, detail=f"Upstream CDN error: {upstream_resp.status_code}", headers=res_headers)
 
         is_hls = ".m3u8" in url.lower() or "/hls/" in url.lower() or "mpegurl" in res_headers.get("content-type", "").lower()
@@ -3506,7 +3600,8 @@ async def start_batch_analysis(req: BatchAnalyzeRequest):
             max_concurrency=req.max_concurrency,
             anti_bot_delay_ms=req.anti_bot_delay_ms,
             media_type_filter=req.media_type_filter or "all",
-            folder=getattr(req, "folder", "Geral") or "Geral"
+            folder=getattr(req, "folder", "Geral") or "Geral",
+            download_locally=bool(getattr(req, "download_locally", False)),
         )
         if req.media_type_filter in ("videos", "gifs") or engine_type == "classic":
             t = asyncio.create_task(_run_agent_task(s_id, single_req, semaphore=_extraction_semaphore))
@@ -4120,8 +4215,64 @@ async def extract_yandex_preview_video(url: str) -> dict:
         }
 
 
-async def _download_highest_video_task(album_title: str, sorted_vids: List[AlbumImage]):
-    """Background task to stream and persist the highest quality extracted video to disk without blocking SSE."""
+async def _download_highest_video_task(
+    album_title: str,
+    sorted_vids: List[AlbumImage],
+    folder: str = "Extraídos",
+    download_locally: bool = False,
+):
+    """
+    Registers the highest-quality extracted video into the Video Gallery.
+    By default (download_locally=False), saves instantly as a Web Stream (storage_location='stream_url', 0 bytes on disk)
+    with only its lightweight thumbnail cached.
+    If download_locally=True is explicitly requested by the user, downloads the physical .mp4 to data/videos/{folder}/.
+    """
+    import hashlib
+    target_folder_name = (folder or "Extraídos").strip() or "Extraídos"
+
+    if not download_locally:
+        for cand in sorted_vids:
+            v_url = cand.video_stream_url or cand.original_url
+            if not v_url or not v_url.startswith("http"):
+                continue
+            try:
+                clean_t = album_title or getattr(cand, "title", None) or "video_extraido"
+                src_page = getattr(cand, "source_page", None) or v_url
+                thumb_u = getattr(cand, "poster_url", None) or getattr(cand, "thumbnail_url", None) or ""
+                unique_key = hashlib.md5((src_page or v_url).encode("utf-8")).hexdigest()[:10]
+                rel_key = f"{target_folder_name}/remote_{unique_key}.mp4"
+                vid_id = video_service._get_video_id(rel_key)
+
+                video_service._update_single_metadata(
+                    file_path=None,
+                    title=clean_t,
+                    folder=target_folder_name,
+                    is_favorite=False,
+                    vid_id=vid_id,
+                    storage_location="stream_url",
+                    stream_url=v_url,
+                    file_size_bytes=0,
+                    width=getattr(cand, "width", None) or 1920,
+                    height=getattr(cand, "height", None) or 1080,
+                    duration_seconds=float(getattr(cand, "duration_seconds", None) or 0.0),
+                    source_url=src_page,
+                    source_thumbnail_url=thumb_u if thumb_u.startswith("http") else None,
+                    source_origin="web"
+                )
+                try:
+                    await asyncio.to_thread(
+                        video_service.get_or_generate_thumbnail,
+                        vid_id,
+                        thumb_u if thumb_u.startswith("http") else None
+                    )
+                except Exception:
+                    pass
+                logger.info(f"Registered stream-only video in Gallery (0 MB on disk): '{clean_t}' -> {target_folder_name}")
+                break
+            except Exception as ex_stream:
+                logger.warning(f"Could not register stream video candidate {v_url}: {ex_stream}")
+        return
+
     async with httpx.AsyncClient(verify=False, timeout=300.0, follow_redirects=True) as v_client:
         for cand in sorted_vids:
             v_url = cand.video_stream_url or cand.original_url
@@ -4146,7 +4297,7 @@ async def _download_highest_video_task(album_title: str, sorted_vids: List[Album
                             base_fname = "".join(c for c in clean_t if c.isalnum() or c in ("-", "_", " ")).strip() or f"vid_{int(time.time())}"
                             fname = f"{base_fname}{q_tag}.mp4"
 
-                            folder_path = os.path.join(video_service.base_dir, "Extraídos")
+                            folder_path = os.path.join(video_service.base_dir, target_folder_name)
                             os.makedirs(folder_path, exist_ok=True)
                             target_path = os.path.join(folder_path, fname)
                             if os.path.exists(target_path):
@@ -4167,7 +4318,7 @@ async def _download_highest_video_task(album_title: str, sorted_vids: List[Album
                                 video_service._update_single_metadata(
                                     target_path,
                                     title=title,
-                                    folder="Extraídos",
+                                    folder=target_folder_name,
                                     is_favorite=False,
                                     vid_id=vid_id,
                                     storage_location="render_local",
@@ -4175,7 +4326,7 @@ async def _download_highest_video_task(album_title: str, sorted_vids: List[Album
                                     source_origin="web"
                                 )
                                 # Upload automático para Hugging Face em background
-                                video_service._trigger_background_upload(vid_id, target_path, "Extraídos", fname)
+                                video_service._trigger_background_upload(vid_id, target_path, target_folder_name, fname)
                                 logger.info(f"Auto-saved highest quality ({rank}p, {total_written/1024/1024:.1f} MB) video to Gallery and queued for HF upload: {target_path}")
                                 break
                             else:
@@ -4280,7 +4431,7 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
                 if mp4_sources:
                     raw_title = await engine.main_page.title()
                     vid_title = re.sub(r"\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$", "", raw_title or "Vídeo", flags=re.I).strip()
-                    poster_url = get_embed_poster_url(xhr_payload.get('videoFID', ''))
+                    poster_url = get_embed_poster_url(xhr_payload.get('videoFID', ''), req.url)
 
                     # Sort qualities: 1080p HD first, then 720p HD, 480p, 360p, 240p
                     quality_order = ["1080p HD", "1080p", "720p HD", "720p", "480p", "360p", "240p"]
@@ -4405,7 +4556,14 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
                                 if "240" in txt: return 240
                                 return it.height or it.width or 0
                             sorted_vids = sorted(vid_items, key=_v_rank, reverse=True)
-                            asyncio.create_task(_download_highest_video_task(album.title or "video_extraido", sorted_vids))
+                            asyncio.create_task(
+                                _download_highest_video_task(
+                                    album.title or "video_extraido",
+                                    sorted_vids,
+                                    folder=getattr(req, "folder", "Extraídos") or "Extraídos",
+                                    download_locally=bool(getattr(req, "download_locally", False)),
+                                )
+                            )
                         return
             except Exception as e_embed:
                 logger.warning(f"Embed player stream extraction failed: {e_embed}")
@@ -4580,7 +4738,14 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
                             if "240" in txt: return 240
                             return it.height or it.width or 0
                         sorted_vids = sorted(vid_items, key=_v_rank, reverse=True)
-                        asyncio.create_task(_download_highest_video_task(album.title or "video_extraido", sorted_vids))
+                        asyncio.create_task(
+                            _download_highest_video_task(
+                                album.title or "video_extraido",
+                                sorted_vids,
+                                folder=getattr(req, "folder", "Extraídos") or "Extraídos",
+                                download_locally=bool(getattr(req, "download_locally", False)),
+                            )
+                        )
                     return
             except Exception as e_ph:
                 logger.warning(f"Direct stream extraction failed: {e_ph}")
@@ -4683,16 +4848,18 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
                             _record_session_event(session_id, c_evt)
                             await queue.put(c_evt)
 
-                        # Auto-save primary highest quality video
+                        # Auto-save primary highest quality video (stream-only by default unless download_locally=True)
                         best_vid = vid_images[0]
                         v_target_url = best_vid.video_stream_url or best_vid.original_url
                         if v_target_url:
                             save_req = SaveExtractedVideoRequest(
                                 video_url=v_target_url,
                                 title=vid_title,
-                                folder="Extraídos",
+                                folder=getattr(req, "folder", "Extraídos") or "Extraídos",
                                 candidate_id=f"yandex_{yandex_vid_id}",
-                                page_url=req.url,
+                                source_url=req.url,
+                                thumbnail_url=poster_url,
+                                stream_only=not bool(getattr(req, "download_locally", False)),
                             )
                             asyncio.create_task(save_extracted_video_to_gallery(save_req))
 
@@ -4834,7 +5001,14 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
                                 if "240" in txt: return 240
                                 return it.height or it.width or 0
                             sorted_vids = sorted(vid_items, key=_v_rank, reverse=True)
-                            asyncio.create_task(_download_highest_video_task(album.title or "video_extraido", sorted_vids))
+                            asyncio.create_task(
+                                _download_highest_video_task(
+                                    album.title or "video_extraido",
+                                    sorted_vids,
+                                    folder=getattr(req, "folder", "Extraídos") or "Extraídos",
+                                    download_locally=bool(getattr(req, "download_locally", False)),
+                                )
+                            )
                         return
             except Exception as direct_err:
                 logger.warning(f"Direct video sniffer failed, falling back to Playwright: {direct_err}")
@@ -4891,7 +5065,14 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
                     return it.height or it.width or 0
 
                 sorted_vids = sorted(vid_items, key=_v_rank, reverse=True)
-                asyncio.create_task(_download_highest_video_task(album.title or "video_extraido", sorted_vids))
+                asyncio.create_task(
+                    _download_highest_video_task(
+                        album.title or "video_extraido",
+                        sorted_vids,
+                        folder=getattr(req, "folder", "Extraídos") or "Extraídos",
+                        download_locally=bool(getattr(req, "download_locally", False)),
+                    )
+                )
 
         if session_id in _active_jobs:
             _active_jobs[session_id]["status"] = "cancelled" if controller.is_cancelled else "completed"
@@ -4998,75 +5179,271 @@ async def pause_job(session_id: str):
     return {"session_id": session_id, "status": "paused"}
 
 
+async def _relaunch_job_in_place(session_id: str, priority: bool = False) -> bool:
+    """
+    Resumes or restarts a paused, failed, error, or cancelled job in-place using its existing session_id.
+    When priority=True (single-item user click on Try Again / Resume), bypasses bulk queue wait
+    so the clicked task starts resolving and downloading immediately.
+    """
+    job = _active_jobs.get(session_id)
+    if not job:
+        return False
+
+    ctrl = _job_controllers.get(session_id)
+    if ctrl and hasattr(ctrl, "resume") and hasattr(ctrl, "is_active") and ctrl.is_active():
+        prog_status = (job.get("progress", {}).get("status") or "") if isinstance(job.get("progress"), dict) else ""
+        is_stuck_in_queue = "na fila" in prog_status.lower()
+        if priority and is_stuck_in_queue:
+            # Promote queued task to immediate execution by cancelling the waiting wrapper without deleting partial file
+            try:
+                if hasattr(ctrl, "task") and ctrl.task and not ctrl.task.done():
+                    ctrl.task.cancel()
+            except Exception:
+                pass
+            _job_controllers.pop(session_id, None)
+        else:
+            ctrl.resume()
+            job["status"] = "running"
+            job.pop("error", None)
+            if isinstance(job.get("progress"), dict):
+                job["progress"]["status"] = "Retomando download..."
+            queue = _active_event_queues.get(session_id)
+            if queue:
+                try:
+                    await queue.put({"type": "status", "message": "Retomando download..."})
+                except Exception:
+                    pass
+            return True
+
+    mode = job.get("mode") or job.get("engine_type") or "video_save"
+    if mode in ("video_save", "video_downloader", "video_stream_register"):
+        raw_url = job.get("url") or job.get("source_url")
+        if not raw_url:
+            return False
+
+        if job.get("stream_only") is not None:
+            is_stream_only = bool(job.get("stream_only"))
+        elif job.get("engine_type") == "video_stream_register":
+            is_stream_only = True
+        elif job.get("engine_type") == "video_downloader" or job.get("target_path"):
+            is_stream_only = False
+        else:
+            is_stream_only = True
+        folder_name = job.get("folder") or "Extraídos"
+        raw_title = (
+            job.get("clean_title")
+            or (job.get("progress", {}).get("title") if isinstance(job.get("progress"), dict) else "")
+            or "video_extraido"
+        )
+        clean_title = re.sub(r"^(?:Save Video:\s*|Salvar Vídeo:\s*)+", "", raw_title, flags=re.I).strip() or "video_extraido"
+
+        target_path = job.get("target_path")
+        target_folder = os.path.join(video_service.base_dir, folder_name)
+        os.makedirs(target_folder, exist_ok=True)
+        if not is_stream_only:
+            if not target_path or re.search(r"^(?:Save Video\s+|Salvar Vídeo\s+)", os.path.basename(target_path), flags=re.I):
+                clean_name = "".join(c for c in clean_title if c.isalnum() or c in ("-", "_", " ")).strip() or f"vid_{session_id[-6:]}"
+                if not any(clean_name.lower().endswith(ext) for ext in (".mp4", ".webm", ".mov", ".mkv")):
+                    clean_name += ".mp4"
+                target_path = os.path.join(target_folder, clean_name)
+                job["target_path"] = target_path
+
+        # Check actual partial file on disk so we don't show stale 99% / 603.8 MB when the file is missing
+        actual_disk_bytes = 0
+        if not is_stream_only and target_path and os.path.exists(target_path):
+            try:
+                fsize = os.path.getsize(target_path)
+                if fsize >= 256_000:
+                    actual_disk_bytes = fsize
+            except Exception:
+                actual_disk_bytes = 0
+
+        prev_total = job.get("total_bytes") or 0
+        if actual_disk_bytes == 0:
+            job["downloaded_bytes"] = 0
+            job["total_bytes"] = 0
+            job["throughput_mbps"] = 0.0
+            job["duration_seconds"] = 0.0
+            if isinstance(job.get("progress"), dict):
+                job["progress"]["current"] = 0
+                job["progress"]["total"] = 100
+                job["progress"]["percent"] = 0
+                job["progress"]["downloaded_bytes"] = 0
+                job["progress"]["total_bytes"] = 0
+                job["progress"]["throughput_mbps"] = 0.0
+        else:
+            pct = min(99, int((actual_disk_bytes / prev_total) * 100)) if prev_total > actual_disk_bytes else 0
+            job["downloaded_bytes"] = actual_disk_bytes
+            job["throughput_mbps"] = 0.0
+            if isinstance(job.get("progress"), dict):
+                job["progress"]["current"] = actual_disk_bytes
+                job["progress"]["downloaded_bytes"] = actual_disk_bytes
+                job["progress"]["percent"] = pct
+                job["progress"]["throughput_mbps"] = 0.0
+
+        source_page_url = job.get("source_url") or raw_url
+        canon_src = extract_canonical_target_page(raw_url) or extract_canonical_target_page(source_page_url)
+        if canon_src:
+            source_page_url = canon_src
+
+        m_vid = (
+            re.search(r"(?:viewkey=|video-|/video/|/videos/)([a-zA-Z0-9_-]+)", raw_url)
+            or re.search(r"(?:viewkey=|video-|/video/|/videos/)([a-zA-Z0-9_-]+)", source_page_url)
+        )
+        vid_id = job.get("source_id") or (m_vid.group(1) if m_vid else "")
+        thumb_url = job.get("thumbnail_url")
+
+        job["status"] = "running"
+        job["started_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        job.pop("error", None)
+        job.pop("traceback", None)
+        job["source_url"] = source_page_url
+        job["source_id"] = vid_id
+        job["clean_title"] = clean_title
+        if isinstance(job.get("progress"), dict):
+            job["progress"]["title"] = f"Save Video: {clean_title}"
+            if is_stream_only:
+                job["progress"]["status"] = "Registrando stream na galeria (0 MB local)..."
+            elif priority:
+                job["progress"]["status"] = "Conectando e resolvendo stream Full HD..."
+            else:
+                job["progress"]["status"] = "Na fila de retomada (aguardando slot de download)..."
+
+        if is_stream_only:
+            async def _resumed_stream_worker():
+                if priority:
+                    await _run_video_stream_register_task(
+                        job_id=session_id,
+                        vurl=raw_url,
+                        clean_title=clean_title,
+                        folder_name=folder_name,
+                        source_url=source_page_url,
+                        source_id=vid_id,
+                        thumbnail_url=thumb_url,
+                        duration_hint=job.get("duration")
+                    )
+                else:
+                    async with _video_stream_register_semaphore:
+                        await _run_video_stream_register_task(
+                            job_id=session_id,
+                            vurl=raw_url,
+                            clean_title=clean_title,
+                            folder_name=folder_name,
+                            source_url=source_page_url,
+                            source_id=vid_id,
+                            thumbnail_url=thumb_url,
+                            duration_hint=job.get("duration")
+                        )
+
+            new_task = asyncio.create_task(_resumed_stream_worker())
+            _job_controllers[session_id] = DownloadTaskController(new_task, None)
+            return True
+
+        async def _execute_video_download():
+            ctrl_curr = _job_controllers.get(session_id)
+            if ctrl_curr and getattr(ctrl_curr, "is_cancelled", False):
+                return
+            if session_id in _active_jobs:
+                _active_jobs[session_id]["status"] = "running"
+                if isinstance(_active_jobs[session_id].get("progress"), dict):
+                    _active_jobs[session_id]["progress"]["status"] = "Resolvendo stream de vídeo Full HD..."
+                _save_jobs_to_disk(sync_hf=False)
+
+            stream_url = raw_url
+            is_direct_media = any(ext in raw_url.lower() for ext in (".mp4", ".m3u8", ".webm", ".mov"))
+            if not is_direct_media:
+                try:
+                    resolved = await asyncio.wait_for(
+                        _resolve_best_video_stream(vid_id or "vid", source_page_url or raw_url),
+                        timeout=18.0
+                    )
+                    if resolved:
+                        stream_url = resolved
+                except Exception as res_err:
+                    logger.warning(f"[ResumeJob] Falha ou timeout ao resolver stream direto para {raw_url}: {res_err}")
+
+            headers = _get_video_download_headers(stream_url, source_page_url)
+            await _run_video_download_task(
+                job_id=session_id,
+                vurl=stream_url,
+                clean_title=clean_title,
+                folder_name=folder_name,
+                target_path=target_path,
+                headers=headers,
+                source_url=source_page_url,
+                source_id=vid_id,
+                thumbnail_url=thumb_url
+            )
+
+        async def _resumed_video_worker():
+            if priority:
+                await _execute_video_download()
+            else:
+                async with _video_download_semaphore:
+                    await _execute_video_download()
+
+        new_task = asyncio.create_task(_resumed_video_worker())
+        _job_controllers[session_id] = DownloadTaskController(new_task, target_path)
+        return True
+
+    elif job.get("url"):
+        engine_type = job.get("engine_type") or mode or "gemini_surgical_scout"
+        req = AnalyzeRequest(
+            url=job["url"],
+            engine_type=engine_type,
+            model_name=job.get("model", "gemini-3.7-flash"),
+            gemini_model=job.get("gemini_model") or (job.get("model") if "gemini" in str(job.get("model", "")).lower() else "gemini-3.7-flash"),
+            media_type_filter=job.get("media_type_filter") or "all",
+            folder=job.get("folder") or "Geral",
+            selected_image_urls=job.get("selected_image_urls"),
+        )
+        if session_id not in _active_event_queues:
+            _active_event_queues[session_id] = asyncio.Queue()
+
+        job["status"] = "running"
+        job["started_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        job.pop("error", None)
+        job.pop("traceback", None)
+        if isinstance(job.get("progress"), dict):
+            job["progress"]["status"] = "Retomando extração de álbum..."
+
+        if req.media_type_filter in ("videos", "gifs") or engine_type == "classic":
+            new_task = asyncio.create_task(_run_agent_task(session_id, req, semaphore=_extraction_semaphore))
+        elif engine_type in ("gemini_surgical_scout", "surgical_scout", "gemini_scout"):
+            new_task = asyncio.create_task(_run_gemini_surgical_task(session_id, req, semaphore=_extraction_semaphore))
+        elif engine_type in ("gemini_layout_explorer", "layout_explorer", "gemini_layout"):
+            new_task = asyncio.create_task(_run_gemini_layout_task(session_id, req, semaphore=_extraction_semaphore))
+        else:
+            new_task = asyncio.create_task(_run_ai_react_agent_task(session_id, req, semaphore=_extraction_semaphore))
+
+        _job_controllers[session_id] = TaskJobController(new_task)
+        queue = _active_event_queues.get(session_id)
+        if queue:
+            try:
+                await queue.put({"type": "status", "message": "Retomando extração..."})
+            except Exception:
+                pass
+        return True
+
+    return False
+
+
 @app.post("/api/jobs/{session_id}/resume")
 async def resume_job(session_id: str):
     """
-    Resumes a paused background job. If task was interrupted or server was restarted,
-    re-launches the background download/extraction task from the exact point it stopped.
+    Resumes a paused or failed background job in-place with immediate priority.
+    If task was interrupted or server was restarted, re-launches the background task immediately.
     """
     _load_jobs_from_disk()
     job = _active_jobs.get(session_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    ctrl = _job_controllers.get(session_id)
-    is_live = False
-    if ctrl and hasattr(ctrl, "resume") and hasattr(ctrl, "is_active") and ctrl.is_active():
-        ctrl.resume()
-        is_live = True
+    ok = await _relaunch_job_in_place(session_id, priority=True)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Could not relaunch job (missing URL)")
 
-    if not is_live:
-        mode = job.get("mode") or job.get("engine_type") or "video_save"
-        if mode in ("video_save", "video_downloader"):
-            vurl = job.get("url")
-            if not vurl:
-                raise HTTPException(status_code=400, detail="Video URL missing in task record")
-            folder_name = job.get("folder") or "Extraídos"
-            target_path = job.get("target_path")
-            if not target_path:
-                target_folder = os.path.join(video_service.base_dir, folder_name)
-                os.makedirs(target_folder, exist_ok=True)
-                clean_name = "".join(c for c in (job.get("progress", {}).get("title") or "video") if c.isalnum() or c in ("-", "_", " ")).strip()
-                target_path = os.path.join(target_folder, f"{clean_name}.mp4")
-                job["target_path"] = target_path
-
-            clean_title = (job.get("progress", {}).get("title") or os.path.splitext(os.path.basename(target_path))[0]).replace("Salvar Vídeo: ", "").strip()
-            headers = _get_video_download_headers(vurl, job.get("source_url"))
-
-            new_task = asyncio.create_task(
-                _run_video_download_task(
-                    job_id=session_id,
-                    vurl=vurl,
-                    clean_title=clean_title,
-                    folder_name=folder_name,
-                    target_path=target_path,
-                    headers=headers,
-                    source_url=job.get("source_url", ""),
-                    source_id=job.get("source_id", ""),
-                    thumbnail_url=job.get("thumbnail_url")
-                )
-            )
-            _job_controllers[session_id] = DownloadTaskController(new_task, target_path)
-        elif mode in ("ai_react", "gemini_surgical_scout", "gemini_layout_explorer", "classic") and job.get("url"):
-            req = AnalyzeRequest(
-                url=job["url"],
-                engine_type=mode,
-                model_name=job.get("model", "qwen2.5:32b")
-            )
-            new_task = asyncio.create_task(_run_agent_task(session_id, req))
-
-    _active_jobs[session_id]["status"] = "running"
-    if isinstance(_active_jobs[session_id].get("progress"), dict):
-        _active_jobs[session_id]["progress"]["status"] = "Retomando download..."
     _save_jobs_to_disk()
-
-    queue = _active_event_queues.get(session_id)
-    if queue:
-        try:
-            await queue.put({"type": "status", "message": "Retomando download..."})
-        except Exception:
-            pass
-
     return {"session_id": session_id, "status": "running"}
 
 
@@ -5102,10 +5479,10 @@ async def clear_jobs_queue():
 
 @app.post("/api/jobs/clear-finished")
 async def clear_finished_jobs():
-    """Removes all completed, failed, and cancelled jobs from persistent ledger."""
+    """Removes all completed, failed, error, and cancelled jobs from persistent ledger."""
     cleared = 0
     for jid, j in list(_active_jobs.items()):
-        if j.get("status") in ("completed", "failed", "cancelled"):
+        if j.get("status") in ("completed", "failed", "error", "cancelled"):
             del _active_jobs[jid]
             cleared += 1
     _save_jobs_to_disk()
@@ -5114,7 +5491,8 @@ async def clear_finished_jobs():
 
 @app.post("/api/jobs/pause-all")
 async def pause_all_jobs():
-    """Pauses all active/running jobs."""
+    """Pauses all active/running/queued jobs."""
+    _load_jobs_from_disk()
     paused = 0
     for jid, ctrl in list(_job_controllers.items()):
         if hasattr(ctrl, "pause"):
@@ -5124,24 +5502,48 @@ async def pause_all_jobs():
                 if isinstance(_active_jobs[jid].get("progress"), dict):
                     _active_jobs[jid]["progress"]["status"] = "Pausado em lote"
             paused += 1
+
+    for jid, j in list(_active_jobs.items()):
+        if j.get("status") in ("running", "active", "queued"):
+            j["status"] = "paused"
+            if isinstance(j.get("progress"), dict):
+                j["progress"]["status"] = "Pausado em lote"
+            paused += 1
+
     _save_jobs_to_disk()
     return {"success": True, "paused_count": paused}
 
 
 @app.post("/api/jobs/resume-all")
 async def resume_all_jobs():
-    """Resumes all paused jobs."""
+    """Resumes all paused jobs (both in-memory controllers and persisted paused jobs from disk)."""
+    _load_jobs_from_disk()
     resumed = 0
-    for jid, ctrl in list(_job_controllers.items()):
-        if hasattr(ctrl, "resume"):
-            ctrl.resume()
-            if jid in _active_jobs:
-                _active_jobs[jid]["status"] = "active"
-                if isinstance(_active_jobs[jid].get("progress"), dict):
-                    _active_jobs[jid]["progress"]["status"] = "Retomado em lote"
+    paused_jids = [
+        jid for jid, j in sorted(_active_jobs.items(), key=lambda kv: kv[1].get("started_at", ""))
+        if j.get("status") == "paused"
+    ]
+    for jid in paused_jids:
+        if await _relaunch_job_in_place(jid):
             resumed += 1
     _save_jobs_to_disk()
     return {"success": True, "resumed_count": resumed}
+
+
+@app.post("/api/jobs/retry-failed")
+async def retry_all_failed_jobs():
+    """Retries all failed, error, or cancelled jobs in-place using the download queue."""
+    _load_jobs_from_disk()
+    retried = 0
+    failed_jids = [
+        jid for jid, j in sorted(_active_jobs.items(), key=lambda kv: kv[1].get("started_at", ""))
+        if j.get("status") in ("error", "failed", "cancelled")
+    ]
+    for jid in failed_jids:
+        if await _relaunch_job_in_place(jid):
+            retried += 1
+    _save_jobs_to_disk()
+    return {"success": True, "retried_count": retried}
 
 
 @app.get("/api/events/{session_id}")
@@ -5914,7 +6316,7 @@ class AddVideoUrlRequest(BaseModel):
     url: str
     folder: Optional[str] = "Geral"
     title: Optional[str] = None
-    stream_only: Optional[bool] = False
+    stream_only: Optional[bool] = True
 
 class BatchDeleteVideosRequest(BaseModel):
     video_ids: List[str]
@@ -5934,7 +6336,10 @@ class SaveExtractedVideoRequest(BaseModel):
     folder: Optional[str] = "Geral"
     candidate_id: Optional[str] = None
     source_url: Optional[str] = None
+    page_url: Optional[str] = None
     thumbnail_url: Optional[str] = None
+    duration: Optional[str] = None
+    stream_only: Optional[bool] = True
 
 
 
@@ -5947,6 +6352,9 @@ class DownloadTaskController:
         self.is_paused = False
         self._pause_event = asyncio.Event()
         self._pause_event.set()
+
+    def is_active(self) -> bool:
+        return bool(self.task and not self.task.done() and not self.is_cancelled)
 
     def pause(self):
         self.is_paused = True
@@ -5995,13 +6403,26 @@ async def _run_video_download_task(
     total_written = 0
     total_bytes = 0
     bytes_this_session = 0
+    downloaded_heatmap = None
     custom_timeout = httpx.Timeout(connect=30.0, read=None, write=60.0, pool=60.0)
 
     # Verifica se já existe arquivo parcial no disco para continuar de onde parou (Range)
     if os.path.exists(target_path):
         try:
             fsize = os.path.getsize(target_path)
-            if fsize > 0:
+            is_corrupted_partial = fsize < 256_000
+            if not is_corrupted_partial:
+                with open(target_path, "rb") as chk_fp:
+                    head_bytes = chk_fp.read(64).lower()
+                    if b"<!doctype" in head_bytes or b"<html" in head_bytes:
+                        is_corrupted_partial = True
+            if is_corrupted_partial:
+                try:
+                    os.remove(target_path)
+                except Exception:
+                    pass
+                total_written = 0
+            elif fsize > 0:
                 total_written = fsize
                 if job_id in _active_jobs:
                     _active_jobs[job_id]["downloaded_bytes"] = total_written
@@ -6013,6 +6434,21 @@ async def _run_video_download_task(
     retry_count = 0
     use_resilient = False
     resilient_reason = ""
+
+    # If vurl is a webpage URL rather than a direct media file, try resolving it first
+    is_direct_media_url = any(ext in vurl.lower() for ext in (".mp4", ".m3u8", ".webm", ".mov"))
+    if not is_direct_media_url:
+        try:
+            resolved_direct = await _resolve_best_video_stream(source_id or "vid", source_url or vurl)
+            if resolved_direct:
+                vurl = resolved_direct
+                headers = _get_video_download_headers(vurl, source_url or vurl)
+            else:
+                use_resilient = True
+                resilient_reason = "URL de página web requer extrator resiliente"
+        except Exception as res_exc:
+            use_resilient = True
+            resilient_reason = f"resolução de página web ({res_exc})"
 
     # Check if direct stream is an HLS playlist or stream known to require TLS Chrome impersonation
     if ".m3u8" in vurl.lower() or any(m in vurl.lower() for m in ("hv-h.", "ev-h.")) or is_tls_impersonation_required(vurl, source_url):
@@ -6032,6 +6468,12 @@ async def _run_video_download_task(
                             if resp.status_code not in (200, 206):
                                 use_resilient = True
                                 resilient_reason = f"HTTP {resp.status_code}"
+                                break
+
+                            ct_header = (resp.headers.get("content-type") or "").lower()
+                            if any(bad_ct in ct_header for bad_ct in ("text/html", "text/plain", "application/json")):
+                                use_resilient = True
+                                resilient_reason = f"Content-Type inválido ({ct_header})"
                                 break
 
                             # Se o servidor respondeu 200 (não 206), não suporta Range e está mandando do zero
@@ -6179,11 +6621,26 @@ async def _run_video_download_task(
         rel_path = os.path.relpath(target_path, video_service.base_dir).replace("\\", "/")
         vid_id = video_service._get_video_id(rel_path)
 
+        # Se este vídeo já estava salvo apenas como stream_url, preservamos is_favorite e removemos a entrada órfã de stream
+        existing_fav = False
+        try:
+            all_meta = video_service._load_metadata()
+            matched_prev = _find_matching_existing_video(source_id, source_url, clean_title or final_title, video_service.list_all_videos())
+            if matched_prev:
+                existing_fav = bool(matched_prev.get("is_favorite", False))
+                prev_id = matched_prev.get("id")
+                if prev_id and prev_id != vid_id and matched_prev.get("storage_location") == "stream_url":
+                    if prev_id in all_meta:
+                        del all_meta[prev_id]
+                        video_service._save_metadata(all_meta)
+        except Exception:
+            pass
+
         video_service._update_single_metadata(
             target_path,
             title=final_title,
             folder=folder_name,
-            is_favorite=False,
+            is_favorite=existing_fav,
             vid_id=vid_id,
             storage_location="local",
             file_size_bytes=total_written,
@@ -6236,12 +6693,187 @@ async def _run_video_download_task(
             _active_jobs[job_id]["progress"]["status"] = "Download cancelado pelo usuário"
             _save_jobs_to_disk(sync_hf=True)
     except Exception as e:
-        logger.error(f"[VideoDownloader] Falha ao baixar {vurl}: {e}")
-        if os.path.exists(target_path):
-            try:
-                os.remove(target_path)
-            except Exception:
-                pass
+        err_str = str(e)
+        if "cancelled" in err_str.lower():
+            logger.info(f"[VideoDownloader] Cancelado pelo usuário: {job_id}")
+            if os.path.exists(target_path):
+                try:
+                    os.remove(target_path)
+                except Exception:
+                    pass
+            if job_id in _active_jobs:
+                _active_jobs[job_id]["status"] = "cancelled"
+                _active_jobs[job_id]["progress"]["status"] = "Download cancelado pelo usuário"
+                _save_jobs_to_disk(sync_hf=True)
+        else:
+            logger.error(f"[VideoDownloader] Falha ao baixar {vurl}: {e}")
+            # Preserve valid partial downloads (>= 1 MB) on disk so Range resumption can continue from where it stopped
+            if os.path.exists(target_path):
+                try:
+                    if os.path.getsize(target_path) < 1_000_000:
+                        os.remove(target_path)
+                except Exception:
+                    pass
+            if job_id in _active_jobs:
+                _active_jobs[job_id]["status"] = "error"
+                _active_jobs[job_id]["error"] = err_str
+                _active_jobs[job_id]["progress"]["status"] = f"Erro: {err_str}"
+                _save_jobs_to_disk(sync_hf=True)
+    finally:
+        _job_controllers.pop(job_id, None)
+
+
+_video_stream_register_semaphore = asyncio.Semaphore(6)
+
+
+def _parse_duration_str_to_seconds(dur_str: Optional[str]) -> float:
+    """Converts 'MM:SS' or 'HH:MM:SS' or numeric string to seconds."""
+    if not dur_str:
+        return 0.0
+    raw = str(dur_str).strip()
+    if not raw:
+        return 0.0
+    try:
+        if ":" in raw:
+            parts = [float(p) for p in raw.split(":") if p.strip().replace(".", "").isdigit()]
+            if len(parts) == 3:
+                return round(parts[0] * 3600 + parts[1] * 60 + parts[2], 2)
+            if len(parts) == 2:
+                return round(parts[0] * 60 + parts[1], 2)
+        return round(float(raw), 2)
+    except Exception:
+        return 0.0
+
+
+async def _run_video_stream_register_task(
+    job_id: str,
+    vurl: str,
+    clean_title: str,
+    folder_name: str,
+    source_url: str = "",
+    source_id: str = "",
+    thumbnail_url: Optional[str] = None,
+    duration_hint: Optional[str] = None
+):
+    """
+    Lightweight worker that resolves a video's 1080p stream + metadata and registers it
+    in the Video Gallery as storage_location='stream_url' (0 MB on local disk),
+    saving only the lightweight .jpg thumbnail in data/videos/.thumbnails/.
+    """
+    start_time = time.time()
+    try:
+        if job_id in _active_jobs:
+            _active_jobs[job_id]["status"] = "running"
+            _active_jobs[job_id]["progress"]["percent"] = 25
+            _active_jobs[job_id]["progress"]["status"] = "Resolvendo stream Full HD e metadados (0 MB local)..."
+            _save_jobs_to_disk(sync_hf=False)
+
+        ctrl = _job_controllers.get(job_id)
+        if ctrl and getattr(ctrl, "is_cancelled", False):
+            raise asyncio.CancelledError()
+
+        meta_info = await _resolve_best_video_stream_with_meta(source_id or "vid", source_url or vurl)
+        resolved_stream = meta_info.get("stream_url") or vurl
+        if not resolved_stream or not str(resolved_stream).startswith("http"):
+            resolved_stream = vurl
+
+        if not resolved_stream:
+            raise RuntimeError("Could not resolve video stream URL.")
+
+        width = int(meta_info.get("width") or 1920)
+        height = int(meta_info.get("height") or 1080)
+        dur_sec = float(meta_info.get("duration_seconds") or 0.0)
+        if dur_sec <= 0 and duration_hint:
+            dur_sec = _parse_duration_str_to_seconds(duration_hint)
+        final_thumb_url = thumbnail_url or meta_info.get("thumbnail_url")
+        heatmap_data = meta_info.get("heatmap")
+
+        ref_url = source_url or vurl
+        if resolved_stream.startswith("/api/proxy-video-stream"):
+            proxied_stream_url = resolved_stream
+        else:
+            proxied_stream_url = (
+                f"/api/proxy-video-stream?url={urllib.parse.quote(resolved_stream)}"
+                f"&referer={urllib.parse.quote(ref_url)}"
+            )
+
+        # Check if already registered so we reuse ID and preserve favorite status
+        existing_fav = False
+        vid_id = ""
+        try:
+            matched_prev = _find_matching_existing_video(source_id, ref_url, clean_title, video_service.list_all_videos())
+            if matched_prev:
+                existing_fav = bool(matched_prev.get("is_favorite", False))
+                if matched_prev.get("storage_location") == "stream_url" and matched_prev.get("id"):
+                    vid_id = matched_prev["id"]
+        except Exception:
+            pass
+
+        if not vid_id:
+            seed = (source_id or ref_url or resolved_stream).strip()
+            vid_id = hashlib.md5(seed.encode("utf-8")).hexdigest()[:12]
+
+        # Ensure folder directory exists so folder appears in list_folders()
+        try:
+            os.makedirs(os.path.join(video_service.base_dir, folder_name), exist_ok=True)
+        except Exception:
+            pass
+
+        video_service._update_single_metadata(
+            file_path=None,
+            title=clean_title,
+            folder=folder_name,
+            is_favorite=existing_fav,
+            vid_id=vid_id,
+            storage_location="stream_url",
+            stream_url=proxied_stream_url,
+            file_size_bytes=0,
+            source_url=ref_url,
+            source_id=source_id or None,
+            source_thumbnail_url=final_thumb_url or None,
+            source_origin="web",
+            heatmap_data=heatmap_data,
+            width=width,
+            height=height,
+            duration_seconds=dur_sec
+        )
+
+        if job_id in _active_jobs:
+            _active_jobs[job_id]["progress"]["percent"] = 75
+            _active_jobs[job_id]["progress"]["status"] = "Salvando miniatura de capa e momentos-chave..."
+
+        try:
+            await asyncio.to_thread(video_service.get_or_generate_thumbnail, vid_id, final_thumb_url)
+        except Exception as thumb_err:
+            logger.debug(f"[StreamRegister] Falha ao salvar thumbnail para {vid_id}: {thumb_err}")
+
+        try:
+            await asyncio.to_thread(video_service.get_or_detect_smart_highlight, vid_id, heatmap_data)
+        except Exception as hl_err:
+            logger.debug(f"[StreamRegister] Falha ao detectar highlights para {vid_id}: {hl_err}")
+
+        dur = round(time.time() - start_time, 1)
+        if job_id in _active_jobs:
+            _active_jobs[job_id]["status"] = "completed"
+            _active_jobs[job_id]["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            _active_jobs[job_id]["duration_seconds"] = dur
+            _active_jobs[job_id]["downloaded_bytes"] = 0
+            _active_jobs[job_id]["total_bytes"] = 0
+            _active_jobs[job_id]["progress"]["percent"] = 100
+            _active_jobs[job_id]["progress"]["current"] = 100
+            _active_jobs[job_id]["progress"]["total"] = 100
+            _active_jobs[job_id]["progress"]["status"] = f"Salvo na galeria (Stream Web • 0 MB local) na pasta '{folder_name}'!"
+            _active_jobs[job_id]["video_id"] = vid_id
+            _save_jobs_to_disk(sync_hf=True)
+        logger.info(f"[StreamRegister] Sucesso: '{clean_title}' registrado como stream_url ({vid_id}) em {dur}s")
+
+    except asyncio.CancelledError:
+        if job_id in _active_jobs:
+            _active_jobs[job_id]["status"] = "cancelled"
+            _active_jobs[job_id]["progress"]["status"] = "Registro cancelado pelo usuário"
+            _save_jobs_to_disk(sync_hf=True)
+    except Exception as e:
+        logger.error(f"[StreamRegister] Erro ao registrar stream {vurl}: {e}")
         if job_id in _active_jobs:
             _active_jobs[job_id]["status"] = "error"
             _active_jobs[job_id]["error"] = str(e)
@@ -6251,65 +6883,58 @@ async def _run_video_download_task(
         _job_controllers.pop(job_id, None)
 
 
-
 @app.post("/api/extractor/save-video-to-gallery")
 async def save_extracted_video_to_gallery(req: SaveExtractedVideoRequest):
     """
-    Inicia o download e salvamento do vídeo em segundo plano desacoplado no servidor.
-    Retorna imediatamente o job_id com status 'running' para auditoria em tempo real.
+    Salva um vídeo extraído na Galeria de Vídeos.
+    Por padrão (stream_only=True), registra o stream direto Full HD (0 MB no disco local) + miniatura.
+    Quando stream_only=False, realiza o download físico do arquivo .mp4 para data/videos/{folder}/.
     """
-    clean_title = req.title or "video_extraido"
+    raw_title = req.title or "video_extraido"
+    clean_title = re.sub(r"^(?:Save Video:\s*|Salvar Vídeo:\s*)+", "", raw_title, flags=re.I).strip() or "video_extraido"
     filename = "".join(c for c in clean_title if c.isalnum() or c in ("-", "_", " ")).strip() or f"vid_{int(time.time())}"
     if not any(filename.lower().endswith(ext) for ext in (".mp4", ".webm", ".mov", ".mkv")):
         filename += ".mp4"
 
     vurl = req.video_url
     if "/api/proxy-video-stream" in vurl and "url=" in vurl:
-        import urllib.parse
         parsed = urllib.parse.urlparse(vurl)
         params = urllib.parse.parse_qs(parsed.query)
         if "url" in params:
             vurl = params["url"][0]
 
-    source_page_url = req.source_url or req.video_url
-    # If vurl is a webpage URL rather than direct media, resolve the stream URL
+    source_page_url = req.source_url or req.page_url or req.video_url
     canon_src = extract_canonical_target_page(vurl) or extract_canonical_target_page(source_page_url)
     if canon_src:
         source_page_url = canon_src
 
     m_vid = re.search(r"(?:viewkey=|video-|/video/|/videos/)([a-zA-Z0-9_-]+)", vurl) or re.search(r"(?:viewkey=|video-|/video/|/videos/)([a-zA-Z0-9_-]+)", source_page_url)
     vid_id = m_vid.group(1) if m_vid else (req.candidate_id or "")
-    if vid_id or not any(ext in vurl.lower() for ext in (".mp4", ".m3u8", ".webm", ".mov")):
-        try:
-            resolved_stream = await _resolve_best_video_stream(vid_id or "vid", source_page_url or vurl)
-            if resolved_stream:
-                vurl = resolved_stream
-            elif not source_page_url:
-                return {
-                    "success": False,
-                    "message": "Could not resolve video stream for download."
-                }
-        except Exception as e_res:
-            logger.warning(f"Could not resolve direct stream for {vurl}: {e_res}")
-
-    headers = _get_video_download_headers(vurl, source_page_url)
 
     target_folder_name = req.folder or "Extraídos"
     target_folder = os.path.join(video_service.base_dir, target_folder_name)
     os.makedirs(target_folder, exist_ok=True)
-    target_path = os.path.join(target_folder, filename)
-    if os.path.exists(target_path):
-        target_path = os.path.join(target_folder, f"{os.path.splitext(filename)[0]}_{int(time.time())}.mp4")
+
+    is_stream_only = True if req.stream_only is None else bool(req.stream_only)
+    target_path = None
+    if not is_stream_only:
+        target_path = os.path.join(target_folder, filename)
+        if os.path.exists(target_path):
+            target_path = os.path.join(target_folder, f"{os.path.splitext(filename)[0]}_{int(time.time())}.mp4")
 
     job_id = f"save_vid_{int(time.time() * 1000) % 10000000}_{abs(hash(vurl)) % 10000}"
 
     _active_jobs[job_id] = {
         "session_id": job_id,
         "url": vurl,
+        "source_url": source_page_url,
+        "source_id": vid_id or "",
+        "thumbnail_url": req.thumbnail_url,
+        "clean_title": clean_title,
         "mode": "video_save",
-        "engine_type": "video_downloader",
+        "engine_type": "video_stream_register" if is_stream_only else "video_downloader",
         "status": "running",
-        "model": "Direct Stream Engine",
+        "model": "Web Stream (Zero Disco)" if is_stream_only else "Direct Stream Engine (Local)",
         "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "progress": {
             "current": 0,
@@ -6319,37 +6944,74 @@ async def save_extracted_video_to_gallery(req: SaveExtractedVideoRequest):
             "total_bytes": 0,
             "throughput_mbps": 0.0,
             "title": f"Save Video: {clean_title}",
-            "status": "Iniciando download do stream..."
+            "status": "Registrando stream na galeria (0 MB local)..." if is_stream_only else "Iniciando download local na pasta Data..."
         },
         "downloaded_bytes": 0,
         "total_bytes": 0,
         "throughput_mbps": 0.0,
         "folder": target_folder_name,
-        "target_path": target_path
+        "target_path": target_path,
+        "stream_only": is_stream_only
     }
     _save_jobs_to_disk()
 
-    download_task = asyncio.create_task(
-        _run_video_download_task(
-            job_id=job_id,
-            vurl=vurl,
-            clean_title=clean_title,
-            folder_name=target_folder_name,
-            target_path=target_path,
-            headers=headers,
-            source_url=source_page_url,
-            source_id=vid_id or "",
-            thumbnail_url=req.thumbnail_url
-        )
-    )
+    if is_stream_only:
+        async def _single_stream_worker():
+            async with _video_stream_register_semaphore:
+                await _run_video_stream_register_task(
+                    job_id=job_id,
+                    vurl=vurl,
+                    clean_title=clean_title,
+                    folder_name=target_folder_name,
+                    source_url=source_page_url,
+                    source_id=vid_id or "",
+                    thumbnail_url=req.thumbnail_url,
+                    duration_hint=req.duration
+                )
 
+        reg_task = asyncio.create_task(_single_stream_worker())
+        _job_controllers[job_id] = DownloadTaskController(reg_task, None)
+        return {
+            "success": True,
+            "job_id": job_id,
+            "status": "running",
+            "stream_only": True,
+            "message": f"Salvando '{clean_title}' na galeria (Stream Web • 0 MB local).",
+            "folder": target_folder_name
+        }
+
+    async def _single_video_worker():
+        async with _video_download_semaphore:
+            stream_url = vurl
+            if vid_id or not any(ext in stream_url.lower() for ext in (".mp4", ".m3u8", ".webm", ".mov")):
+                try:
+                    resolved_stream = await _resolve_best_video_stream(vid_id or "vid", source_page_url or stream_url)
+                    if resolved_stream:
+                        stream_url = resolved_stream
+                except Exception as e_res:
+                    logger.warning(f"Could not resolve direct stream for {stream_url}: {e_res}")
+            headers = _get_video_download_headers(stream_url, source_page_url)
+            await _run_video_download_task(
+                job_id=job_id,
+                vurl=stream_url,
+                clean_title=clean_title,
+                folder_name=target_folder_name,
+                target_path=target_path,
+                headers=headers,
+                source_url=source_page_url,
+                source_id=vid_id or "",
+                thumbnail_url=req.thumbnail_url
+            )
+
+    download_task = asyncio.create_task(_single_video_worker())
     _job_controllers[job_id] = DownloadTaskController(download_task, target_path)
 
     return {
         "success": True,
         "job_id": job_id,
         "status": "running",
-        "message": f"Download de '{clean_title}' iniciado em segundo plano.",
+        "stream_only": False,
+        "message": f"Download local de '{clean_title}' na pasta Data iniciado em segundo plano.",
         "folder": target_folder_name
     }
 
@@ -6431,6 +7093,7 @@ class BatchSaveVideosRequest(BaseModel):
     folder: Optional[str] = "Extraídos"
     max_concurrency: Optional[int] = 2
     skip_existing: Optional[bool] = True
+    stream_only: Optional[bool] = True
 
 
 
@@ -6462,14 +7125,24 @@ def _encode_b36_hash(hex_hash: str) -> str:
         return ""
 
 
-async def _resolve_best_video_stream(vid_id: str, page_url: str) -> Optional[str]:
+async def _resolve_best_video_stream_with_meta(vid_id: str, page_url: str) -> Dict[str, Any]:
     """
-    Ultra-fast stream URL resolution for universal video platforms.
-    Resolves the real 1080p Full HD MP4 CDN stream.
-    Rejects 'na.mp4' or placeholder error responses.
+    Ultra-fast stream URL + metadata resolution for universal video platforms.
+    Resolves the real 1080p Full HD MP4 CDN stream alongside width, height, duration, thumbnail, and heatmap.
     """
     clean_id = (vid_id or "").replace("ep_", "").replace("vid_", "").replace("ph_", "")
     target_page = (page_url or "").strip()
+
+    # If target_page is already a direct video file URL, return it directly
+    if any(target_page.lower().split("?")[0].endswith(ext) for ext in (".mp4", ".webm", ".mov", ".m4v")):
+        return {
+            "stream_url": target_page,
+            "width": 1920,
+            "height": 1080,
+            "duration_seconds": 0.0,
+            "thumbnail_url": None,
+            "heatmap": None,
+        }
 
     # 1. Dedicated direct stream resolution
     matched_ext, ext_vid, cand_page = matches_direct_extractor_provider(target_page)
@@ -6500,7 +7173,14 @@ async def _resolve_best_video_stream(vid_id: str, page_url: str) -> Optional[str
                 cand = best.get("url")
                 if cand and "na.mp4" not in cand:
                     logger.info(f"Resolved real direct stream ({best.get('height')}p): {cand[:60]}...")
-                    return cand
+                    return {
+                        "stream_url": cand,
+                        "width": int(best.get("width") or info.get("width") or 1920),
+                        "height": int(best.get("height") or info.get("height") or 1080),
+                        "duration_seconds": float(info.get("duration") or 0.0),
+                        "thumbnail_url": info.get("thumbnail"),
+                        "heatmap": info.get("heatmap"),
+                    }
         except Exception as e_ph:
             logger.debug(f"Direct yt-dlp resolution failed for {target_page}: {e_ph}")
 
@@ -6511,6 +7191,8 @@ async def _resolve_best_video_stream(vid_id: str, page_url: str) -> Optional[str
             target_page = extract_canonical_target_page(f"video-{clean_id}") or ""
 
         player_hash = ""
+        page_dur = 0.0
+        page_thumb = None
         anti_h = resolve_anti_hotlink_headers(target_page, referer=target_page)
         try:
             async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
@@ -6530,6 +7212,15 @@ async def _resolve_best_video_stream(vid_id: str, page_url: str) -> Optional[str
                         m_hash2 = re.search(r"['\"]hash['\"]\s*:\s*['\"]([a-f0-9]{32})['\"]", html)
                         if m_hash2:
                             player_hash = m_hash2.group(1)
+                    m_og_img = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.I)
+                    if m_og_img:
+                        page_thumb = m_og_img.group(1)
+                    m_dur = re.search(r'"duration"\s*:\s*"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?"', html, re.I)
+                    if m_dur:
+                        hrs = int(m_dur.group(1) or 0)
+                        mins = int(m_dur.group(2) or 0)
+                        secs = int(m_dur.group(3) or 0)
+                        page_dur = float(hrs * 3600 + mins * 60 + secs)
         except Exception as e_page:
             logger.debug(f"Failed to fetch page for hash {clean_id}: {e_page}")
 
@@ -6537,7 +7228,7 @@ async def _resolve_best_video_stream(vid_id: str, page_url: str) -> Optional[str
             enc_hash = _encode_b36_hash(player_hash)
             if enc_hash:
                 try:
-                    xhr_url = get_embed_xhr_url(clean_id, enc_hash)
+                    xhr_url = get_embed_xhr_url(clean_id, enc_hash, target_page)
                     async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
                         resp_xhr = await client.get(
                             xhr_url,
@@ -6556,17 +7247,44 @@ async def _resolve_best_video_stream(vid_id: str, page_url: str) -> Optional[str
                                     "720p@60fps HD", "720p HD", "720p",
                                     "480p", "360p", "240p"
                                 ]
+                                def _dims_from_q(ql: str):
+                                    if "1080" in ql:
+                                        return 1920, 1080
+                                    if "720" in ql:
+                                        return 1280, 720
+                                    if "480" in ql:
+                                        return 854, 480
+                                    if "360" in ql:
+                                        return 640, 360
+                                    return 1280, 720
+
                                 for q in quality_priority:
                                     if q in mp4s and mp4s[q].get("src"):
                                         candidate_src = mp4s[q]["src"]
                                         if "na.mp4" not in candidate_src:
                                             logger.info(f"Resolved real stream for {clean_id} ({q}): {candidate_src[:60]}...")
-                                            return candidate_src
+                                            w_q, h_q = _dims_from_q(q)
+                                            return {
+                                                "stream_url": candidate_src,
+                                                "width": w_q,
+                                                "height": h_q,
+                                                "duration_seconds": page_dur,
+                                                "thumbnail_url": page_thumb,
+                                                "heatmap": None,
+                                            }
                                 for q_label, q_obj in mp4s.items():
                                     candidate_src = q_obj.get("src")
                                     if candidate_src and "na.mp4" not in candidate_src:
                                         logger.info(f"Resolved stream for {clean_id} ({q_label}): {candidate_src[:60]}...")
-                                        return candidate_src
+                                        w_q, h_q = _dims_from_q(q_label)
+                                        return {
+                                            "stream_url": candidate_src,
+                                            "width": w_q,
+                                            "height": h_q,
+                                            "duration_seconds": page_dur,
+                                            "thumbnail_url": page_thumb,
+                                            "heatmap": None,
+                                        }
                 except Exception as e_xhr:
                     logger.debug(f"XHR base36 resolution failed for {clean_id}: {e_xhr}")
 
@@ -6589,11 +7307,37 @@ async def _resolve_best_video_stream(vid_id: str, page_url: str) -> Optional[str
                 best = max(formats, key=lambda f: f.get("height", 0) or 0)
                 candidate_src = best.get("url")
                 if candidate_src and "na.mp4" not in candidate_src:
-                    return candidate_src
+                    return {
+                        "stream_url": candidate_src,
+                        "width": int(best.get("width") or info.get("width") or 1920),
+                        "height": int(best.get("height") or info.get("height") or 1080),
+                        "duration_seconds": float(info.get("duration") or 0.0),
+                        "thumbnail_url": info.get("thumbnail"),
+                        "heatmap": info.get("heatmap"),
+                    }
+            elif info.get("url"):
+                return {
+                    "stream_url": info.get("url"),
+                    "width": int(info.get("width") or 1920),
+                    "height": int(info.get("height") or 1080),
+                    "duration_seconds": float(info.get("duration") or 0.0),
+                    "thumbnail_url": info.get("thumbnail"),
+                    "heatmap": info.get("heatmap"),
+                }
         except Exception as e2:
             logger.debug(f"yt-dlp fallback failed for {target_page}: {e2}")
 
-    return None
+    return {}
+
+
+async def _resolve_best_video_stream(vid_id: str, page_url: str) -> Optional[str]:
+    """
+    Ultra-fast stream URL resolution for universal video platforms.
+    Resolves the real 1080p Full HD MP4 CDN stream.
+    Rejects 'na.mp4' or placeholder error responses.
+    """
+    res = await _resolve_best_video_stream_with_meta(vid_id, page_url)
+    return res.get("stream_url")
 
 
 @app.post("/api/video-scraper/scan-page")
@@ -6788,7 +7532,7 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
                 async def _enrich_thumb(item):
                     try:
                         async with httpx.AsyncClient(timeout=4.0) as cl:
-                            r = await cl.get(get_enrichment_api_url(item['id']), headers={"User-Agent": "Mozilla/5.0"})
+                            r = await cl.get(get_enrichment_api_url(item['id'], item.get('url')), headers={"User-Agent": "Mozilla/5.0"})
                             if r.status_code == 200:
                                 d = r.json()
                                 thumb_src = d.get("default_thumb", {}).get("src")
@@ -6855,24 +7599,37 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
 @app.post("/api/video-scraper/batch-save")
 async def batch_save_videos_endpoint(req: BatchSaveVideosRequest):
     """
-    Enqueues selected videos from a scanned page into the background download engine.
-    Maintains concurrency of 2 simultaneous downloads to ensure maximum stability.
-    Updates _active_jobs for real-time live monitoring in Gestão de Tarefas.
+    Salva vídeos selecionados da página escaneada na Galeria de Vídeos.
+    Por padrão (stream_only=True), registra como Stream Web Full HD (0 MB no disco local, 6x concorrência).
+    Quando stream_only=False, realiza o download físico .mp4 para data/videos/{folder}/ (2x concorrência).
     """
     if not req.videos:
-        raise HTTPException(status_code=400, detail="No videos selected for download.")
+        raise HTTPException(status_code=400, detail="No videos selected for saving.")
 
     target_folder_name = req.folder.strip() if req.folder and req.folder.strip() else "Extraídos"
     target_folder = os.path.join(video_service.base_dir, target_folder_name)
     os.makedirs(target_folder, exist_ok=True)
 
-    semaphore = _video_download_semaphore
-
+    is_stream_only = True if req.stream_only is None else bool(req.stream_only)
+    semaphore = _video_stream_register_semaphore if is_stream_only else _video_download_semaphore
 
     queued_jobs = []
 
-    async def _worker_for_video(v_item: BatchSaveVideoItemInput, jid: str, t_path: str):
+    async def _worker_for_video(v_item: BatchSaveVideoItemInput, jid: str, t_path: Optional[str]):
         async with semaphore:
+            if is_stream_only:
+                await _run_video_stream_register_task(
+                    job_id=jid,
+                    vurl=v_item.stream_url or v_item.url,
+                    clean_title=v_item.title,
+                    folder_name=target_folder_name,
+                    source_url=v_item.url,
+                    source_id=v_item.id,
+                    thumbnail_url=v_item.thumbnail_url,
+                    duration_hint=v_item.duration
+                )
+                return
+
             if jid in _active_jobs:
                 _active_jobs[jid]["status"] = "running"
                 _active_jobs[jid]["progress"]["status"] = "Resolving 1080p HD video stream..."
@@ -6890,10 +7647,9 @@ async def batch_save_videos_endpoint(req: BatchSaveVideosRequest):
                     _active_jobs[jid]["error"] = "Could not resolve video stream"
                     _active_jobs[jid]["progress"]["status"] = "Falha ao resolver stream"
                     _save_jobs_to_disk(sync_hf=True)
-
                 return
 
-            # 2. Execute download task with live progress reporting
+            # 2. Execute physical download task with live progress reporting
             headers = _get_video_download_headers(stream_url, v_item.url)
             await _run_video_download_task(
                 job_id=jid,
@@ -6918,31 +7674,43 @@ async def batch_save_videos_endpoint(req: BatchSaveVideosRequest):
         if req.skip_existing:
             matched = _find_matching_existing_video(item.id, item.url, item.title, all_existing)
             if matched:
-                skipped_items.append({
-                    "id": item.id,
-                    "title": item.title,
-                    "folder": matched.get("folder", "Galeria")
-                })
-                continue
+                # Se o usuário pediu explicitamente para baixar localmente na pasta Data (stream_only=False)
+                # e o vídeo estava salvo apenas como stream_url (sem arquivo local), permitimos o download local!
+                if not is_stream_only and matched.get("storage_location") == "stream_url" and not matched.get("is_local_cached"):
+                    pass
+                else:
+                    skipped_items.append({
+                        "id": item.id,
+                        "title": item.title,
+                        "folder": matched.get("folder", "Galeria")
+                    })
+                    continue
 
-        clean_title = item.title or "video_extraido"
+        raw_title = item.title or "video_extraido"
+        clean_title = re.sub(r"^(?:Save Video:\s*|Salvar Vídeo:\s*)+", "", raw_title, flags=re.I).strip() or "video_extraido"
         filename = "".join(c for c in clean_title if c.isalnum() or c in ("-", "_", " ")).strip() or f"vid_{item.id}"
         if not any(filename.lower().endswith(ext) for ext in (".mp4", ".webm", ".mov", ".mkv")):
             filename += ".mp4"
 
-        target_path = os.path.join(target_folder, filename)
-        if os.path.exists(target_path):
-            target_path = os.path.join(target_folder, f"{os.path.splitext(filename)[0]}_{item.id}.mp4")
+        target_path = None
+        if not is_stream_only:
+            target_path = os.path.join(target_folder, filename)
+            if os.path.exists(target_path):
+                target_path = os.path.join(target_folder, f"{os.path.splitext(filename)[0]}_{item.id}.mp4")
 
         job_id = f"save_vid_{int(time.time() * 1000) % 10000000}_{abs(hash(item.id)) % 10000}"
 
         _active_jobs[job_id] = {
             "session_id": job_id,
             "url": item.url,
+            "source_url": item.url,
+            "source_id": item.id,
+            "thumbnail_url": item.thumbnail_url,
+            "clean_title": clean_title,
             "mode": "video_save",
-            "engine_type": "video_downloader",
+            "engine_type": "video_stream_register" if is_stream_only else "video_downloader",
             "status": "active",
-            "model": "Web Video Scraper (2x Queue)",
+            "model": "Web Stream (Zero Disco • 6x)" if is_stream_only else "Web Video Scraper (Local • 2x)",
             "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             "progress": {
                 "current": 0,
@@ -6952,13 +7720,18 @@ async def batch_save_videos_endpoint(req: BatchSaveVideosRequest):
                 "total_bytes": 0,
                 "throughput_mbps": 0.0,
                 "title": f"Save Video: {clean_title}",
-                "status": "Na fila de downloads (concorrência máxima: 2)..."
+                "status": (
+                    "Registrando stream na galeria (0 MB local)..."
+                    if is_stream_only
+                    else "Na fila de downloads locais (concorrência máxima: 2)..."
+                )
             },
             "downloaded_bytes": 0,
             "total_bytes": 0,
             "throughput_mbps": 0.0,
             "folder": target_folder_name,
-            "target_path": target_path
+            "target_path": target_path,
+            "stream_only": is_stream_only
         }
 
         task = asyncio.create_task(_worker_for_video(item, job_id, target_path))
@@ -6967,7 +7740,10 @@ async def batch_save_videos_endpoint(req: BatchSaveVideosRequest):
 
     _save_jobs_to_disk()
 
-    msg = f"{len(queued_jobs)} vídeos enfileirados para download."
+    if is_stream_only:
+        msg = f"{len(queued_jobs)} vídeos adicionados à galeria (Stream Web • 0 MB local)."
+    else:
+        msg = f"{len(queued_jobs)} vídeos enfileirados para download local na pasta Data."
     if skipped_items:
         msg += f" {len(skipped_items)} vídeos já salvos foram pulados."
 
@@ -6978,6 +7754,7 @@ async def batch_save_videos_endpoint(req: BatchSaveVideosRequest):
         "skipped_items": skipped_items,
         "job_ids": queued_jobs,
         "folder": target_folder_name,
+        "stream_only": is_stream_only,
         "message": msg
     }
 
@@ -7047,7 +7824,18 @@ async def add_video_by_url(req: AddVideoUrlRequest):
 
     # Se o usuário escolheu APENAS STREAM REMOTO (sem download local nem nuvem)
     if req.stream_only:
+        meta_info = await _resolve_best_video_stream_with_meta("url_input", req.url)
+        resolved_stream = meta_info.get("stream_url") or req.url
+        if resolved_stream.startswith("/api/proxy-video-stream"):
+            proxied_stream = resolved_stream
+        else:
+            proxied_stream = (
+                f"/api/proxy-video-stream?url={urllib.parse.quote(resolved_stream)}"
+                f"&referer={urllib.parse.quote(req.url)}"
+            )
         vid_id = hashlib.md5(req.url.encode("utf-8")).hexdigest()[:12]
+        thumb_url = meta_info.get("thumbnail_url")
+        heatmap_data = meta_info.get("heatmap")
         video_service._update_single_metadata(
             file_path=None,
             title=clean_title,
@@ -7055,11 +7843,24 @@ async def add_video_by_url(req: AddVideoUrlRequest):
             is_favorite=False,
             vid_id=vid_id,
             storage_location="stream_url",
-            stream_url=req.url,
+            stream_url=proxied_stream,
             file_size_bytes=0,
             source_origin="web",
-            source_url=req.url
+            source_url=req.url,
+            source_thumbnail_url=thumb_url,
+            heatmap_data=heatmap_data,
+            width=int(meta_info.get("width") or 1920),
+            height=int(meta_info.get("height") or 1080),
+            duration_seconds=float(meta_info.get("duration_seconds") or 0.0)
         )
+        try:
+            await asyncio.to_thread(video_service.get_or_generate_thumbnail, vid_id, thumb_url)
+        except Exception:
+            pass
+        try:
+            await asyncio.to_thread(video_service.get_or_detect_smart_highlight, vid_id, heatmap_data)
+        except Exception:
+            pass
         return video_service.get_video_by_id(vid_id)
 
     target_stream_url = req.url
@@ -7656,6 +8457,22 @@ async def stream_video(video_id: str, request: Request):
 
     # --- HF Proxy / Remote Proxy: stream via server when local file is missing ---
     if not local_exists:
+        if video.get("storage_location") == "stream_url" or not video.get("cloud_url"):
+            raw_stream = video.get("stream_url") or video.get("source_url") or ""
+            if "/api/proxy-video-stream" in raw_stream and "url=" in raw_stream:
+                try:
+                    parsed_q = urllib.parse.parse_qs(urllib.parse.urlparse(raw_stream).query)
+                    if "url" in parsed_q and parsed_q["url"]:
+                        raw_stream = parsed_q["url"][0]
+                except Exception:
+                    pass
+            if raw_stream and raw_stream.startswith("http"):
+                return await proxy_video_stream(
+                    url=raw_stream,
+                    request=request,
+                    referer=video.get("source_url") or raw_stream
+                )
+
         cloud_url = video.get("cloud_url") or video.get("source_url")
         if not cloud_url or not cloud_url.startswith("http"):
             raise HTTPException(status_code=404, detail="Video not found locally or in cloud")
@@ -7794,7 +8611,56 @@ async def download_video(video_id: str):
     if not local_exists:
         cloud_url = video.get("cloud_url")
         if not cloud_url or not cloud_url.startswith("http"):
-            raise HTTPException(status_code=404, detail="Video not found locally or in cloud")
+            raw_stream = video.get("stream_url") or video.get("source_url") or ""
+            if "/api/proxy-video-stream" in raw_stream and "url=" in raw_stream:
+                try:
+                    parsed_q = urllib.parse.parse_qs(urllib.parse.urlparse(raw_stream).query)
+                    if "url" in parsed_q and parsed_q["url"]:
+                        raw_stream = parsed_q["url"][0]
+                except Exception:
+                    pass
+            if not raw_stream or not any(ext in raw_stream.lower() for ext in (".mp4", ".webm", ".mov", ".m4v")):
+                resolved_dl = await _resolve_best_video_stream(
+                    video.get("source_id") or video_id,
+                    video.get("source_url") or raw_stream
+                )
+                if resolved_dl:
+                    raw_stream = resolved_dl
+            if not raw_stream or not raw_stream.startswith("http"):
+                raise HTTPException(status_code=404, detail="Video not found locally or in cloud")
+
+            dl_headers = _get_video_download_headers(raw_stream, video.get("source_url") or raw_stream)
+            filename = video.get("filename", "video.mp4")
+            if not any(filename.lower().endswith(ext) for ext in (".mp4", ".webm", ".mov", ".mkv")):
+                filename = f"{filename}.mp4"
+            mime_type, _ = mimetypes.guess_type(filename)
+            if not mime_type:
+                mime_type = "video/mp4"
+
+            client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None), follow_redirects=True)
+            web_req = client.build_request("GET", raw_stream, headers=dl_headers)
+            web_resp = await client.send(web_req, stream=True)
+
+            async def _proxy_web_download():
+                try:
+                    async for chunk in web_resp.aiter_bytes(chunk_size=256 * 1024):
+                        yield chunk
+                finally:
+                    await web_resp.aclose()
+                    await client.aclose()
+
+            resp_headers = {
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Type": web_resp.headers.get("content-type", mime_type),
+            }
+            if "content-length" in web_resp.headers:
+                resp_headers["Content-Length"] = web_resp.headers["content-length"]
+
+            return StreamingResponse(
+                _proxy_web_download(),
+                status_code=200,
+                headers=resp_headers
+            )
 
         from src.server.video_service import cloud_storage as _cs
         hf_token = _cs.token or os.getenv("HF_TOKEN", "")

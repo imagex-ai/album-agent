@@ -1102,13 +1102,17 @@ export const AlbumDetailView: React.FC = () => {
         duration: (v as any).duration || '',
         candidateId: v.candidateId
       }));
-      await backendApi.batchSaveVideos(itemsToSave, targetFolder, 2);
+      await backendApi.batchSaveVideos(itemsToSave, targetFolder, 2, true, true);
       addNotification({
-        title: t.saveVideosStarted || (isEn ? 'Video Save Started' : 'Salvamento de Vídeos Iniciado'),
-        message: isEn ? `${itemsToSave.length} video(s) downloading in background to "${targetFolder}". Follow in Tasks.` : `${itemsToSave.length} vídeo(s) estão sendo baixados em segundo plano para "${targetFolder}". Acompanhe na Gestão de Tarefas.`,
+        title: t.saveVideosStreamStarted || t.saveVideosStarted,
+        message: (t.saveVideosStreamStartedMsg || t.saveVideosStartedMsg || '')
+          .replace('{count}', String(itemsToSave.length))
+          .replace('{folder}', targetFolder),
         type: 'info'
       });
       triggerJobsPollingLoop();
+      setTimeout(() => useAppStore.getState().syncVideos(), 2000);
+      setTimeout(() => useAppStore.getState().syncVideos(), 4500);
     } catch (err) {
       console.error('Failed to batch save selected videos:', err);
     } finally {

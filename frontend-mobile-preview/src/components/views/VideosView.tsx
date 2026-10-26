@@ -30,7 +30,10 @@ import {
   Maximize2,
   Copy,
   FolderHeart,
-  Flame
+  Flame,
+  ChevronLeft,
+  ChevronRight,
+  LayoutGrid
 } from 'lucide-react';
 import { useAppStore, getCanonicalMediaFingerprint } from '../../store/useAppStore';
 import { backendApi } from '../../services/realApi';
@@ -106,6 +109,7 @@ export const VideosView: React.FC = () => {
     importLocalPath,
     openVideosFolder,
     syncVideos,
+    saveExtractedVideoToGallery,
     navigateToView,
     highlightedItemId,
     albums,
@@ -143,6 +147,8 @@ export const VideosView: React.FC = () => {
   }, [videos]);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const foldersScrollRef = useRef<HTMLDivElement | null>(null);
+  const [wrapFolders, setWrapFolders] = useState<boolean>(false);
 
   const [sortBy, setSortBy] = useState<'date' | 'name' | 'size'>('date');
   const [activeMenuVideoId, setActiveMenuVideoId] = useState<string | null>(null);
@@ -337,7 +343,7 @@ export const VideosView: React.FC = () => {
     await openVideosFolder(activeVideoFolder || 'Geral');
   };
 
-  const [urlStreamOnlyInput, setUrlStreamOnlyInput] = useState<boolean>(false);
+  const [urlStreamOnlyInput, setUrlStreamOnlyInput] = useState<boolean>(true);
   const [urlFolderInput, setUrlFolderInput] = useState<string>('Geral');
 
   const handleAddUrl = async (e: React.FormEvent) => {
@@ -353,7 +359,7 @@ export const VideosView: React.FC = () => {
       );
       setUrlInput('');
       setUrlTitleInput('');
-      setUrlStreamOnlyInput(false);
+      setUrlStreamOnlyInput(true);
       setIsUrlModalOpen(false);
     } finally {
       setIsDownloadingUrl(false);
@@ -597,7 +603,35 @@ export const VideosView: React.FC = () => {
       )}
 
       {/* Folders & Navigation Tabs */}
-      <div className="flex items-center gap-2 overflow-x-auto overflow-y-visible no-scrollbar py-2">
+      <div className="relative flex items-center gap-1.5">
+        {!wrapFolders && videoFolders.length > 4 && (
+          <button
+            type="button"
+            onClick={() => foldersScrollRef.current?.scrollBy({ left: -280, behavior: 'smooth' })}
+            className="shrink-0 p-2 rounded-xl bg-surface-elevated hover:bg-surface-hover border border-border text-slate-300 hover:text-white transition-colors shadow-sm cursor-pointer"
+            title={isEn ? 'Scroll folders left' : 'Rolar pastas para a esquerda'}
+          >
+            <ChevronLeft size={15} />
+          </button>
+        )}
+
+        <div
+          ref={foldersScrollRef}
+          onWheel={(e) => {
+            if (!wrapFolders && foldersScrollRef.current && e.deltaY !== 0) {
+              const el = foldersScrollRef.current;
+              if (el.scrollWidth > el.clientWidth) {
+                e.preventDefault();
+                el.scrollLeft += e.deltaY;
+              }
+            }
+          }}
+          className={`flex-1 flex items-center gap-2 py-2 ${
+            wrapFolders
+              ? 'flex-wrap'
+              : 'overflow-x-auto overflow-y-visible custom-scrollbar scroll-smooth'
+          }`}
+        >
         {/* All Videos Tab */}
         <button
           onClick={() => {
@@ -753,6 +787,35 @@ export const VideosView: React.FC = () => {
             <Trash2 size={13} />
             <span>{t.deleteSelectedFolders.replace('{count}', String(selectedFolderNames.length))}</span>
           </button>
+        )}
+        </div>
+
+        {videoFolders.length > 4 && (
+          <div className="flex items-center gap-1 shrink-0">
+            {!wrapFolders && (
+              <button
+                type="button"
+                onClick={() => foldersScrollRef.current?.scrollBy({ left: 280, behavior: 'smooth' })}
+                className="p-2 rounded-xl bg-surface-elevated hover:bg-surface-hover border border-border text-slate-300 hover:text-white transition-colors shadow-sm cursor-pointer"
+                title={isEn ? 'Scroll folders right' : 'Rolar pastas para a direita'}
+              >
+                <ChevronRight size={15} />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setWrapFolders(prev => !prev)}
+              className={`px-2.5 py-2 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                wrapFolders
+                  ? 'bg-violet-600 text-white border-violet-500'
+                  : 'bg-surface-elevated hover:bg-surface-hover border-border text-slate-300 hover:text-white'
+              }`}
+              title={isEn ? (wrapFolders ? 'Single row scroll' : 'Show all folders wrapped') : (wrapFolders ? 'Mostrar em linha única' : 'Expandir todas as pastas')}
+            >
+              <LayoutGrid size={14} />
+              <span className="hidden sm:inline">{wrapFolders ? (isEn ? 'Compact' : 'Compactar') : (isEn ? 'All' : 'Ver Todas')}</span>
+            </button>
+          </div>
         )}
       </div>
 
@@ -1261,6 +1324,24 @@ export const VideosView: React.FC = () => {
                       <span>Renomear</span>
                     </button>
 
+                    {video.storageLocation === 'stream_url' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveMenuVideoId(null);
+                          const targetSource = video.sourceUrl || video.url || video.streamUrl;
+                          if (targetSource) {
+                            saveExtractedVideoToGallery(targetSource, video.title, video.folder, video.sourceUrl, undefined, false);
+                          }
+                        }}
+                        className="w-full px-3 py-1.5 rounded-xl hover:bg-white/10 text-left text-xs text-violet-300 flex items-center gap-2 cursor-pointer"
+                        title={t.saveLocalDataTitle}
+                      >
+                        <HardDrive size={13} className="text-violet-400" />
+                        <span>{t.saveLocalData}</span>
+                      </button>
+                    )}
+
                     {(() => {
                       let rawDl = video.downloadUrl || video.streamUrl || '';
                       let unwrapCount = 0;
@@ -1398,33 +1479,33 @@ export const VideosView: React.FC = () => {
                 {/* Opção de Modo de Armazenamento */}
                 <div className="p-3 rounded-2xl bg-surface-elevated/40 border border-border space-y-2">
                   <label className="text-xs font-bold text-slate-200 block">
-                    Destino do Armazenamento:
+                    {t.storageDestLabel}
                   </label>
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
-                      onClick={() => setUrlStreamOnlyInput(false)}
-                      className={`p-2.5 rounded-xl border text-left text-xs transition-all ${
-                        !urlStreamOnlyInput
-                          ? 'bg-purple-600/20 border-purple-500/60 text-purple-300 font-bold'
+                      onClick={() => setUrlStreamOnlyInput(true)}
+                      className={`p-2.5 rounded-xl border text-left text-xs transition-all cursor-pointer ${
+                        urlStreamOnlyInput
+                          ? 'bg-emerald-600/20 border-emerald-500/60 text-emerald-300 font-bold'
                           : 'bg-surface border-border text-slate-400'
                       }`}
                     >
-                      <div className="flex items-center gap-1.5"><Globe size={13} /><span>Baixar p/ Nuvem</span></div>
-                      <div className="text-[10px] font-normal text-slate-400 mt-0.5">Salva no Hugging Face (10GB)</div>
+                      <div className="flex items-center gap-1.5"><Link2 size={13} /><span>{t.storageStreamTitle}</span></div>
+                      <div className="text-[10px] font-normal text-slate-400 mt-0.5">{t.storageStreamDesc}</div>
                     </button>
 
                     <button
                       type="button"
-                      onClick={() => setUrlStreamOnlyInput(true)}
-                      className={`p-2.5 rounded-xl border text-left text-xs transition-all ${
-                        urlStreamOnlyInput
-                          ? 'bg-cyan-600/20 border-cyan-500/60 text-cyan-300 font-bold'
+                      onClick={() => setUrlStreamOnlyInput(false)}
+                      className={`p-2.5 rounded-xl border text-left text-xs transition-all cursor-pointer ${
+                        !urlStreamOnlyInput
+                          ? 'bg-violet-600/20 border-violet-500/60 text-violet-300 font-bold'
                           : 'bg-surface border-border text-slate-400'
                       }`}
                     >
-                      <div className="flex items-center gap-1.5"><Link2 size={13} /><span>Stream Puro (URL)</span></div>
-                      <div className="text-[10px] font-normal text-slate-400 mt-0.5">Sem download (Zero disco)</div>
+                      <div className="flex items-center gap-1.5"><HardDrive size={13} /><span>{t.storageLocalTitle}</span></div>
+                      <div className="text-[10px] font-normal text-slate-400 mt-0.5">{t.storageLocalDesc}</div>
                     </button>
                   </div>
                 </div>

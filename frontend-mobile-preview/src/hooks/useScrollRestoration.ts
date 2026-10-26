@@ -1,5 +1,6 @@
 import { useLayoutEffect, useEffect, useRef } from 'react';
 import { ViewId } from '../types';
+import { useAppStore } from '../store/useAppStore';
 import {
   scrollRestorationManager,
   getTabScrollKey,
@@ -128,6 +129,11 @@ export function useScrollRestoration({
 
     // Stop any existing restoration loop from previous view
     stopRestorationLoop('navigation_switch');
+
+    // If navigating directly to a highlighted item/task, let scrollIntoView handle positioning
+    if (useAppStore.getState().highlightedItemId) {
+      return;
+    }
 
     // Register container in manager
     scrollRestorationManager.registerContainer(container);

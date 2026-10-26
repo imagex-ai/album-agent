@@ -553,6 +553,7 @@ export interface WebScraperState {
   selectedAlbumIds?: string[];
   activeInspectingAlbumId?: string | null;
   viewLayout?: 'albums' | 'grid' | 'videos';
+  saveLocally?: boolean;
 }
 
 export type SliderSequenceMode = 'random' | 'alphabetical' | 'artist' | 'folder' | 'recent' | 'size' | 'orientation';

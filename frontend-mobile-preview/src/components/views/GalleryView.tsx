@@ -1,4 +1,4 @@
-import React, {  useState, useEffect , useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LayoutGrid,
   Cloud,
@@ -148,6 +148,8 @@ export const GalleryView: React.FC = () => {
   const [activeFolderMenuName, setActiveFolderMenuName] = useState<string | null>(null);
   const [folderNameInput, setFolderNameInput] = useState('');
   const [targetMoveFolder, setTargetMoveFolder] = useState('Geral');
+  const foldersScrollRef = useRef<HTMLDivElement | null>(null);
+  const [wrapFolders, setWrapFolders] = useState<boolean>(false);
 
   // Ultra-fast memoized filter & sort (Zero re-renders on scroll / 60 FPS guarantee)
   const filtered = useMemo(() => {
@@ -464,7 +466,35 @@ export const GalleryView: React.FC = () => {
       </div>
 
       {/* Album Folders Navigation Bar */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-thin scrollbar-thumb-surface-elevated">
+      <div className="relative flex items-center gap-1.5">
+        {!wrapFolders && albumFolders.length > 4 && (
+          <button
+            type="button"
+            onClick={() => foldersScrollRef.current?.scrollBy({ left: -280, behavior: 'smooth' })}
+            className="shrink-0 p-2 rounded-xl bg-surface-elevated hover:bg-surface-hover border border-border text-slate-300 hover:text-white transition-colors shadow-sm cursor-pointer"
+            title={isEn ? 'Scroll folders left' : 'Rolar pastas para a esquerda'}
+          >
+            <ChevronLeft size={15} />
+          </button>
+        )}
+
+        <div
+          ref={foldersScrollRef}
+          onWheel={(e) => {
+            if (!wrapFolders && foldersScrollRef.current && e.deltaY !== 0) {
+              const el = foldersScrollRef.current;
+              if (el.scrollWidth > el.clientWidth) {
+                e.preventDefault();
+                el.scrollLeft += e.deltaY;
+              }
+            }
+          }}
+          className={`flex-1 flex items-center gap-2 py-1.5 ${
+            wrapFolders
+              ? 'flex-wrap'
+              : 'overflow-x-auto overflow-y-visible custom-scrollbar scroll-smooth'
+          }`}
+        >
         {/* All Albums Folder */}
         <button
           type="button"
@@ -577,6 +607,35 @@ export const GalleryView: React.FC = () => {
           <FolderPlus size={14} />
           <span>{t.createFolder || "+ New Folder"}</span>
         </button>
+        </div>
+
+        {albumFolders.length > 4 && (
+          <div className="flex items-center gap-1 shrink-0">
+            {!wrapFolders && (
+              <button
+                type="button"
+                onClick={() => foldersScrollRef.current?.scrollBy({ left: 280, behavior: 'smooth' })}
+                className="p-2 rounded-xl bg-surface-elevated hover:bg-surface-hover border border-border text-slate-300 hover:text-white transition-colors shadow-sm cursor-pointer"
+                title={isEn ? 'Scroll folders right' : 'Rolar pastas para a direita'}
+              >
+                <ChevronRight size={15} />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setWrapFolders(prev => !prev)}
+              className={`px-2.5 py-2 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                wrapFolders
+                  ? 'bg-violet-600 text-white border-violet-500'
+                  : 'bg-surface-elevated hover:bg-surface-hover border-border text-slate-300 hover:text-white'
+              }`}
+              title={isEn ? (wrapFolders ? 'Single row scroll' : 'Show all folders wrapped') : (wrapFolders ? 'Mostrar em linha única' : 'Expandir todas as pastas')}
+            >
+              <LayoutGrid size={14} />
+              <span className="hidden sm:inline">{wrapFolders ? (isEn ? 'Compact' : 'Compactar') : (isEn ? 'All' : 'Ver Todas')}</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Search & Explorer Toolbar */}

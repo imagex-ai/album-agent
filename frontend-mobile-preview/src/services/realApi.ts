@@ -123,7 +123,8 @@ export class BackendApiClient {
     maxConcurrency: number = 3,
     antiBotDelayMs: number = 500,
     mediaTypeFilter: string = 'all',
-    folder: string = 'Geral'
+    folder: string = 'Geral',
+    downloadLocally: boolean = false
   ): Promise<{ session_id: string } | null> {
     try {
       const res = await fetch('/api/analyze', {
@@ -139,7 +140,8 @@ export class BackendApiClient {
           anti_bot_delay_ms: antiBotDelayMs,
           headless: true,
           media_type_filter: mediaTypeFilter,
-          folder: folder || 'Geral'
+          folder: folder || 'Geral',
+          download_locally: downloadLocally
         })
       });
       if (!res.ok) return null;
@@ -163,7 +165,8 @@ export class BackendApiClient {
     antiBotDelayMs: number = 500,
     mediaTypeFilter: string = 'all',
     folder: string = 'Geral',
-    priority: 'high' | 'medium' | 'low' = 'medium'
+    priority: 'high' | 'medium' | 'low' = 'medium',
+    downloadLocally: boolean = false
   ): Promise<any[] | null> {
     try {
       const res = await fetch('/api/batch-analyze', {
@@ -180,7 +183,8 @@ export class BackendApiClient {
           headless: true,
           media_type_filter: mediaTypeFilter,
           folder: folder || 'Geral',
-          priority
+          priority,
+          download_locally: downloadLocally
         })
       });
       if (res.ok) {
@@ -439,6 +443,18 @@ export class BackendApiClient {
   async resumeAllJobs(): Promise<boolean> {
     try {
       const res = await fetch('/api/jobs/resume-all', { method: 'POST' });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Retries all failed, error, or cancelled extraction jobs in batch on the backend.
+   */
+  async retryAllFailedJobs(): Promise<boolean> {
+    try {
+      const res = await fetch('/api/jobs/retry-failed', { method: 'POST' });
       return res.ok;
     } catch {
       return false;
@@ -757,7 +773,7 @@ export class BackendApiClient {
     }
   }
 
-  async addVideoUrl(url: string, folder: string = 'Geral', title?: string, streamOnly: boolean = false): Promise<VideoItem | null> {
+  async addVideoUrl(url: string, folder: string = 'Geral', title?: string, streamOnly: boolean = true): Promise<VideoItem | null> {
     try {
       const res = await fetch('/api/videos/add-url', {
         method: 'POST',
@@ -1271,7 +1287,8 @@ export class BackendApiClient {
     title?: string,
     folder?: string,
     sourceUrl?: string,
-    thumbnailUrl?: string
+    thumbnailUrl?: string,
+    streamOnly: boolean = true
   ): Promise<{ success: boolean; job_id?: string; video?: any; error?: string }> {
     try {
       const res = await fetch('/api/extractor/save-video-to-gallery', {
@@ -1282,7 +1299,8 @@ export class BackendApiClient {
           title,
           folder: folder || 'Extraídos',
           source_url: sourceUrl,
-          thumbnail_url: thumbnailUrl
+          thumbnail_url: thumbnailUrl,
+          stream_only: streamOnly
         })
       });
       const data = await res.json();
@@ -1318,7 +1336,8 @@ export class BackendApiClient {
     videos: any[],
     folder: string = 'Extraídos',
     maxConcurrency: number = 2,
-    skipExisting: boolean = true
+    skipExisting: boolean = true,
+    streamOnly: boolean = true
   ): Promise<{
     success: boolean;
     total_queued?: number;
@@ -1328,6 +1347,7 @@ export class BackendApiClient {
     folder?: string;
     message?: string;
     error?: string;
+    stream_only?: boolean;
   }> {
     try {
       const res = await fetch('/api/video-scraper/batch-save', {
@@ -1337,7 +1357,8 @@ export class BackendApiClient {
           videos,
           folder: folder || 'Extraídos',
           max_concurrency: maxConcurrency,
-          skip_existing: skipExisting
+          skip_existing: skipExisting,
+          stream_only: streamOnly
         })
       });
       const data = await res.json();

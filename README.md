@@ -1,25 +1,33 @@
-# ⚡ IMAGEX.AI v5.2
+# ⚡ IMAGEX.AI v5.3
 
 Autonomous platform for intelligent extraction, organization, and inspection of web albums and videos in their original maximum resolution. 🚀✨
 
 ---
 
-## 🌟 What's New in v5.2 (Release Notes)
+## 🌟 What's New in v5.3 (Release Notes)
 
-* 🎬 **Full Immersive Shorts Experience:**
-  * Clean, border-to-border video feed with dedicated top exit action button.
-  * Multi-moment smart highlight detector (Gold #1, Silver #2, Bronze #3 climax moments) with interactive rank pills.
-* 🔊 **Persistent Audio Across Videos:**
-  * Unmuted audio state persists seamlessly across all consecutive video slides during vertical scroll.
-  * Browser autoplay policy resilience without wiping user audio preference.
-* ⚡ **Bandwidth-Aware Sequential Video Preloading:**
-  * Background preloader strictly waits until the active video is 100% completely buffered before buffering the next slide.
-  * Guarantees zero network bandwidth contention for smooth playback.
-  * Pre-computes smart highlight climax moments and pre-seeks the next stream for 0ms transition latency.
+* 📌 **Interactive Mini Task Dock & Real-Time Progress Monitoring:**
+  * Persistent dock UI supporting multiple concurrent tasks with interactive tabs/pills navigation.
+  * Task wrapping toggle, horizontal mouse-wheel scrolling, and visual item highlighting on job completion.
+  * Live disk download and network throughput telemetry with instant status indicators.
+* ⚡ **Enhanced Web Video Scraper & Storage Options:**
+  * Dual-mode extraction: **Stream Web Full HD** (0 MB local disk usage) and Direct Local Download (`stream_only=False`).
+  * Contextual folder suggestions with automatic deduplication.
+  * Seamless scroll restoration across navigation tabs and view changes.
+* 🛡️ **Resilient Network Profiles & Safe Extraction:**
+  * Dynamic canonical target page resolution preserving origin hostnames.
+  * Generic embed sniffing (`/embed/`, `/video-`, `/watch/`) with domain-aware high-resolution poster generation.
+  * Safe, sanitized API enrichment templates with family-friendly abstractions.
+* 🔄 **In-Place Job Lifecycle & Queue Resumption:**
+  * Resumes and restarts paused or failed tasks in-place without losing task identifiers.
+  * Disk-state validation for partial downloads to prevent stale progress indicators.
+* 🌐 **Bilingual Internationalization (I18n):**
+  * Comprehensive English (`en-US`) and Portuguese (`pt-BR`) language support across task dock, scraper, and album detail views.
+* 🎬 **Full Immersive Shorts Experience & Persistent Audio:**
+  * Border-to-border video feed with smart climax moment detection (Gold #1, Silver #2, Bronze #3).
+  * Audio state persists seamlessly across video transitions with zero-bandwidth contention preloading.
 * 🌐 **Standard Port 8100:**
   * Unified default port standard across backend services, desktop window, and tunneling.
-* 🛡️ **Clean & Modular Architecture:**
-  * Standardized test fixtures, network profiles, and decoupled provider integrations.
 
 ---
 

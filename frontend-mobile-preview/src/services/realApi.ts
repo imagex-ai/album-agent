@@ -1,5 +1,6 @@
 import { Album, AlbumFolder, ExtractionJob, ImageItem, DomainPattern, VideoItem, VideoFolder, TrashItem, TrashStats, ScanPageVideosResponse, OllamaHealthStatus, OllamaModelInfo, MultiAlbumPreviewImage } from '../types';
 import { colorPaletteCache } from './colorExtractor';
+import { getAlbumMediaSummary, getMediaCategory, inferMediaFormat, isVideoMedia, normalizeAlbumMediaTags, unwrapMediaSource } from '../utils/mediaClassification';
 
 export class BackendApiClient {
   /**
@@ -1171,8 +1172,13 @@ export class BackendApiClient {
       }
 
       const aspect = (w > 0 && h > 0) ? (w > h ? '16:9' : w < h ? '2:3' : '1:1') : '2:3';
-      const fmt = (img.format || 'jpeg').toLowerCase();
-      const validFormat: ImageItem['format'] = fmt.includes('png') ? 'png' : fmt.includes('webp') ? 'webp' : fmt.includes('avif') ? 'avif' : fmt.includes('gif') ? 'gif' : 'jpeg';
+      const inferredExtension = inferMediaFormat(orig);
+      const formats: ImageItem['format'][] = ['jpeg', 'png', 'apng', 'webp', 'avif', 'gif', 'mp4', 'webm', 'mov', 'mkv', 'm4v', 'm3u8', 'avi'];
+      const normalizedExtension = inferredExtension === 'jpg' ? 'jpeg' : inferredExtension;
+      const inferredFormat = formats.includes(normalizedExtension as ImageItem['format']) ? normalizedExtension : undefined;
+      const declaredFormat = (img.format || '').toLowerCase().split('/').pop();
+      const fmt = (!img.animation_checked && inferredFormat) || declaredFormat || inferredFormat || 'jpeg';
+      const validFormat: ImageItem['format'] = formats.includes(fmt as ImageItem['format']) ? fmt as ImageItem['format'] : 'jpeg';
 
       const isResolved = !!(img.original_url && img.resolution_method && img.resolution_method !== 'none' && img.validation_status !== 'UNRESOLVED');
       const methodLabel = img.resolution_method === 'individual_page'
@@ -1198,10 +1204,20 @@ export class BackendApiClient {
       }
 
       // Media type resolution
-      const mediaType: 'image' | 'video' | 'gif' = img.media_type === 'video' ? 'video' : img.media_type === 'gif' ? 'gif' : 'image';
-      const isAnimated = !!(img.is_animated);
-      const rawStream = img.video_stream_url || (mediaType === 'video' ? orig : undefined);
-      const videoUrl = rawStream ? getSafeVideoUrl(rawStream) : undefined;
+      const mediaHints = {
+        mediaType: img.media_type as ImageItem['mediaType'],
+        isAnimated: !!img.is_animated,
+        animationChecked: !!img.animation_checked,
+        format: validFormat,
+        rawOriginalUrl: orig,
+        videoStreamUrl: img.video_stream_url
+      };
+      const transportIsVideo = isVideoMedia(mediaHints);
+      const category = getMediaCategory(mediaHints);
+      const mediaType: 'image' | 'video' | 'gif' = transportIsVideo ? 'video' : category === 'gif' ? 'gif' : 'image';
+      const isAnimated = category === 'gif';
+      const rawStream = img.video_stream_url || (transportIsVideo ? unwrapMediaSource(orig) : undefined);
+      const videoUrl = rawStream ? getSafeVideoUrl(unwrapMediaSource(rawStream)) : undefined;
       const posterUrl = img.poster_url ? getSafeUrl(img.poster_url) : (thumb && mediaType === 'video' ? getSafeUrl(thumb) : undefined);
       const durationSecs = img.duration_seconds || undefined;
 
@@ -1256,6 +1272,7 @@ export class BackendApiClient {
         tags: [methodLabel, sourceDomain.split('.')[0] || 'Web'],
         mediaType,
         isAnimated,
+        animationChecked: !!img.animation_checked,
         videoUrl,
         posterUrl,
         durationSeconds: durationSecs,
@@ -1271,9 +1288,7 @@ export class BackendApiClient {
     const updatedAt = raw.updated_at || raw.metadata?.updated_at || raw.metadata?.saved_at || createdAt;
 
 
-    const isVideoAlbum = raw.source_type === 'video' ||
-      images.some(img => img.mediaType === 'video') ||
-      (raw.source_page && (/(?:video-|view_video|\/videos?\/)/i.test(raw.source_page)));
+    const mediaSummary = getAlbumMediaSummary({ images });
 
     const isLocalOrigin = raw.source_origin === 'local' ||
       raw.source_page === 'Upload Local' ||
@@ -1317,15 +1332,14 @@ export class BackendApiClient {
         'Original',
         sourceDomain.split('.')[0] || 'Web',
         'Extraction',
-        ...(raw.tags || []),
-        ...((raw.has_gifs || raw.metadata?.has_gifs || images.some(i => i.mediaType === 'gif' || i.isAnimated)) ? ['gif', 'animado'] : [])
+        ...normalizeAlbumMediaTags(raw.tags || [], mediaSummary.hasGifs)
       ])),
       images: images,
       extractionMode: 'ai_react',
       durationSeconds: raw.metadata?.duration || 12.4,
-      mediaType: isVideoAlbum ? 'video' : ((raw.has_gifs || raw.metadata?.has_gifs || images.some(i => i.mediaType === 'gif' || i.isAnimated)) ? 'gif' : 'photo'),
-      hasGifs: !!(raw.has_gifs ?? raw.metadata?.has_gifs ?? images.some(i => i.mediaType === 'gif' || i.isAnimated)),
-      gifCount: raw.gif_count ?? raw.metadata?.gif_count ?? images.filter(i => i.mediaType === 'gif' || i.isAnimated).length,
+      mediaType: mediaSummary.mediaType,
+      hasGifs: mediaSummary.hasGifs,
+      gifCount: mediaSummary.gifCount,
       sourceOrigin: isLocalOrigin ? 'local' : 'remote',
       folder: raw.folder || raw.metadata?.folder || 'Geral',
       isFavorite: raw.is_favorite ?? raw.isFavorite ?? raw.metadata?.is_favorite ?? false,
@@ -1548,7 +1562,7 @@ export class BackendApiClient {
    */
   async getKeysStatus(): Promise<{
     gemini: { is_set: boolean; masked_key: string; is_connected: boolean; error: string | null };
-    huggingface: { is_set: boolean; masked_token: string; repo_id: string; is_connected: boolean; error?: string | null };
+    huggingface: { is_set: boolean; masked_token: string; repo_id: string; is_connected: boolean; error?: string | null; auto_cloud_sync?: boolean };
   } | null> {
     try {
       const res = await fetch('/api/settings/keys');
@@ -1566,9 +1580,10 @@ export class BackendApiClient {
     gemini_api_key?: string;
     hf_token?: string;
     hf_dataset_repo?: string;
+    auto_cloud_sync?: boolean;
   }): Promise<{
     gemini: { is_set: boolean; masked_key: string; is_connected: boolean; error: string | null };
-    huggingface: { is_set: boolean; masked_token: string; repo_id: string; is_connected: boolean; error?: string | null };
+    huggingface: { is_set: boolean; masked_token: string; repo_id: string; is_connected: boolean; error?: string | null; auto_cloud_sync?: boolean };
   } | null> {
     try {
       const res = await fetch('/api/settings/keys', {
@@ -1640,7 +1655,13 @@ export class BackendApiClient {
         width: img.width || 0,
         height: img.height || 0,
         file_size_bytes: img.file_size_bytes || 0,
-        media_type: img.media_type === 'gif' || (img.original_url || '').toLowerCase().endsWith('.gif') ? 'gif' : 'photo',
+        media_type: getMediaCategory({
+          mediaType: img.media_type,
+          isAnimated: !!img.is_animated,
+          animationChecked: !!img.animation_checked,
+          rawOriginalUrl: img.original_url,
+          format: (img.format || '').toLowerCase() as ImageItem['format']
+        }) === 'gif' ? 'gif' : 'photo',
         filename: img.filename || `image_${idx + 1}.jpg`,
       }));
       return {

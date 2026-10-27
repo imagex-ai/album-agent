@@ -15,6 +15,7 @@ from PIL import Image
 
 from ..core.models import ValidationResult, ValidationVerdict
 from ..core.network_profiles import resolve_anti_hotlink_headers
+from ..core.media_classification import media_source_format
 
 
 class ImageValidator:
@@ -111,7 +112,7 @@ class ImageValidator:
                             )
 
                         content_type = response.headers.get("content-type", "").lower()
-                        is_video_url = any(candidate_url.lower().endswith(ext) for ext in (".mp4", ".webm", ".mov", ".mkv", ".m4v")) or ".m3u8" in candidate_url.lower()
+                        is_video_url = media_source_format(candidate_url) in ("mp4", "webm", "mov", "mkv", "m4v", "m3u8")
                         is_video_resource = (
                             "video/" in content_type
                             or "mpegurl" in content_type
@@ -148,6 +149,8 @@ class ImageValidator:
                                 break
 
                         extracted_palette = None
+                        is_anim = False
+                        animation_checked = False
                         # Special handling for Videos / HLS Streams
                         if is_video_resource:
                             v_txt = candidate_url.lower()
@@ -183,7 +186,8 @@ class ImageValidator:
                                 img = Image.open(io.BytesIO(body))
                                 width, height = img.size
                                 is_anim = getattr(img, "is_animated", False) or (getattr(img, "n_frames", 1) > 1)
-                                img_format = "gif" if is_anim else (img.format.lower() if img.format else "unknown")
+                                img_format = img.format.lower() if img.format else "unknown"
+                                animation_checked = True
                                 if not file_size:
                                     file_size = len(body)
                                 try:
@@ -252,6 +256,8 @@ class ImageValidator:
                             aspect_ratio=aspect_ratio,
                             aspect_ratio_diff=aspect_ratio_diff,
                             color_palette=extracted_palette,
+                            is_animated=is_anim,
+                            animation_checked=animation_checked,
                             reason="Validated successfully with HTTP 200, valid image header, and matched dimensions",
                             is_valid=True,
                         )
@@ -279,6 +285,7 @@ class ImageValidator:
             img = Image.open(io.BytesIO(raw))
             w, h = img.size
             fmt = img.format.lower() if img.format else "png"
+            is_anim = bool(getattr(img, "is_animated", False) or getattr(img, "n_frames", 1) > 1)
             if w < min_w or h < min_h:
                 return ValidationResult(
                     verdict=ValidationVerdict.REJECT,
@@ -306,6 +313,8 @@ class ImageValidator:
                 format=fmt,
                 file_size=len(raw),
                 color_palette=extracted_palette,
+                is_animated=is_anim,
+                animation_checked=True,
                 reason="Valid inline data URI image",
                 is_valid=True,
             )

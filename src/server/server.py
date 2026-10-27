@@ -56,6 +56,7 @@ from .video_service import video_service, sanitize_folder_name
 from .trash_service import trash_service
 
 from ..core.models import Album, AlbumImage, ResolutionMethod, TelemetryMetrics
+from ..core.media_classification import normalize_media_item, update_album_media_metadata, apply_image_animation, verify_media_animation, filter_album_media, media_category
 from ..core.color_extractor import (
     PALETTE_ENGINE_VERSION,
     extract_dominant_colors_from_bytes,
@@ -102,6 +103,12 @@ from ..core.network_profiles import (
 
 logger = logging.getLogger("agent_server")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+def is_auto_cloud_sync_enabled() -> bool:
+    from .video_service import is_auto_cloud_sync_enabled as _check
+    return _check()
 
 app = FastAPI(title="AI Album Intelligence Agent API")
 @app.on_event("startup")
@@ -313,8 +320,8 @@ def _load_jobs_from_disk(clear_zombies: bool = False):
     clear_zombies should only be True on initial server startup."""
     global _active_jobs, _startup_zombies_cleared
 
-    # --- Restore jobs.json from HF if local is missing ---
-    if not os.path.exists(JOBS_FILE) or os.path.getsize(JOBS_FILE) < 3:
+    # --- Restore jobs.json from HF if local is missing and auto-sync is enabled ---
+    if (not os.path.exists(JOBS_FILE) or os.path.getsize(JOBS_FILE) < 3) and is_auto_cloud_sync_enabled():
         try:
             from src.server.video_service import cloud_storage as _cs
             if _cs.is_connected():
@@ -484,7 +491,7 @@ def _save_jobs_to_disk(sync_hf: bool = False):
 
     try:
         now = time.time()
-        should_sync = sync_hf or (now - _last_hf_jobs_sync >= 300.0)
+        should_sync = sync_hf or (is_auto_cloud_sync_enabled() and (now - _last_hf_jobs_sync >= 300.0))
         if should_sync:
             try:
                 from src.server.video_service import cloud_storage as _cs
@@ -564,8 +571,10 @@ def sanitize_album_images(album: Album) -> Album:
     3. Detecta media_type='gif', is_animated=True e formato real (gif/webp).
     4. Computa has_gifs e tags ['gif', 'animado'].
     """
-    if not album or not getattr(album, "images", None):
+    if not album:
         return album
+    if not getattr(album, "images", None):
+        return update_album_media_metadata(album)
 
     cleaned_images = []
     canonical_seen = {}  # key -> index in cleaned_images
@@ -578,29 +587,22 @@ def sanitize_album_images(album: Album) -> Album:
         is_thumb_indicator = bool(re.search(r'(_\d+x\d+|_thumb\b|-thumb\b|_small\b|_240\b|_190x152\b)', orig, re.I))
 
         # Check if URL was a thumb or small jpg and can be upgraded
-        if (is_static_preview_upgradeable(orig + thumb) or "_296x1000" in (orig + thumb)) and ("_296x1000.gif" in (orig + thumb).lower() or "13_240.jpg" in orig.lower()):
+        preview_source = orig or thumb
+        if (is_static_preview_upgradeable(preview_source) or "_296x1000" in preview_source) and ("_296x1000.gif" in preview_source.lower() or "13_240.jpg" in orig.lower()):
             source_match = re.search(r'https?://[^\s"\']+/(\d+-[a-zA-Z0-9_\-]+)(?:_296x1000)?\.(gif|jpg|webp)', orig + " " + thumb)
             if source_match:
                 if "_296x1000" in (orig + thumb):
-                    upgraded_gif = (thumb or orig).replace("_296x1000.gif", ".gif").replace("_296x1000.jpg", ".gif")
-                    upgraded_webp = (thumb or orig).replace("_296x1000.gif", ".webp").replace("_296x1000.jpg", ".webp")
+                    upgraded_gif = preview_source.replace("_296x1000.gif", ".gif").replace("_296x1000.jpg", ".gif")
+                    upgraded_webp = preview_source.replace("_296x1000.gif", ".webp").replace("_296x1000.jpg", ".webp")
                     img.original_url = upgraded_gif
+                    img.animation_checked = False  # Replacement bytes have not been inspected.
                     img.thumbnail_url = thumb or upgraded_webp
                     img.format = "gif"
                     img.media_type = "gif"
                     img.is_animated = True
                     is_thumb_indicator = False
 
-        # Format detection
-        orig_lower = (img.original_url or "").lower()
-        is_gif = orig_lower.endswith(".gif") or (img.format or "").lower() == "gif" or img.media_type == "gif"
-        is_webp = orig_lower.endswith(".webp") or (img.format or "").lower() == "webp"
-        is_animated_media = is_gif or bool(img.is_animated) or ("webp" in orig_lower and (file_sz > 500000 or "anim" in orig_lower))
-
-        if is_animated_media:
-            img.media_type = "gif"
-            img.is_animated = True
-            img.format = "gif" if is_gif else "webp"
+        normalize_media_item(img)
 
         # Canonical deduplication: keep only full high-res original
         if can_key:
@@ -651,25 +653,20 @@ def sanitize_album_images(album: Album) -> Album:
 
     album.images = cleaned_images
 
-    # Metadata & Tags
-    has_gifs = any(i.is_animated or i.media_type == "gif" for i in album.images)
-    gif_count = sum(1 for i in album.images if i.is_animated or i.media_type == "gif")
+    return update_album_media_metadata(album)
 
-    if not isinstance(album.metadata, dict):
-        album.metadata = {}
 
-    album.metadata["has_gifs"] = has_gifs
-    album.metadata["gif_count"] = gif_count
-
-    if not hasattr(album, "tags") or album.tags is None:
-        album.tags = []
-    if has_gifs:
-        if "gif" not in album.tags:
-            album.tags.append("gif")
-        if "animado" not in album.tags:
-            album.tags.append("animado")
-
-    return album
+async def _finalize_extracted_media(album: Album, media_filter: str = "all") -> Album:
+    """Resolve uncertain animation containers for this new extraction only."""
+    album = sanitize_album_images(album)
+    semaphore = asyncio.Semaphore(6)
+    async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+        async def verify(item):
+            async with semaphore:
+                await verify_media_animation(item, client, referer=album.source_page,
+                                             local_root=ALBUMS_DIR, cache_dir=_IMAGE_CACHE_DIR)
+        await asyncio.gather(*(verify(item) for item in album.images))
+    return filter_album_media(album, media_filter)
 
 
 def _save_album_to_disk(album_id: str, album: Album):
@@ -740,15 +737,16 @@ def _save_album_to_disk(album_id: str, album: Album):
             json.dump(album_data, f, indent=2, ensure_ascii=False)
         logger.info(f"Persisted album to disk: {fpath}")
 
-        # Mirror album to HF in background thread
-        try:
-            import threading
-            from src.server.video_service import cloud_storage as _cs
-            def _sync_album():
-                _cs.upload_json(album_data, f"albums/{album_id}.json")
-            threading.Thread(target=_sync_album, daemon=True).start()
-        except Exception as e:
-            logger.warning(f"HF album sync failed: {e}")
+        # Mirror album to HF in background thread only if auto-sync is explicitly enabled
+        if is_auto_cloud_sync_enabled():
+            try:
+                import threading
+                from src.server.video_service import cloud_storage as _cs
+                def _sync_album():
+                    _cs.upload_json(album_data, f"albums/{album_id}.json")
+                threading.Thread(target=_sync_album, daemon=True).start()
+            except Exception as e:
+                logger.warning(f"HF album sync failed: {e}")
 
         if album_id in _active_jobs:
             _active_jobs[album_id]["status"] = "completed"
@@ -827,13 +825,15 @@ async def auto_migrate_palettes_in_background():
     """
     Background worker that checks loaded albums on disk.
     If an album palette_version differs from PALETTE_ENGINE_VERSION or images lack color_palette,
-    it automatically calculates the colors using Pillow and updates data/albums/{session_id}.json.
+    calculates colors for local images without downloading mass remote assets on startup unless AUTO_MIGRATE_PALETTES=true.
     Runs asynchronously with zero impact on user requests or mobile UI.
     """
     try:
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(5.0)
         if not os.path.exists(ALBUMS_DIR):
             return
+
+        enable_remote_fetch = os.getenv("AUTO_MIGRATE_PALETTES", "false").lower() in ("true", "1", "yes")
 
         async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
             for session_id, album in list(_completed_albums.items()):
@@ -848,22 +848,26 @@ async def auto_migrate_palettes_in_background():
                         if not getattr(img, "color_palette", None) or needs_migration:
                             u = img.thumbnail_url or img.original_url
                             if u:
-                                pal = await extract_palette_for_media_url(u, source_page=album.source_page, client=client)
-                                if pal:
-                                    img.color_palette = pal
-                                    modified = True
+                                is_local = "local://albums/" in u
+                                if is_local or enable_remote_fetch:
+                                    pal = await extract_palette_for_media_url(u, source_page=album.source_page, client=client)
+                                    if pal:
+                                        img.color_palette = pal
+                                        modified = True
 
                     if not getattr(album, "cover_color_palette", None) or needs_migration:
                         if album.images and getattr(album.images[0], "color_palette", None):
                             album.cover_color_palette = album.images[0].color_palette
                             modified = True
                         elif album.cover_image_url:
-                            c_pal = await extract_palette_for_media_url(album.cover_image_url, source_page=album.source_page, client=client)
-                            if c_pal:
-                                album.cover_color_palette = c_pal
-                                modified = True
+                            is_local = "local://albums/" in album.cover_image_url
+                            if is_local or enable_remote_fetch:
+                                c_pal = await extract_palette_for_media_url(album.cover_image_url, source_page=album.source_page, client=client)
+                                if c_pal:
+                                    album.cover_color_palette = c_pal
+                                    modified = True
 
-                    if modified or needs_migration:
+                    if modified or (needs_migration and not enable_remote_fetch):
                         if not isinstance(album.metadata, dict):
                             album.metadata = {}
                         album.metadata["palette_version"] = PALETTE_ENGINE_VERSION
@@ -895,7 +899,8 @@ def _load_albums_from_disk():
         _hf_restore_done = True
         try:
             from src.server.video_service import cloud_storage as _cs
-            if _cs.is_connected():
+            local_has_albums = os.path.exists(ALBUMS_DIR) and len(os.listdir(ALBUMS_DIR)) > 0
+            if _cs.is_connected() and (is_auto_cloud_sync_enabled() or not local_has_albums):
                 # 1. Restore Cloud/Render albums
                 cloud_paths = _cs.list_files_in_folder("albums")
                 for hf_path in cloud_paths:
@@ -3285,6 +3290,8 @@ async def _run_demonstration_task(session_id: str, req: DemonstrateRequest):
                 width=val_res.width if is_pass else cand.width,
                 height=val_res.height if is_pass else cand.height,
                 format=val_res.format if is_pass else "jpg",
+                is_animated=val_res.is_animated if is_pass else False,
+                animation_checked=val_res.animation_checked if is_pass else False,
                 file_size=val_res.file_size if is_pass else None,
                 resolution_method=resolution_method if is_pass else ResolutionMethod.NONE,
                 confidence=1.0 if is_pass else 0.0,
@@ -3746,6 +3753,7 @@ async def _run_ai_react_agent_task(session_id: str, req: AnalyzeRequest, semapho
 
             album.metadata["model_used"] = f"AutonomousReActAgent ({req.model_name})"
             album.metadata["engine_type"] = "ai_react"
+            album = await _finalize_extracted_media(album, req.media_type_filter or "all")
             target_f = getattr(req, "folder", "Geral") or "Geral"
             album.folder = target_f
             album.metadata["folder"] = target_f
@@ -3847,6 +3855,7 @@ async def _run_gemini_surgical_task(session_id: str, req: AnalyzeRequest, semaph
                 else "Surgical Scout (Heurística Determinística + Raio-X Físico)"
             )
             album.metadata["engine_type"] = "gemini_surgical_scout"
+            album = await _finalize_extracted_media(album, req.media_type_filter or "all")
             target_f = getattr(req, "folder", "Geral") or "Geral"
             album.folder = target_f
             album.metadata["folder"] = target_f
@@ -3942,6 +3951,7 @@ async def _run_gemini_layout_task(session_id: str, req: AnalyzeRequest, semaphor
 
             album.metadata["model_used"] = f"Gemini Layout Explorer ({gemini_model}) + Qwen Closer ({local_model})"
             album.metadata["engine_type"] = "gemini_layout_explorer"
+            album = await _finalize_extracted_media(album, req.media_type_filter or "all")
             target_f = getattr(req, "folder", "Geral") or "Geral"
             album.folder = target_f
             album.metadata["folder"] = target_f
@@ -4330,9 +4340,12 @@ async def _download_highest_video_task(
                                     file_size_bytes=total_written,
                                     source_origin="web"
                                 )
-                                # Upload automático para Hugging Face em background
-                                video_service._trigger_background_upload(vid_id, target_path, target_folder_name, fname)
-                                logger.info(f"Auto-saved highest quality ({rank}p, {total_written/1024/1024:.1f} MB) video to Gallery and queued for HF upload: {target_path}")
+                                # Upload para Hugging Face em background apenas se auto-sync ativado
+                                if is_auto_cloud_sync_enabled():
+                                    video_service._trigger_background_upload(vid_id, target_path, target_folder_name, fname)
+                                    logger.info(f"Auto-saved highest quality ({rank}p, {total_written/1024/1024:.1f} MB) video to Gallery and queued for HF upload: {target_path}")
+                                else:
+                                    logger.info(f"Auto-saved highest quality ({rank}p, {total_written/1024/1024:.1f} MB) video locally to Gallery: {target_path}")
                                 break
                             else:
                                 if os.path.exists(target_path):
@@ -5045,18 +5058,19 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
 
         album.metadata["model_used"] = req.model_name
         album.metadata["media_type_filter"] = req.media_type_filter or "all"
+        album = await _finalize_extracted_media(album, req.media_type_filter or "all")
         target_f = getattr(req, "folder", "Geral") or "Geral"
         album.folder = target_f
         album.metadata["folder"] = target_f
         _completed_albums[session_id] = album
         _save_album_to_disk(session_id, album)
 
-        is_vid_album = req.media_type_filter == "videos" or any(img.media_type == "video" for img in album.images)
+        is_vid_album = req.media_type_filter == "videos" or any(media_category(img) == "video" for img in album.images)
         media_label = "vídeos" if is_vid_album else "fotos"
 
         # Auto-save highest quality extracted video to the Video Gallery in background (non-blocking for SSE and client)
         if (req.media_type_filter == "videos" or is_vid_album) and album.images:
-            vid_items = [img for img in album.images if img.media_type == "video" and (img.video_stream_url or img.original_url)]
+            vid_items = [img for img in album.images if media_category(img) == "video" and (img.video_stream_url or img.original_url)]
             if vid_items:
                 def _v_rank(it: AlbumImage) -> int:
                     txt = ((it.video_stream_url or "") + " " + (it.original_url or "") + " " + (it.title or "")).lower()
@@ -5637,9 +5651,7 @@ async def list_albums(
     if filter == "gifs" or media_type == "gif":
         result = [
             s for s in result
-            if s.get("metadata", {}).get("has_gifs")
-            or "gif" in [str(t).lower() for t in s.get("tags", [])]
-            or any(i.get("media_type") == "gif" or i.get("is_animated") for i in s.get("images", []))
+            if s.get("has_gifs", False)
         ]
 
     return result
@@ -5815,6 +5827,7 @@ async def sync_album_metadata_endpoint(session_id: str):
     if not album:
         raise HTTPException(status_code=404, detail="Album not found")
 
+    album = sanitize_album_images(album)
     has_videos = any(getattr(img, "media_type", None) == "video" for img in album.images)
     if has_videos:
         async with _stream_refresh_semaphore:
@@ -5895,6 +5908,7 @@ async def sync_album_metadata_endpoint(session_id: str):
                             c_resp = await client.head(candidate_hd, headers=resolve_anti_hotlink_headers(candidate_hd, referer=img_source_ref))
                             if c_resp.status_code in (200, 206):
                                 img.original_url = candidate_hd
+                                img.animation_checked = False
                                 img.resolution_method = ResolutionMethod.VERIFIED_CDN_CANDIDATE
                                 img.validation_status = "PASS"
                                 repaired_link_count += 1
@@ -5902,6 +5916,8 @@ async def sync_album_metadata_endpoint(session_id: str):
                         except Exception:
                             pass
 
+                await verify_media_animation(img, client, referer=img_source_ref,
+                                             local_root=ALBUMS_DIR, cache_dir=_IMAGE_CACHE_DIR)
                 # 2. Obter tamanho em bytes via HEAD ou Range
                 # Detecta se a imagem atualmente possui anomalia física de tamanho (< 20KB para foto UHD)
                 curr_sz = getattr(img, "file_size", 0) or 0
@@ -6165,23 +6181,17 @@ async def delete_album(session_id: str):
     if session_id not in _completed_albums:
         _load_albums_from_disk()
     
-    summary = {}
-    if session_id in _completed_albums:
-        summary = AgentDebugger.get_ui_summary(_completed_albums[session_id])
-        del _completed_albums[session_id]
-        global _summaries_dirty
-        _summaries_dirty = True
-        _disk_album_mtimes.pop(f"{session_id}.json", None)
-
+    if session_id not in _completed_albums:
+        raise HTTPException(status_code=404, detail="Album not found")
+    summary = AgentDebugger.get_ui_summary(_completed_albums[session_id])
     trash_item = trash_service.move_album_to_trash(session_id, summary)
-    
-    # Remove o arquivo JSON do disco local caso ainda exista
-    fpath = os.path.join(ALBUMS_DIR, f"{session_id}.json")
-    if os.path.exists(fpath):
-        try:
-            os.remove(fpath)
-        except Exception:
-            pass
+    if not trash_item:
+        raise HTTPException(status_code=500, detail="Could not move album to trash")
+
+    del _completed_albums[session_id]
+    global _summaries_dirty
+    _summaries_dirty = True
+    _disk_album_mtimes.pop(f"{session_id}.json", None)
 
     return {"session_id": session_id, "deleted": True, "trash_item": trash_item}
 
@@ -6670,7 +6680,8 @@ async def _run_video_download_task(
             logger.debug(f"[VideoDownloader] Falha na auto-detecção de highlights: {hl_err}")
 
         filename = os.path.basename(target_path)
-        video_service._trigger_background_upload(vid_id, target_path, folder_name, filename)
+        if is_auto_cloud_sync_enabled():
+            video_service._trigger_background_upload(vid_id, target_path, folder_name, filename)
 
         dur = round(time.time() - start_time, 1)
         if job_id in _active_jobs:
@@ -6684,7 +6695,7 @@ async def _run_video_download_task(
             _active_jobs[job_id]["progress"]["total"] = total_written
             _active_jobs[job_id]["progress"]["status"] = f"Video saved to folder {folder_name}! ({total_written / (1024 * 1024):.1f} MB)"
             _active_jobs[job_id]["video_id"] = vid_id
-            _save_jobs_to_disk(sync_hf=True)
+            _save_jobs_to_disk(sync_hf=is_auto_cloud_sync_enabled())
         logger.info(f"[VideoDownloader] Sucesso: {target_path} ({total_written / (1024 * 1024):.1f} MB em {dur}s)")
 
     except asyncio.CancelledError:
@@ -8496,11 +8507,13 @@ async def upload_photo_album(
         # Descobrir dimensões e paleta de cores dominante com Pillow
         width, height = 1920, 1080
         color_palette = None
+        animation_info = None
         try:
             from PIL import Image as PILImage
             from ..core.color_extractor import extract_dominant_colors_from_pil
             with PILImage.open(target_path) as im:
                 width, height = im.size
+                animation_info = ((im.format or "").lower(), bool(getattr(im, "is_animated", False) or getattr(im, "n_frames", 1) > 1))
                 color_palette = extract_dominant_colors_from_pil(im)
         except Exception:
             pass
@@ -8515,7 +8528,9 @@ async def upload_photo_album(
             width=width,
             height=height,
             file_size=file_size,
-            format=ext.lstrip(".").upper(),
+            format=animation_info[0] if animation_info else ext.lstrip(".").lower(),
+            is_animated=animation_info[1] if animation_info else False,
+            animation_checked=animation_info is not None,
             resolution_method=ResolutionMethod.NONE,
             validation_status="PASS",
             color_palette=color_palette,
@@ -8718,6 +8733,7 @@ class UpdateKeysRequest(BaseModel):
     gemini_api_key: Optional[str] = None
     hf_token: Optional[str] = None
     hf_dataset_repo: Optional[str] = None
+    auto_cloud_sync: Optional[bool] = None
 
 
 @app.get("/api/settings/keys")
@@ -8747,6 +8763,7 @@ async def get_keys_status():
     # Test Hugging Face live
     from src.server.video_service import cloud_storage
     hf_connected, hf_error = cloud_storage.get_connection_status()
+    auto_cloud_sync = is_auto_cloud_sync_enabled()
 
     return {
         "gemini": {
@@ -8760,7 +8777,8 @@ async def get_keys_status():
             "masked_token": _mask_secret(raw_hf),
             "repo_id": raw_repo or "",
             "is_connected": hf_connected,
-            "error": hf_error
+            "error": hf_error,
+            "auto_cloud_sync": auto_cloud_sync
         }
     }
 
@@ -8803,6 +8821,17 @@ async def update_keys(req: UpdateKeysRequest):
     if req.hf_dataset_repo is not None and req.hf_dataset_repo.strip():
         clean_repo = req.hf_dataset_repo.strip()
         os.environ["HF_DATASET_REPO"] = clean_repo
+        env_lines["HF_DATASET_REPO"] = clean_repo
+        from src.server.video_service import cloud_storage
+        cloud_storage.repo_id = clean_repo
+        cloud_storage._api = None
+        updated = True
+
+    if req.auto_cloud_sync is not None:
+        val = "true" if req.auto_cloud_sync else "false"
+        os.environ["AUTO_CLOUD_SYNC"] = val
+        env_lines["AUTO_CLOUD_SYNC"] = val
+        updated = True
         env_lines["HF_DATASET_REPO"] = clean_repo
         from src.server.video_service import cloud_storage
         cloud_storage.repo_id = clean_repo

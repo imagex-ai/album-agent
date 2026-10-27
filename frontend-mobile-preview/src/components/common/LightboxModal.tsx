@@ -26,6 +26,7 @@ import { useAppStore } from '../../store/useAppStore';
 import { formatFileSize } from '../../utils/formatters';
 import { translations } from '../../i18n/translations';
 import { extractDominantColors } from '../../services/colorExtractor';
+import { getMediaCategory, getMediaExtension, isVideoMedia } from '../../utils/mediaClassification';
 
 export const LightboxModal: React.FC = () => {
   const {
@@ -253,23 +254,11 @@ export const LightboxModal: React.FC = () => {
   const albumImages = lightboxAlbum.images || [];
   const currentIndex = albumImages.findIndex(i => i.id === lightboxImage.id);
 
-  const isVideoItem =
-    lightboxImage.mediaType === 'video' ||
-    !!lightboxImage.videoUrl ||
-    !!(lightboxImage as any).videoStreamUrl ||
-    !!(lightboxImage as any).is_video ||
-    /\.(mp4|webm|m4v|mov)(\?|$)/i.test(lightboxImage.originalUrl || '') ||
-    (lightboxImage.originalUrl || '').includes('/stream');
+  const isVideoItem = isVideoMedia(lightboxImage);
 
   const videoSrc = lightboxImage.videoUrl || (lightboxImage as any).videoStreamUrl || lightboxImage.originalUrl;
 
-  const isGifItem =
-    lightboxImage.mediaType === 'gif' ||
-    lightboxImage.isAnimated ||
-    lightboxImage.format === 'gif' ||
-    lightboxImage.format === 'webp' ||
-    /\.(gif|webp)(\?|$)/i.test(lightboxImage.originalUrl || '') ||
-    /\.(gif|webp)(\?|$)/i.test(lightboxImage.thumbnailUrl || '');
+  const isGifItem = getMediaCategory(lightboxImage) === 'gif';
 
   const ambientBgUrl = isVideoItem
     ? (lightboxImage.thumbnailUrl || lightboxImage.rawThumbnailUrl)
@@ -376,7 +365,7 @@ export const LightboxModal: React.FC = () => {
 
   const handleDownload = () => {
     const link = document.createElement('a');
-    const fileExt = isVideoItem ? 'mp4' : isGifItem ? (lightboxImage.format || 'gif') : 'jpg';
+    const fileExt = getMediaExtension(lightboxImage);
     link.href = isVideoItem ? videoSrc : (lightboxImage.originalUrl || lightboxImage.rawOriginalUrl || lightboxImage.thumbnailUrl);
     link.download = `${lightboxImage.title || (isVideoItem ? 'video' : isGifItem ? 'animacao' : 'original-image')}.${fileExt}`;
     link.target = '_blank';
@@ -433,7 +422,7 @@ export const LightboxModal: React.FC = () => {
                   {lightboxImage.title}
                 </h3>
                 <p className="text-[10px] sm:text-[11px] text-slate-400 font-mono truncate">
-                  {currentIndex + 1} de {(lightboxAlbum.images || []).length} • {lightboxImage.width && lightboxImage.height ? `${lightboxImage.width}×${lightboxImage.height}` : 'Dim. N/D'} ({lightboxImage.aspectRatio || 'auto'}) • {formatFileSize(lightboxImage.fileSizeBytes)} • <span className={isVideoItem ? "text-violet-400 font-bold" : isGifItem ? "text-amber-400 font-bold" : "text-emerald-400 font-bold"}>{isVideoItem ? t.badgeVideo : isGifItem ? t.badgeGif : t.badgeOriginal}</span>
+                  {currentIndex + 1} de {(lightboxAlbum.images || []).length} • {lightboxImage.width && lightboxImage.height ? `${lightboxImage.width}×${lightboxImage.height}` : 'Dim. N/D'} ({lightboxImage.aspectRatio || 'auto'}) • {formatFileSize(lightboxImage.fileSizeBytes)} • <span className={isGifItem ? "text-amber-400 font-bold" : isVideoItem ? "text-violet-400 font-bold" : "text-emerald-400 font-bold"}>{isGifItem ? t.badgeGif : isVideoItem ? t.badgeVideo : t.badgeOriginal}</span>
                 </p>
               </div>
             </div>
@@ -622,9 +611,9 @@ export const LightboxModal: React.FC = () => {
               >
                 Seu navegador não suporta reprodução deste vídeo.
               </video>
-              <div className="absolute top-3 left-3 px-2.5 py-1 rounded-xl bg-black/80 backdrop-blur-md text-[10px] font-mono text-violet-300 font-bold border border-violet-500/40 shadow-lg pointer-events-none flex items-center gap-1.5 z-20">
-                <Play size={12} className="fill-violet-400" />
-                <span>VÍDEO ({lightboxImage.width && lightboxImage.height ? `${lightboxImage.width}×${lightboxImage.height}` : 'HD'})</span>
+              <div className={`absolute top-3 left-3 px-2.5 py-1 rounded-xl bg-black/80 backdrop-blur-md text-[10px] font-mono font-bold border shadow-lg pointer-events-none flex items-center gap-1.5 z-20 ${isGifItem ? 'text-amber-300 border-amber-500/40' : 'text-violet-300 border-violet-500/40'}`}>
+                <Play size={12} className={isGifItem ? 'fill-amber-400 text-amber-400' : 'fill-violet-400'} />
+                <span>{isGifItem ? t.badgeGif : t.badgeVideo} ({lightboxImage.width && lightboxImage.height ? `${lightboxImage.width}×${lightboxImage.height}` : 'HD'})</span>
               </div>
             </div>
           ) : (

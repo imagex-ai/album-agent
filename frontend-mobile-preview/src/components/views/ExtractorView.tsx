@@ -29,6 +29,7 @@ import { translations } from '../../i18n/translations';
 import { AiEngineSelector } from '../common/AiEngineSelector';
 import { FolderSelectModal } from '../common/FolderSelectModal';
 import { IconBadge } from '../common/IconBadge';
+import { getMediaCategory } from '../../utils/mediaClassification';
 
 export const ExtractorView: React.FC = () => {
   const {
@@ -102,13 +103,22 @@ export const ExtractorView: React.FC = () => {
     );
   };
 
+  // A selected media filter is an instruction. URL hints only specialize "all",
+  // and a mixed batch must retain all media rather than becoming video-only.
+  const getEffectiveMediaType = (urls: string[]): MediaExtractFilter => {
+    if (mediaTypeFilter !== 'all') return mediaTypeFilter;
+    return urls.length > 0 && urls.every(isVideoKeyword) ? 'videos' : 'all';
+  };
+  const folderModalMediaType = getEffectiveMediaType(
+    folderModalState.mode === 'batch'
+      ? batchUrls.split('\n').map(url => url.trim()).filter(Boolean)
+      : [folderModalState.targetUrl || singleUrl].filter(Boolean)
+  );
+
   const handleSetSingleUrl = (val: string) => {
     setSingleUrl(val);
     if (typeof window !== 'undefined') {
       try { localStorage.setItem('imagex_extractor_single_url', val); } catch (_) {}
-    }
-    if (val && isVideoKeyword(val) && mediaTypeFilter !== 'videos') {
-      setMediaTypeFilter('videos');
     }
   };
   const handleSetBatchUrls = (val: string) => {
@@ -154,8 +164,7 @@ export const ExtractorView: React.FC = () => {
         message: isEn ? `Starting extraction [${(activeAiEngine || "gemini_layout_explorer").toUpperCase()}] with ${settings.aiModel} on ${targetUrl} (Folder: ${folder})...` : `Iniciando extração [${(activeAiEngine || "gemini_layout_explorer").toUpperCase()}] com ${settings.aiModel} em ${targetUrl} (Pasta: ${folder})...`
       });
 
-      const isVid = mediaTypeFilter === 'videos' || isVideoKeyword(targetUrl);
-      const effectiveMediaType = isVid ? 'videos' : mediaTypeFilter;
+      const effectiveMediaType = getEffectiveMediaType([targetUrl]);
 
       const res = await backendApi.startExtraction(
         targetUrl,
@@ -221,9 +230,17 @@ export const ExtractorView: React.FC = () => {
               const safeThumb = rawThumb.startsWith('http')
                 ? `/api/proxy-image?url=${encodeURIComponent(rawThumb)}&referer=${encodeURIComponent(targetUrl || rawThumb)}`
                 : rawThumb;
-              const isVideoItem = event.image?.media_type === 'video' || event.media_type === 'video';
-              const isGifItem = event.image?.media_type === 'gif' || event.media_type === 'gif';
-              const mediaPrefix = isVideoItem ? (isEn ? "Video" : "Vídeo") : isGifItem ? "GIF" : (isEn ? "Photo" : "Foto");
+              const eventMedia = event.image || event;
+              const mediaCategory = getMediaCategory({
+                mediaType: eventMedia.media_type,
+                isAnimated: eventMedia.is_animated,
+                animationChecked: eventMedia.animation_checked,
+                format: eventMedia.format,
+                originalUrl: rawOrig,
+                rawOriginalUrl: rawOrig,
+                videoStreamUrl: eventMedia.video_stream_url
+              });
+              const mediaPrefix = mediaCategory === 'gif' ? "GIF" : mediaCategory === 'video' ? (isEn ? "Video" : "Vídeo") : (isEn ? "Photo" : "Foto");
               const isPass = event.validation_status === 'PASS' || event.image?.validation_status === 'PASS';
               const isNoise = event.image?.classification === 'banner_noise' || event.validation_status === 'REJECTED';
               const dims = event.dimensions || (event.image?.width ? `${event.image.width}x${event.image.height}` : 'Original');
@@ -264,18 +281,23 @@ export const ExtractorView: React.FC = () => {
             }
           },
           (completedAlbum) => {
-            const isVideoMode = mediaTypeFilter === 'videos' || completedAlbum.images.some(i => i.mediaType === 'video');
-            const videoCount = completedAlbum.images.filter(i => i.mediaType === 'video').length;
+            const isVideoMode = effectiveMediaType === 'videos' || completedAlbum.images.some(i => getMediaCategory(i) === 'video');
+            const videoCount = completedAlbum.images.filter(i => getMediaCategory(i) === 'video').length;
 
-            const finalMarks = completedAlbum.images.map((img, i) => ({
-              id: i + 1,
-              thumbnailUrl: img.thumbnailUrl,
-              resolvedOriginalUrl: img.originalUrl,
-              label: `${img.title || (img.mediaType === 'video' ? `Vídeo #${i+1}` : `Foto #${i+1}`)} (${img.width > 0 ? `${img.width}x${img.height}` : 'HD'})`,
-              type: 'album_item' as const,
-              confidence: 1.0,
-              box: { top: 0, left: 0, width: 200, height: 200 }
-            }));
+            const finalMarks = completedAlbum.images.map((img, i) => {
+              const category = getMediaCategory(img);
+              const prefix = category === 'gif' ? 'GIF' : category === 'video' ? (isEn ? 'Video' : 'Vídeo') : (isEn ? 'Photo' : 'Foto');
+              const hasCustomTitle = img.title && !/^(vídeo|video|foto|photo|imagem|image|gif)\s*#?\d+$/i.test(img.title.trim());
+              return {
+                id: i + 1,
+                thumbnailUrl: img.thumbnailUrl,
+                resolvedOriginalUrl: img.originalUrl,
+                label: `${hasCustomTitle ? img.title : `${prefix} #${i+1}`} (${img.width > 0 ? `${img.width}x${img.height}` : 'HD'})`,
+                type: 'album_item' as const,
+                confidence: 1.0,
+                box: { top: 0, left: 0, width: 200, height: 200 }
+              };
+            });
 
             useAppStore.setState({
               setOfMarks: finalMarks,
@@ -302,7 +324,7 @@ export const ExtractorView: React.FC = () => {
             } else {
               addNotification({
                 title: t.albumNotificationTitle || "Album Extracted Successfully!",
-                message: `"${completedAlbum.title}" com ${completedAlbum.images.length} fotos salvas em disco.`,
+                message: isEn ? `"${completedAlbum.title}" with ${completedAlbum.images.length} media item(s) saved to the album.` : `"${completedAlbum.title}" com ${completedAlbum.images.length} item(ns) de mídia salvo(s) no álbum.`,
                 type: 'success',
                 linkViewId: 'album-detail',
                 linkAlbumId: completedAlbum.id
@@ -345,8 +367,7 @@ export const ExtractorView: React.FC = () => {
     setIsExtracting(true);
     soundEffects.click(settings.soundEnabled);
     if (backendOnline) {
-      const hasVid = mediaTypeFilter === 'videos' || urls.some(u => isVideoKeyword(u));
-      const effectiveMediaType = hasVid ? 'videos' : mediaTypeFilter;
+      const effectiveMediaType = getEffectiveMediaType(urls);
 
       const batchJobs = await backendApi.startBatchExtraction(
         urls,
@@ -403,7 +424,7 @@ export const ExtractorView: React.FC = () => {
 
   const handleInitiateSingleExtraction = (targetUrl: string) => {
     if (!targetUrl.trim()) return;
-    const isVid = mediaTypeFilter === 'videos' || isVideoKeyword(targetUrl);
+    const isVid = getEffectiveMediaType([targetUrl]) === 'videos';
     if (settings.askFolderOnSave) {
       setFolderModalState({
         isOpen: true,
@@ -419,7 +440,7 @@ export const ExtractorView: React.FC = () => {
   const handleInitiateBatchExtraction = () => {
     const urls = batchUrls.split('\n').map(u => u.trim()).filter(Boolean);
     if (urls.length === 0) return;
-    const hasVid = mediaTypeFilter === 'videos' || urls.some(u => isVideoKeyword(u));
+    const hasVid = getEffectiveMediaType(urls) === 'videos';
     if (settings.askFolderOnSave) {
       setFolderModalState({
         isOpen: true,
@@ -684,17 +705,17 @@ export const ExtractorView: React.FC = () => {
           }
         }}
         existingFolders={
-          (mediaTypeFilter === 'videos' || (folderModalState.targetUrl && isVideoKeyword(folderModalState.targetUrl)))
+          folderModalMediaType === 'videos'
             ? videoFolders.map(f => f.name)
             : albumFolders.map(f => f.name)
         }
         currentFolder={
-          (mediaTypeFilter === 'videos' || (folderModalState.targetUrl && isVideoKeyword(folderModalState.targetUrl)))
+          folderModalMediaType === 'videos'
             ? (settings.defaultVideoFolder || (isEn ? 'Extracted' : 'Extraídos'))
             : (settings.defaultAlbumFolder || (isEn ? 'General' : 'Geral'))
         }
         mediaType={
-          (mediaTypeFilter === 'videos' || (folderModalState.targetUrl && isVideoKeyword(folderModalState.targetUrl)))
+          folderModalMediaType === 'videos'
             ? 'video'
             : 'album'
         }

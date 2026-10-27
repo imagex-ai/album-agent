@@ -9,6 +9,7 @@ import sys
 import shutil
 import json
 import time
+import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
@@ -71,19 +72,27 @@ class TrashService:
         return {}
 
     def _save_meta(self, data: Dict[str, Any]):
+        tmp_path = f"{self.trash_meta_file}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
             os.makedirs(os.path.dirname(self.trash_meta_file), exist_ok=True)
-            with open(self.trash_meta_file, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp_path, self.trash_meta_file)
         except Exception as e:
             print(f"Error saving trash metadata: {e}")
+            return False
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
-        # Espelha metadados da lixeira no Hugging Face em thread desacoplada (com throttling)
+        # Espelha metadados da lixeira no Hugging Face apenas se auto-sync estiver ativo
         try:
-            import threading
-            from .video_service import cloud_storage
+            from .video_service import cloud_storage, is_auto_cloud_sync_enabled
             now = time.time()
-            if cloud_storage.is_connected() and (now - getattr(self, "_last_hf_sync", 0.0) >= 5.0):
+            if is_auto_cloud_sync_enabled() and cloud_storage.is_connected() and (now - getattr(self, "_last_hf_sync", 0.0) >= 30.0):
                 self._last_hf_sync = now
                 snapshot = dict(data)
                 def _sync_trash():
@@ -92,6 +101,7 @@ class TrashService:
                 t.start()
         except Exception as e:
             print(f"[TrashService] Error syncing trash with HF: {e}")
+        return True
 
     def list_all_items(self) -> List[Dict[str, Any]]:
         """Returns all items in the trash sorted newest deletion first."""
@@ -227,14 +237,11 @@ class TrashService:
         src_path = os.path.join(self.albums_dir, f"{session_id}.json")
         dst_path = os.path.join(self.trash_albums_dir, f"{session_id}.json")
 
-        if os.path.exists(src_path):
-            try:
-                shutil.move(src_path, dst_path)
-            except Exception as e:
-                print(f"Error moving album to trash: {e}")
+        if not os.path.isfile(src_path) or os.path.exists(dst_path):
+            return None
 
         trash_id = f"trash_album_{session_id}"
-        total_size = sum(img.get("file_size", 0) for img in album_summary.get("images", []))
+        total_size = sum(img.get("file_size") or 0 for img in album_summary.get("images", []))
         cover = album_summary.get("cover_image_url") or ""
         if not cover and album_summary.get("images"):
             cover = album_summary["images"][0].get("thumbnail_url") or album_summary["images"][0].get("original_url") or ""
@@ -257,7 +264,17 @@ class TrashService:
 
         meta = self._load_meta()
         meta[trash_id] = item
-        self._save_meta(meta)
+        try:
+            shutil.move(src_path, dst_path)
+        except Exception as e:
+            print(f"Error moving album to trash: {e}")
+            return None
+        if self._save_meta(meta) is False:
+            try:
+                shutil.move(dst_path, src_path)
+            except Exception as e:
+                print(f"Error rolling back album move; recoverable copy remains at {dst_path}: {e}")
+            return None
         return item
 
     def move_photos_to_trash(
@@ -314,6 +331,7 @@ class TrashService:
 
         item_type = item.get("type")
         item_meta = item.get("metadata", {})
+        restored_album_paths = None
 
         if item_type == "video":
             # Restore video file
@@ -378,17 +396,21 @@ class TrashService:
             src_path = os.path.join(self.trash_albums_dir, f"{session_id}.json")
             dst_path = os.path.join(self.albums_dir, f"{session_id}.json")
 
-            if os.path.exists(src_path):
-                try:
-                    shutil.move(src_path, dst_path)
-                except Exception as e:
-                    print(f"Error restoring album file: {e}")
-                    return None
+            if not os.path.isfile(src_path) or os.path.exists(dst_path):
+                return None
+            try:
+                shutil.move(src_path, dst_path)
+                restored_album_paths = (src_path, dst_path)
+            except Exception as e:
+                print(f"Error restoring album file: {e}")
+                return None
 
         elif item_type == "photo":
             # Restore photo into album JSON
             session_id = item_meta.get("session_id")
             photo_data = item_meta.get("photo_data")
+            if not session_id or not isinstance(photo_data, dict) or not photo_data:
+                return None
             if session_id and photo_data:
                 album_path = os.path.join(self.albums_dir, f"{session_id}.json")
                 # If album is not in data/albums/, check if it's currently in trash
@@ -397,25 +419,50 @@ class TrashService:
                     if os.path.exists(trashed_album_path):
                         album_path = trashed_album_path
 
+                if not os.path.isfile(album_path):
+                    return None
                 if os.path.exists(album_path):
                     try:
                         with open(album_path, "r", encoding="utf-8") as f:
                             alb = json.load(f)
                         images = alb.get("images", [])
-                        already_present = any(img.get("id") == photo_data.get("id") for img in images)
+                        # Empty IDs are not identities: extracted/uploaded images may only
+                        # carry a candidate ID or their source URL.
+                        identity_field = next((field for field in (
+                            "id", "candidate_id", "original_url", "thumbnail_url"
+                        ) if photo_data.get(field)), None)
+                        already_present = bool(identity_field) and any(
+                            img.get(identity_field) == photo_data[identity_field] for img in images
+                        )
                         if not already_present:
                             images.append(photo_data)
                             for new_p, img in enumerate(images):
                                 img["position"] = new_p + 1
                             alb["images"] = images
-                            with open(album_path, "w", encoding="utf-8") as f:
-                                json.dump(alb, f, indent=2, ensure_ascii=False)
+                            tmp_path = f"{album_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+                            try:
+                                with open(tmp_path, "w", encoding="utf-8") as f:
+                                    json.dump(alb, f, indent=2, ensure_ascii=False)
+                                os.replace(tmp_path, album_path)
+                            finally:
+                                if os.path.exists(tmp_path):
+                                    os.remove(tmp_path)
                     except Exception as e:
                         print(f"Error inserting restored photo into album: {e}")
+                        return None
 
         # Remove from trash metadata
         del meta[trash_id]
-        self._save_meta(meta)
+        if self._save_meta(meta) is False:
+            if restored_album_paths:
+                trash_path, album_path = restored_album_paths
+                try:
+                    if os.path.exists(trash_path):
+                        raise FileExistsError(trash_path)
+                    shutil.move(album_path, trash_path)
+                except Exception as e:
+                    print(f"Error rolling back album restore; recoverable copy remains at {album_path}: {e}")
+            return None
         return item
 
     def restore_multiple(self, trash_ids: List[str]) -> List[str]:

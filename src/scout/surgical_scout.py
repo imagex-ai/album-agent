@@ -29,6 +29,7 @@ except ImportError:
     genai = None
 
 from ..core.models import Album, AlbumImage, ResolutionMethod, TelemetryMetrics
+from ..core.media_classification import image_header_facts, media_source_format
 from ..core.network_profiles import get_preseeded_session_cookies, is_static_preview_upgradeable
 from .knowledge_bridge import ScoutKnowledgeBridge, extract_base_domain
 
@@ -173,15 +174,12 @@ def get_true_image_url(url: str, session: requests.Session, referer: str) -> Opt
                     final_url = str(res.url)
                     img_w, img_h = parse_image_dimensions(chunk)
                     meta_dict: Dict[str, Any] = {"file_size": file_sz}
+                    meta_dict.update(image_header_facts(chunk, complete=file_sz == len(chunk)))
                     if is_gif:
-                        meta_dict["format"] = "gif"
-                        meta_dict["is_animated"] = True
-                        meta_dict["media_type"] = "gif"
+                        meta_dict.setdefault("format", "gif")
+                        meta_dict.setdefault("is_animated", True)
                     elif is_webp:
-                        meta_dict["format"] = "webp"
-                        if file_sz and file_sz > 500000:
-                            meta_dict["is_animated"] = True
-                            meta_dict["media_type"] = "gif"
+                        meta_dict.setdefault("format", "webp")
                     if img_w and img_h:
                         meta_dict["width"] = img_w
                         meta_dict["height"] = img_h
@@ -712,6 +710,9 @@ HTML DA AMOSTRA:
                 "file_size": meta.get("file_size"),
                 "width": meta.get("width") or 0,
                 "height": meta.get("height") or 0,
+                "format": meta.get("format"),
+                "is_animated": meta.get("is_animated", False),
+                "animation_checked": meta.get("animation_checked", False),
                 "provenance_chain": {
                     "source_page": source_page,
                     "viewer_page": target_url,
@@ -974,11 +975,8 @@ HTML DA AMOSTRA:
                             is_thumb_indicator = bool(re.search(r'(_\d+x\d+|_thumb\b|-thumb\b|_small\b|_240\b|_190x152\b)', orig, re.I))
 
                             # Format detection
-                            orig_lower = orig.lower()
-                            is_gif = orig_lower.endswith(".gif") or "gif" in str(record.get("format", "")).lower()
-                            is_webp = orig_lower.endswith(".webp") or "webp" in str(record.get("format", "")).lower()
-                            is_animated_media = is_gif or bool(record.get("is_animated")) or ("webp" in orig_lower and file_sz > 500000)
-                            detected_format = "gif" if is_gif else ("webp" if is_webp else "jpg")
+                            detected_format = record.get("format") or media_source_format(orig) or "jpg"
+                            is_animated_media = bool(record.get("is_animated")) or (detected_format == "gif" and not record.get("animation_checked"))
                             media_t = "gif" if is_animated_media else "image"
 
                             # Canonical Deduplication: never allow thumbnail and original of same media
@@ -998,6 +996,7 @@ HTML DA AMOSTRA:
                                             ri.format = detected_format
                                             ri.media_type = media_t
                                             ri.is_animated = is_animated_media
+                                            ri.animation_checked = bool(record.get("animation_checked"))
                                             break
                                     continue
                                 # If existing is already original or incoming is a duplicate thumbnail, discard incoming
@@ -1023,6 +1022,7 @@ HTML DA AMOSTRA:
                                     format=detected_format,
                                     media_type=media_t,
                                     is_animated=is_animated_media,
+                                    animation_checked=bool(record.get("animation_checked")),
                                     resolution_method=ResolutionMethod.VERIFIED_CDN_CANDIDATE,
                                     confidence=1.0,
                                     validation_status="PASS",

@@ -64,7 +64,7 @@ export interface ImageItem {
   fileSizeBytes: number;
   aspectRatio: string;
   megapixels: number;
-  format: 'jpeg' | 'png' | 'webp' | 'avif' | 'gif';
+  format: 'jpeg' | 'png' | 'apng' | 'webp' | 'avif' | 'gif' | 'mp4' | 'webm' | 'mov' | 'mkv' | 'm4v' | 'm3u8' | 'avi';
   isResolvedOriginal: boolean;
   status: 'resolved' | 'unresolved' | 'failed';
   aestheticScore: number; // 0 to 10
@@ -90,7 +90,10 @@ export interface ImageItem {
   // Media type fields (for video/GIF extraction)
   mediaType?: 'image' | 'video' | 'gif';
   isAnimated?: boolean;
+  animationChecked?: boolean;
   videoUrl?: string;
+  videoStreamUrl?: string;
+  sourcePage?: string;
   posterUrl?: string;
   durationSeconds?: number;
   candidateId?: string; // Video candidate id for individual stream refresh

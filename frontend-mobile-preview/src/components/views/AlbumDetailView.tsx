@@ -36,6 +36,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { backendApi } from '../../services/realApi';
 import { translations } from '../../i18n/translations';
 import { formatFileSize } from '../../utils/formatters';
+import { getAlbumMediaSummary, getMediaCategory, getMediaExtension, isVideoMedia } from '../../utils/mediaClassification';
 import { FolderSelectModal } from '../common/FolderSelectModal';
 import { SavedRedirectBadge } from '../common/SavedRedirectBadge';
 import { CHROMATIC_PALETTE_COLORS, matchesPaletteFuzzy, colorPaletteCache } from '../../services/colorExtractor';
@@ -255,10 +256,10 @@ const AlbumMediaCard: React.FC<{
   const isEn = useAppStore((state) => state.settings.language === 'en-US');
   const [localDims, setLocalDims] = useState<{ w: number; h: number } | null>(null);
 
-  const isVideo = img.mediaType === 'video' || !!img.videoUrl || !!(img as any).videoStreamUrl || !!(img as any).is_video || /\.(mp4|webm|m4v)(\?|$)/i.test(img.originalUrl || '');
+  const isVideo = isVideoMedia(img);
   const rawVideoLink = img.videoUrl || (img as any).videoStreamUrl || (isVideo ? img.originalUrl : undefined);
   const videoLink = getProxiedStreamUrl(rawVideoLink, (img as any).sourcePage || album.sourceUrl);
-  const isGif = img.mediaType === 'gif' || img.isAnimated || img.format === 'gif' || img.format === 'webp' || /\.(gif|webp)(\?|$)/i.test(img.originalUrl || '');
+  const isGif = getMediaCategory(img) === 'gif';
 
   const w = img.width || localDims?.w || 0;
   const h = img.height || localDims?.h || 0;
@@ -390,10 +391,10 @@ const AlbumMediaCard: React.FC<{
                   setActivePlayingVideo({
                     id: img.id,
                     title: img.title || 'Vídeo',
-                    filename: `${img.title || 'video'}.mp4`,
+                    filename: `${img.title || 'video'}.${getMediaExtension(img)}`,
                     folder: album.title || 'Álbum',
                     fileSizeBytes: img.fileSizeBytes || (img as any).file_size || 0,
-                    format: 'MP4',
+                    format: getMediaExtension(img).toUpperCase(),
                     isFavorite: false,
                     createdAt: new Date().toISOString(),
                     relPath: '',
@@ -509,7 +510,7 @@ const AlbumMediaCard: React.FC<{
         })()}
 
         {!isInlinePlaying && (
-          isVideo ? (() => {
+          isVideo && !isGif ? (() => {
             const vInfo = getVideoResolutionInfo(img);
             const is4k = vInfo.label.includes('4K');
             return (
@@ -654,7 +655,7 @@ const AlbumMediaCard: React.FC<{
             <button
               onClick={async (e) => {
                 e.stopPropagation();
-                const ext = isVideo ? 'mp4' : isGif ? (img.format || 'gif') : (img.format || 'jpg');
+                const ext = getMediaExtension(img);
                 let rawTitle = (img.title || (isVideo ? 'video' : isGif ? 'animacao' : 'foto')).trim();
                 if (rawTitle.toLowerCase().endsWith(`.${ext.toLowerCase()}`)) {
                   rawTitle = rawTitle.slice(0, -(ext.length + 1));
@@ -686,7 +687,7 @@ const AlbumMediaCard: React.FC<{
                 }
               }}
               className="p-1.5 rounded-lg bg-black/80 hover:bg-black text-slate-200 hover:text-white border border-white/20 transition-colors shadow-sm cursor-pointer"
-              title={isVideo ? "Download MP4 Video" : isGif ? "Download GIF" : "Download Original Photo"}
+              title={isVideo ? (isEn ? "Download Original Video" : "Baixar Vídeo Original") : isGif ? (isEn ? "Download Original Animation" : "Baixar Animação Original") : (isEn ? "Download Original Photo" : "Baixar Foto Original")}
             >
               <Download size={13} />
             </button>
@@ -999,7 +1000,7 @@ export const AlbumDetailView: React.FC = () => {
   const [isSavingImageTitle, setIsSavingImageTitle] = useState(false);
 
   const handleOpenRename = (img: any) => {
-    setImageToRename({ id: img.id, title: img.title || '', isVideo: img.mediaType === 'video' });
+    setImageToRename({ id: img.id, title: img.title || '', isVideo: isVideoMedia(img) });
     setNewImageTitle(img.title || '');
   };
 
@@ -1069,9 +1070,11 @@ export const AlbumDetailView: React.FC = () => {
     let successCount = 0;
     for (let idx = 0; idx < selectedImages.length; idx++) {
       const img = selectedImages[idx];
-      const isVid = img.mediaType === 'video' || !!img.videoUrl || (img.originalUrl && img.originalUrl.includes('.mp4'));
-      const ext = isVid ? 'mp4' : (img.isAnimated ? 'gif' : 'jpg');
-      const fname = `${img.title || (isVid ? `video-${idx + 1}` : `foto-${idx + 1}`)}.${ext}`;
+      const isVid = isVideoMedia(img);
+      const ext = getMediaExtension(img);
+      const title = img.title || (isVid ? `video-${idx + 1}` : `foto-${idx + 1}`);
+      const filenameStem = title.toLowerCase().endsWith(`.${ext}`) ? title.slice(0, -(ext.length + 1)) : title;
+      const fname = `${filenameStem}.${ext}`;
       const targetUrl = isVid ? (img.rawOriginalUrl || img.videoUrl || img.originalUrl) : (img.rawOriginalUrl || img.originalUrl || img.previewUrl || img.thumbnailUrl);
 
       const res = await backendApi.downloadToDisk(targetUrl || '', fname, idx === selectedImages.length - 1);
@@ -1088,7 +1091,7 @@ export const AlbumDetailView: React.FC = () => {
   };
 
   const selectedVideos = (album?.images || []).filter(
-    img => selectedImageIds.includes(img.id) && (img.mediaType === 'video' || !!img.videoUrl)
+    img => selectedImageIds.includes(img.id) && isVideoMedia(img)
   );
 
   const executeBatchSaveVideos = async (targetFolder: string) => {
@@ -1169,15 +1172,16 @@ export const AlbumDetailView: React.FC = () => {
     }
   };
 
-  const handleDeleteSelected = () => {
+  const handleDeleteSelected = async () => {
     if (window.confirm((t.removeImagesConfirm || (isEn ? 'Do you want to remove {count} photo(s) from album?' : 'Deseja remover {count} foto(s) do álbum?')).replace('{count}', String(selectedImageIds.length)))) {
-      removeImagesFromAlbum(album.id, selectedImageIds);
-      clearSelectedImages();
+      if (await removeImagesFromAlbum(album.id, selectedImageIds)) {
+        clearSelectedImages();
+      }
     }
   };
 
   const hasVideos = (album?.images || []).some(
-    img => img.mediaType === 'video' || !!img.videoUrl || !!(img as any).videoStreamUrl || !!(img as any).is_video || /\.(mp4|webm|m4v)(\?|$)/i.test(img.originalUrl || '')
+    img => isVideoMedia(img)
   );
 
   const handleRefreshStreams = async () => {
@@ -1530,9 +1534,7 @@ export const AlbumDetailView: React.FC = () => {
       {/* Media Type Filter & View Mode Bar */}
       {(() => {
         const albumImages = album?.images || [];
-        const videosCount = albumImages.filter(img => img.mediaType === 'video' || !!img.videoUrl || !!(img as any).videoStreamUrl || !!(img as any).is_video || /\.(mp4|webm|m4v)(\?|$)/i.test(img.originalUrl || '')).length;
-        const gifsCount = albumImages.filter(img => img.mediaType === 'gif' || img.isAnimated || img.format === 'gif' || img.format === 'webp' || /\.(gif|webp)(\?|$)/i.test(img.originalUrl || '')).length;
-        const photosCount = Math.max(0, albumImages.length - videosCount - gifsCount);
+        const { videoCount: videosCount, gifCount: gifsCount, photoCount: photosCount } = getAlbumMediaSummary(album);
 
         return (
           <div className="relative z-20 flex flex-wrap items-center justify-between gap-3 p-2.5 sm:p-3 rounded-2xl glass-panel border border-border">
@@ -1711,7 +1713,7 @@ export const AlbumDetailView: React.FC = () => {
               <button
                 onClick={handleDownloadSelected}
                 className="px-2 py-1 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-medium text-xs flex items-center gap-1 shadow-sm transition-colors"
-                title={isEn ? "Download selected files (.jpg or .mp4)" : "Baixar arquivos selecionados (.jpg ou .mp4)"}
+                title={isEn ? "Download selected original files" : "Baixar arquivos originais selecionados"}
               >
                 <Download size={11} />
                 <span>{isEn ? "Download" : "Baixar"}</span>
@@ -1755,11 +1757,10 @@ export const AlbumDetailView: React.FC = () => {
         {(() => {
           const albumImages = album.images || [];
           const filteredImages = albumImages.filter(img => {
-            const isVideo = img.mediaType === 'video' || !!img.videoUrl || !!(img as any).videoStreamUrl || !!(img as any).is_video || /\.(mp4|webm|m4v)(\?|$)/i.test(img.originalUrl || '');
-            const isGif = img.mediaType === 'gif' || img.isAnimated || img.format === 'gif' || img.format === 'webp' || /\.(gif|webp)(\?|$)/i.test(img.originalUrl || '');
-            if (mediaFilter === 'photos') if (isVideo || isGif) return false;
-            if (mediaFilter === 'gifs') if (!isGif) return false;
-            if (mediaFilter === 'videos') if (!isVideo) return false;
+            const category = getMediaCategory(img);
+            if (mediaFilter === 'photos' && category !== 'photo') return false;
+            if (mediaFilter === 'gifs' && category !== 'gif') return false;
+            if (mediaFilter === 'videos' && category !== 'video') return false;
             if (albumColorFilter) {
               const pal = (img.colorPalette && img.colorPalette.length > 0)
                 ? img.colorPalette
@@ -1852,7 +1853,7 @@ export const AlbumDetailView: React.FC = () => {
                 <button
                   type="button"
                   onClick={async () => {
-                    await deleteAlbum(album.id);
+                    if (!await deleteAlbum(album.id)) return;
                     setIsConfirmingDeleteAlbum(false);
                     navigateToView('gallery');
                   }}

@@ -26,6 +26,7 @@ from ..core.models import (
 from ..browser.engine import BrowserEngine
 from ..browser.tools import BrowserTools
 from ..validator.validator import ImageValidator
+from ..core.media_classification import normalize_media_item, media_category
 from ..investigator.investigator import OriginalImageInvestigator
 from ..learning.knowledge_store import KnowledgeStore, SiteKnowledge
 from ..learning.demonstration_analyzer import DemonstrationAnalyzer
@@ -361,7 +362,10 @@ class SemanticAgentBrain:
                         "thought": f"Image #{position} confirmed in high resolution: {validation_res.width}x{validation_res.height} ({validation_res.format.upper() if validation_res.format else 'JPG'}) via {method.value}",
                     })
 
-                is_anim = cand.is_animated or (validation_res.format == "gif")
+                is_anim = (
+                    validation_res.is_animated if validation_res.animation_checked
+                    else cand.is_animated or validation_res.format == "gif"
+                )
                 current_img = AlbumImage(
                     position=position,
                     candidate_id=cand.candidate_id,
@@ -377,11 +381,23 @@ class SemanticAgentBrain:
                     source_page=target_url,
                     media_type=cand.media_type,
                     is_animated=is_anim,
+                    animation_checked=validation_res.animation_checked,
                     video_stream_url=resolved_url if cand.media_type == "video" else None,
                     poster_url=cand.poster_url,
                     duration_seconds=cand.duration_seconds,
                     color_palette=validation_res.color_palette if validation_res else None,
                 )
+                normalize_media_item(current_img)
+                if media_type_filter in ("gifs", "images") and (
+                    (media_type_filter == "gifs" and media_category(current_img) != "gif")
+                    or (media_type_filter == "images" and media_category(current_img) != "photo")
+                ):
+                    telemetry.originals_resolved -= 1
+                    telemetry.resolution_methods[method.value] -= 1
+                    audit.result = "rejected"
+                    audit.failure_reason = "Media does not match the selected filter after binary validation"
+                    audit_trails.append(audit)
+                    continue
                 resolved_images.append(current_img)
             else:
                 telemetry.originals_unresolved += 1
@@ -600,6 +616,8 @@ class SemanticAgentBrain:
                     width=val_res.width,
                     height=val_res.height,
                     format=val_res.format,
+                    is_animated=val_res.is_animated,
+                    animation_checked=val_res.animation_checked,
                     file_size=val_res.file_size,
                     resolution_method=method,
                     confidence=1.0,

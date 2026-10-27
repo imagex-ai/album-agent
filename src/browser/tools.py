@@ -423,7 +423,7 @@ class BrowserTools:
                     poster_url: poster,
                     duration_seconds: vid.duration && !isNaN(vid.duration) ? vid.duration : null,
                     is_animated: isLoopMuted,
-                    media_type: isLoopMuted ? 'gif' : 'video',
+                    media_type: 'video',
                     video_sources: cleanSources,
                     is_displayed: rect.width > 0 && rect.height > 0,
                     data_vid: dataVid
@@ -658,10 +658,12 @@ class BrowserTools:
         img_candidates = await self.get_image_candidates()
 
         if media_filter == "images":
-            return [c for c in img_candidates if c.media_type != "video"]
+            return img_candidates  # Binary validation decides which image containers animate.
 
         if media_filter == "gifs":
-            gifs = [c for c in img_candidates if c.media_type == "gif" or c.is_animated]
+            # URLs cannot tell whether WebP/PNG/AVIF (or an extensionless endpoint)
+            # is animated. Keep image candidates until binary validation decides.
+            gifs = img_candidates
             videos = await self.get_video_candidates()
             loop_videos = [v for v in videos if v.media_type == "gif" or v.is_animated]
             return gifs + loop_videos

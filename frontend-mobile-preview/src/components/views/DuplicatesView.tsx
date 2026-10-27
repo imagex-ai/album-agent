@@ -4,6 +4,7 @@ import { useAppStore } from '../../store/useAppStore';
 import { ImageItem } from '../../types';
 import { translations } from '../../i18n/translations';
 import { IconBadge } from '../common/IconBadge';
+import { getDuplicateSourceKey } from '../../utils/duplicateSource';
 
 interface DuplicateEntry {
   image: ImageItem;
@@ -40,30 +41,13 @@ export const DuplicatesView: React.FC = () => {
 
     if (allEntries.length === 0) return [];
 
-    // Helper to get normalized stem of URL (strip query string)
-    const getUrlStem = (url: string) => {
-      if (!url) return '';
-      try {
-        const parsed = new URL(url.startsWith('http') ? url : 'https://dummy.com' + url);
-        return parsed.pathname;
-      } catch {
-        return url.split('?')[0];
-      }
-    };
-
-    // 2. Group by URL stem, raw original URL, or identical dimensions+filesize
+    // 2. Group only identical original sources, retaining host and query parameters.
     const groups = new Map<string, DuplicateEntry[]>();
 
     allEntries.forEach(entry => {
       const img = entry.image;
-      const stem = getUrlStem(img.rawOriginalUrl || img.originalUrl || img.thumbnailUrl);
-      
-      let groupKey = '';
-      if (stem && stem.length > 5 && !stem.endsWith('/')) {
-        groupKey = `url:${stem}`;
-      } else if (img.width > 100 && img.height > 100 && img.fileSizeBytes > 1000) {
-        groupKey = `dim:${img.width}x${img.height}_${img.fileSizeBytes}`;
-      }
+      const source = getDuplicateSourceKey(img.rawOriginalUrl || img.originalUrl || '');
+      const groupKey = source ? `url:${source}` : '';
 
       if (groupKey) {
         if (!groups.has(groupKey)) {
@@ -77,13 +61,14 @@ export const DuplicatesView: React.FC = () => {
     const resultClusters: DuplicateCluster[] = [];
     let clusterCounter = 1;
 
-    groups.forEach((items, key) => {
-      // Deduplicate items with identical image.id if any
+    groups.forEach((items) => {
+      // IDs are scoped to the album; the same ID in another album is a separate entry.
       const uniqueItems: DuplicateEntry[] = [];
       const seenIds = new Set<string>();
       items.forEach(it => {
-        if (!seenIds.has(it.image.id)) {
-          seenIds.add(it.image.id);
+        const entryId = JSON.stringify([it.albumId, it.image.id]);
+        if (!seenIds.has(entryId)) {
+          seenIds.add(entryId);
           uniqueItems.push(it);
         }
       });
@@ -102,13 +87,9 @@ export const DuplicatesView: React.FC = () => {
         const best = uniqueItems[0];
         const redundant = uniqueItems.slice(1);
 
-        const reason = key.startsWith('url:')
-          ? t.identicalUrl
-          : t.identicalDims;
-
         resultClusters.push({
           id: `cluster-${clusterCounter++}`,
-          matchReason: reason,
+          matchReason: t.identicalUrl,
           bestItem: best,
           redundantItems: redundant
         });
@@ -116,7 +97,7 @@ export const DuplicatesView: React.FC = () => {
     });
 
     return resultClusters;
-  }, [albums, t.identicalUrl, t.identicalDims]);
+  }, [albums, t.identicalUrl]);
 
   const filteredClusters = useMemo(() => {
     if (!filterQuery) return clusters;
@@ -154,8 +135,9 @@ export const DuplicatesView: React.FC = () => {
     return `${Math.round(kb)} KB`;
   };
 
-  const handleDiscardSingle = (entry: DuplicateEntry) => {
-    removeImagesFromAlbum(entry.albumId, [entry.image.id]);
+  const handleDiscardSingle = async (entry: DuplicateEntry) => {
+    const removed = await removeImagesFromAlbum(entry.albumId, [entry.image.id]).catch(() => false);
+    if (!removed) return;
     addNotification({
       title: t.discardToast,
       message: t.discardToastMsg.replace('{image}', entry.image.title).replace('{album}', entry.albumTitle),
@@ -163,7 +145,7 @@ export const DuplicatesView: React.FC = () => {
     });
   };
 
-  const handleDiscardAllRedundant = () => {
+  const handleDiscardAllRedundant = async () => {
     if (clusters.length === 0) return;
 
     // Group images to delete by albumId
@@ -177,9 +159,10 @@ export const DuplicatesView: React.FC = () => {
       });
     });
 
-    deletionsByAlbum.forEach((imageIds, albumId) => {
-      removeImagesFromAlbum(albumId, imageIds);
-    });
+    const outcomes = await Promise.allSettled(
+      Array.from(deletionsByAlbum, ([albumId, imageIds]) => removeImagesFromAlbum(albumId, imageIds))
+    );
+    if (!outcomes.every(outcome => outcome.status === 'fulfilled' && outcome.value)) return;
 
     addNotification({
       title: t.cleanupDone,
@@ -296,7 +279,7 @@ export const DuplicatesView: React.FC = () => {
                   {/* Redundant Items (Discard) */}
                   {cluster.redundantItems.map((redundant) => (
                     <div
-                      key={redundant.image.id}
+                      key={JSON.stringify([redundant.albumId, redundant.image.id])}
                       className="p-3 rounded-2xl bg-surface-elevated/40 border border-border flex flex-col justify-between opacity-85 hover:opacity-100 transition-opacity"
                     >
                       <div className="relative group cursor-pointer" onClick={(e) => {

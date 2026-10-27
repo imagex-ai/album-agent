@@ -43,6 +43,7 @@ import { GalleryViewMode, Album } from '../../types';
 import { translations } from '../../i18n/translations';
 import { matchesPaletteFuzzy, CHROMATIC_PALETTE_COLORS, colorPaletteCache } from '../../services/colorExtractor';
 import { formatFileSize } from '../../utils/formatters';
+import { getAlbumMediaSummary, isVideoMedia, matchesAlbumMediaFilter } from '../../utils/mediaClassification';
 import { IconBadge } from '../common/IconBadge';
 import { ColorFilterPopover } from '../common/ColorFilterPopover';
 import { ModalPortal } from '../common/ModalPortal';
@@ -165,12 +166,7 @@ export const GalleryView: React.FC = () => {
       if (galleryTagFilter && !album.tags.includes(galleryTagFilter)) return false;
       if (localDomainFilter && album.sourceDomain !== localDomainFilter) return false;
 
-      const isVideo = album.mediaType === 'video' || album.tags.some(tag => tag.toLowerCase().includes('video') || tag.toLowerCase().includes('vídeo'));
-      const isGif = album.hasGifs || album.mediaType === 'gif' || (album.gifCount && album.gifCount > 0) || album.tags.some(tag => tag.toLowerCase().includes('gif'));
-
-      if (mediaTypeFilter === 'video' && !isVideo) return false;
-      if (mediaTypeFilter === 'gif' && !isGif) return false;
-      if (mediaTypeFilter === 'photo' && (isVideo || isGif)) return false;
+      if (!matchesAlbumMediaFilter(album, mediaTypeFilter)) return false;
 
       const isLocal = album.sourceOrigin === 'local' ||
         album.sourceDomain === 'Upload Local' ||
@@ -246,13 +242,9 @@ export const GalleryView: React.FC = () => {
   }, [albums]);
   const paletteColors = ['#facc15', '#dc2626', '#3b82f6', '#10b981', '#ec4899', '#8b5cf6'];
 
-  // Verifica se o álbum contém vídeos (por mediaType, tags ou imagens de vídeo)
+  // Stream renewal follows the transport, including MP4 animations categorized as GIFs.
   const isAlbumWithVideos = (album: Album) => {
-    return (
-      album.mediaType === 'video' ||
-      album.tags?.some(tag => tag.toLowerCase().includes('video') || tag.toLowerCase().includes('vídeo')) ||
-      (album.images || []).some(img => img.mediaType === 'video' || !!img.videoUrl || !!(img as any).videoStreamUrl || !!(img as any).is_video || /\.(mp4|webm|m4v)(\?|$)/i.test(img.originalUrl || ''))
-    );
+    return Array.isArray(album.images) ? album.images.some(isVideoMedia) : getAlbumMediaSummary(album).hasVideos;
   };
 
   // Botão de Renovar Streams: visível quando o filtro de vídeo está ativo ou quando uma pasta com vídeos está selecionada
@@ -710,7 +702,7 @@ export const GalleryView: React.FC = () => {
                 <div className={`w-4 h-4 rounded-md flex items-center justify-center shrink-0 ${mediaTypeFilter === 'photo' ? 'bg-white/20 text-white' : 'bg-emerald-500/15 text-emerald-400'}`}>
                   <ImageIcon size={11} />
                 </div>
-                <span>{t.mediaPhotos || "Photo Albums"} ({albums.filter(a => a.mediaType !== 'video' && !a.tags?.some(t => t.toLowerCase().includes('video'))).length})</span>
+                <span>{t.mediaPhotos || "Photo Albums"} ({albums.filter(a => matchesAlbumMediaFilter(a, 'photo')).length})</span>
               </button>
               <button
                 type="button"
@@ -724,7 +716,7 @@ export const GalleryView: React.FC = () => {
                 <div className={`w-4 h-4 rounded-md flex items-center justify-center shrink-0 ${mediaTypeFilter === 'video' ? 'bg-white/20 text-white' : 'bg-violet-500/15 text-violet-400'}`}>
                   <VideoIcon size={11} />
                 </div>
-                <span>{t.mediaVideos || "Video Albums"} ({albums.filter(a => a.mediaType === 'video' || a.tags?.some(t => t.toLowerCase().includes('video'))).length})</span>
+                <span>{t.mediaVideos || "Video Albums"} ({albums.filter(a => matchesAlbumMediaFilter(a, 'video')).length})</span>
               </button>
               <button
                 type="button"
@@ -738,7 +730,7 @@ export const GalleryView: React.FC = () => {
                 <div className={`w-4 h-4 rounded-md flex items-center justify-center shrink-0 ${mediaTypeFilter === 'gif' ? 'bg-white/20 text-white' : 'bg-amber-500/15 text-amber-400'}`}>
                   <Clapperboard size={11} />
                 </div>
-                <span>{t.mediaGifs || 'Com GIFs'} ({albums.filter(a => a.hasGifs || a.mediaType === 'gif' || a.tags?.some(t => t.toLowerCase().includes('gif')) || (a.images || []).some(img => img.mediaType === 'gif' || img.isAnimated || /\.(gif|webp)(\?|$)/i.test(img.originalUrl || ''))).length})</span>
+                <span>{t.mediaGifs || 'Com GIFs'} ({albums.filter(a => matchesAlbumMediaFilter(a, 'gif')).length})</span>
               </button>
             </div>
 
@@ -1174,6 +1166,7 @@ export const GalleryView: React.FC = () => {
         >
           {filtered.map(album => {
             const isSelected = selectedAlbumIds.includes(album.id);
+            const mediaSummary = getAlbumMediaSummary(album);
             const albumKey = getCanonicalMediaFingerprint(album.title, album.sourceUrl);
             const isDuplicateAlbum = Boolean(albumKey && (duplicateAlbumMap.get(albumKey) || 0) > 1);
 
@@ -1246,7 +1239,7 @@ export const GalleryView: React.FC = () => {
                 <span className={`absolute top-2.5 px-2 py-0.5 rounded-lg bg-slate-950/90 border border-white/15 font-mono text-[9px] sm:text-[10px] font-bold text-emerald-400 shadow-sm transition-all ${
                   isSelected || isSelectionMode || selectedAlbumIds.length > 0 ? 'left-11' : 'left-2.5 group-hover:left-11'
                 }`}>
-                  {album.mediaType === 'video' ? (isEn ? 'Video' : 'Vídeo') : `${album.resolvedOriginalCount} / ${album.imageCount} ${isEn ? 'Originals' : 'Originais'}`}
+                  {mediaSummary.mediaType === 'video' ? (isEn ? 'Video' : 'Vídeo') : `${album.resolvedOriginalCount} / ${album.imageCount} ${isEn ? 'Originals' : 'Originais'}`}
                 </span>
 
                 {/* Badge de Origem Local, Vídeo ou Duplicado no canto superior direito */}
@@ -1263,15 +1256,15 @@ export const GalleryView: React.FC = () => {
                       <span>PC</span>
                     </span>
                   )}
-                  {album.mediaType === 'video' && (
+                  {mediaSummary.hasVideos && (
                     <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-violet-600 text-white font-bold text-[9px] shadow-sm">
                       <VideoIcon size={10} />
                     </span>
                   )}
-                  {(album.hasGifs || (album.gifCount && album.gifCount > 0) || album.mediaType === 'gif') && (
-                    <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-600/95 text-white font-bold text-[9px] shadow-sm border border-amber-400/30" title={isEn ? `Album contains ${album.gifCount || ''} GIF animations` : `Álbum contém ${album.gifCount || ''} animações GIF`}>
+                  {mediaSummary.hasGifs && (
+                    <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-600/95 text-white font-bold text-[9px] shadow-sm border border-amber-400/30" title={isEn ? `Album contains ${mediaSummary.gifCount} GIF animations` : `Álbum contém ${mediaSummary.gifCount} animações GIF`}>
                       <Clapperboard size={10} />
-                      <span>{album.gifCount ? `${album.gifCount} GIFs` : 'GIF'}</span>
+                      <span>{mediaSummary.gifCount} GIFs</span>
                     </span>
                   )}
                 </div>
@@ -1564,7 +1557,7 @@ export const GalleryView: React.FC = () => {
                 <button
                   type="button"
                   onClick={async () => {
-                    await deleteAlbum(albumToDelete.id);
+                    if (!await deleteAlbum(albumToDelete.id)) return;
                     setAlbumToDelete(null);
                   }}
                   className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-lg shadow-rose-600/30 transition-colors"
@@ -1608,9 +1601,11 @@ export const GalleryView: React.FC = () => {
                 <button
                   type="button"
                   onClick={async () => {
+                    let allDeleted = true;
                     for (const id of selectedAlbumIds) {
-                      await deleteAlbum(id);
+                      if (!await deleteAlbum(id)) allDeleted = false;
                     }
+                    if (!allDeleted) return;
                     clearSelectedAlbums();
                     setIsConfirmingBatchDelete(false);
                     setIsSelectionMode(false);

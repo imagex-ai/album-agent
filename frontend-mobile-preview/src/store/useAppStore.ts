@@ -8,6 +8,7 @@ const getIsEn = () => {
   return false;
 };
 import { translations } from "../i18n/translations";
+import { getAlbumMediaSummary, normalizeAlbumMediaTags } from '../utils/mediaClassification';
 import { exitAllFullscreen } from "../services/desktopService";
 import { create } from 'zustand';
 import {
@@ -244,12 +245,12 @@ interface AppState {
   addAlbum: (album: Album) => void;
   updateAlbum: (id: string, updates: Partial<Album>) => void;
   setAlbumCover: (albumId: string, coverImageUrl: string) => Promise<boolean>;
-  deleteAlbum: (id: string) => Promise<void> | void;
+  deleteAlbum: (id: string) => Promise<boolean>;
   refreshAlbumStreams: (albumId: string) => Promise<boolean>;
   isRenewingBatchStreams: boolean;
   batchRenewProgress: { current: number; total: number } | null;
   refreshBatchAlbumStreams: (albumIds: string[]) => Promise<{ succeeded: number; failed: number }>;
-  removeImagesFromAlbum: (albumId: string, imageIds: string[]) => Promise<void> | void;
+  removeImagesFromAlbum: (albumId: string, imageIds: string[]) => Promise<boolean>;
   renameAlbumImage: (albumId: string, imageId: string, newTitle: string) => Promise<boolean>;
   toggleFavoriteAlbum: (id: string) => void;
   toggleFavoriteImage: (albumId: string, imageId: string) => void;
@@ -1945,13 +1946,21 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     deleteAlbum: async (id) => {
+      let deleted = false;
       try {
-        await backendApi.deleteAlbum(id);
-        await get().fetchTrash();
-      } catch (_) {}
+        deleted = await backendApi.deleteAlbum(id);
+      } catch (err) {
+        console.error('Failed to delete album:', err);
+      }
+      if (!deleted) {
+        const t = translations[get().settings.language].store;
+        get().addNotification({ title: t.albumDeleteErrorTitle, message: t.albumDeleteErrorMsg, type: 'error' });
+        return false;
+      }
       scrollRestorationManager.deletePosition(getViewScrollKey('album-detail', id));
       set(state => ({
         albums: state.albums.filter(a => a.id !== id),
+        selectedAlbumIds: state.selectedAlbumIds.filter(albumId => albumId !== id),
         openTabs: state.openTabs.filter(t => t.albumId !== id)
       }));
       get().addNotification({
@@ -1959,6 +1968,8 @@ export const useAppStore = create<AppState>((set, get) => {
         message: get().settings?.language === 'en-US' ? 'Album moved to trash and can be restored at any time.' : 'O álbum foi enviado para a lixeira do app e pode ser restaurado a qualquer momento.',
         type: 'warning'
       });
+      await get().fetchTrash();
+      return true;
     },
 
     refreshAlbumStreams: async (albumId) => {
@@ -2063,18 +2074,30 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     removeImagesFromAlbum: async (albumId, imageIds) => {
+      let deleted = false;
       try {
-        await backendApi.deleteAlbumImages(albumId, imageIds);
-        await get().fetchTrash();
-      } catch (_) {}
+        deleted = await backendApi.deleteAlbumImages(albumId, imageIds);
+      } catch (err) {
+        console.error('Failed to delete album images:', err);
+      }
+      const t = translations[get().settings.language].store;
+      if (!deleted) {
+        get().addNotification({ title: t.photosDeleteErrorTitle, message: t.photosDeleteErrorMsg, type: 'error' });
+        return false;
+      }
       set(state => ({
         albums: state.albums.map(a => {
           if (a.id !== albumId) return a;
           const updatedImages = (a.images || []).filter(img => !imageIds.includes(img.id));
           const updatedBytes = updatedImages.reduce((sum, img) => sum + (img.fileSizeBytes || 0), 0);
+          const mediaSummary = getAlbumMediaSummary({ images: updatedImages });
           return {
             ...a,
             images: updatedImages,
+            mediaType: mediaSummary.mediaType,
+            hasGifs: mediaSummary.hasGifs,
+            gifCount: mediaSummary.gifCount,
+            tags: normalizeAlbumMediaTags(a.tags, mediaSummary.hasGifs),
             imageCount: updatedImages.length,
             totalSizeBytes: updatedBytes,
             coverImage: updatedImages[0]?.thumbnailUrl || a.coverImage,
@@ -2083,10 +2106,12 @@ export const useAppStore = create<AppState>((set, get) => {
         })
       }));
       get().addNotification({
-        title: 'Fotos Movidas para a Lixeira',
-        message: `${imageIds.length} foto(s) enviada(s) para a lixeira do app.`,
+        title: t.photosMovedTitle,
+        message: t.photosMovedMsg.replace('{count}', String(imageIds.length)),
         type: 'warning'
       });
+      await get().fetchTrash();
+      return true;
     },
 
     toggleFavoriteAlbum: (id) => {

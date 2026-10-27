@@ -203,13 +203,14 @@ export const SettingsView: React.FC = () => {
   // API Keys & Cloud Connections State
   const [keysData, setKeysData] = React.useState<{
     gemini: { is_set: boolean; masked_key: string; is_connected: boolean; error: string | null };
-    huggingface: { is_set: boolean; masked_token: string; repo_id: string; is_connected: boolean; error?: string | null };
+    huggingface: { is_set: boolean; masked_token: string; repo_id: string; is_connected: boolean; error?: string | null; auto_cloud_sync?: boolean };
   } | null>(null);
   const [loadingKeys, setLoadingKeys] = React.useState(false);
   const [savingKeys, setSavingKeys] = React.useState(false);
   const [newGeminiKey, setNewGeminiKey] = React.useState('');
   const [newHfToken, setNewHfToken] = React.useState('');
   const [newHfRepo, setNewHfRepo] = React.useState('');
+  const [autoCloudSync, setAutoCloudSync] = React.useState(false);
   const [showGeminiField, setShowGeminiField] = React.useState(false);
   const [showHfField, setShowHfField] = React.useState(false);
   const [keyStatusMsg, setKeyStatusMsg] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -252,6 +253,9 @@ export const SettingsView: React.FC = () => {
         if (data.huggingface?.repo_id) {
           setNewHfRepo(data.huggingface.repo_id);
         }
+        if (data.huggingface?.auto_cloud_sync !== undefined) {
+          setAutoCloudSync(Boolean(data.huggingface.auto_cloud_sync));
+        }
       }
     } catch (e) {
       console.warn('Error fetching keys status:', e);
@@ -268,7 +272,9 @@ export const SettingsView: React.FC = () => {
     setSavingKeys(true);
     setKeyStatusMsg(null);
     try {
-      const payload: { gemini_api_key?: string; hf_token?: string; hf_dataset_repo?: string } = {};
+      const payload: { gemini_api_key?: string; hf_token?: string; hf_dataset_repo?: string; auto_cloud_sync?: boolean } = {
+        auto_cloud_sync: autoCloudSync,
+      };
       if (newGeminiKey.trim()) payload.gemini_api_key = newGeminiKey.trim();
       if (newHfToken.trim()) payload.hf_token = newHfToken.trim();
       if (newHfRepo.trim()) payload.hf_dataset_repo = newHfRepo.trim();
@@ -514,6 +520,37 @@ export const SettingsView: React.FC = () => {
               </div>
             )}
 
+            {/* Sincronização Automática na Nuvem (Opcional - Toggle Switch) */}
+            <div className="pt-2.5 border-t border-border/60">
+              <label className="flex items-center justify-between gap-3 cursor-pointer select-none">
+                <div className="space-y-0.5 pr-2">
+                  <div className="text-[12px] font-bold text-slate-200 flex items-center gap-1.5">
+                    <span>{isEn ? 'Automatic Cloud Upload (Auto-Sync)' : 'Upload Automático na Nuvem (Auto-Sync)'}</span>
+                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-semibold border border-slate-700/60 uppercase tracking-wider">
+                      {isEn ? 'Optional' : 'Opcional'}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-slate-400 max-w-sm leading-snug">
+                    {isEn
+                      ? 'When disabled (recommended), videos and albums stay 100% on your local PC. Cloud upload only happens when you manually click "Backup".'
+                      : 'Quando desativado (recomendado), seus vídeos e álbuns ficam 100% no seu PC local. O envio para a nuvem só ocorre quando você clica em "Fazer Backup".'}
+                  </p>
+                </div>
+                <div className="relative inline-flex items-center shrink-0">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    {...{ switch: '' }}
+                    checked={autoCloudSync}
+                    onChange={e => setAutoCloudSync(e.target.checked)}
+                    className="sr-only peer"
+                    aria-label={isEn ? 'Automatic Cloud Upload' : 'Upload Automático na Nuvem'}
+                  />
+                  <div className="w-10 h-5 bg-slate-700 peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-cyan-400 peer-focus-visible:outline-offset-2 rounded-full peer peer-checked:after:translate-x-5 peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-cyan-500 transition-colors"></div>
+                </div>
+              </label>
+            </div>
+
             {keysData?.huggingface.is_connected && (
               <div className="pt-2 border-t border-border/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <span className="text-[11px] text-slate-400">
@@ -538,7 +575,7 @@ export const SettingsView: React.FC = () => {
           <button
             type="button"
             onClick={handleSaveKeys}
-            disabled={savingKeys || (!newGeminiKey.trim() && !newHfToken.trim() && newHfRepo === (keysData?.huggingface.repo_id || ''))}
+            disabled={savingKeys || (!newGeminiKey.trim() && !newHfToken.trim() && newHfRepo === (keysData?.huggingface.repo_id || '') && autoCloudSync === Boolean(keysData?.huggingface.auto_cloud_sync))}
             className={`px-5 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all ${
               savingKeys
                 ? 'bg-brand-500/50 text-white cursor-wait'

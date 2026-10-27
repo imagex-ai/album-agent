@@ -78,6 +78,8 @@ class ValidationResult(BaseModel):
     reason: Optional[str] = None
     is_valid: bool = False
     color_palette: Optional[List[str]] = None
+    is_animated: bool = False
+    animation_checked: bool = False
 
 
 class DOMCandidateInfo(BaseModel):
@@ -153,6 +155,7 @@ class AlbumImage(BaseModel):
     color_palette: Optional[List[str]] = None
     media_type: str = "image"  # "image", "video", "gif"
     is_animated: bool = False
+    animation_checked: bool = False
     video_stream_url: Optional[str] = None
     poster_url: Optional[str] = None
     duration_seconds: Optional[float] = None

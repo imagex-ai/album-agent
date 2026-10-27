@@ -6,6 +6,7 @@ and evidence trails for logging and UI streaming.
 
 from typing import List, Dict, Any
 from ..core.models import Album, StructuredAuditTrail, TelemetryMetrics
+from ..core.media_classification import media_category
 
 
 class AgentDebugger:
@@ -89,8 +90,8 @@ class AgentDebugger:
             "source_origin": getattr(album, "source_origin", None) or (album.metadata.get("source_origin") if isinstance(album.metadata, dict) else None) or "remote",
             "folder": getattr(album, "folder", None) or (album.metadata.get("folder") if isinstance(album.metadata, dict) else None) or "Geral",
             "tags": getattr(album, "tags", []) or [],
-            "has_gifs": album.metadata.get("has_gifs", False) if isinstance(album.metadata, dict) else any(i.is_animated or i.media_type == "gif" for i in album.images),
-            "gif_count": album.metadata.get("gif_count", 0) if isinstance(album.metadata, dict) else sum(1 for i in album.images if i.is_animated or i.media_type == "gif"),
+            "has_gifs": any(media_category(i) == "gif" for i in album.images),
+            "gif_count": sum(media_category(i) == "gif" for i in album.images),
             "created_at": getattr(album, "created_at", None) or (album.metadata.get("created_at") if isinstance(album.metadata, dict) else None) or (album.metadata.get("saved_at") if isinstance(album.metadata, dict) else None),
             "updated_at": getattr(album, "updated_at", None) or (album.metadata.get("updated_at") if isinstance(album.metadata, dict) else None),
             "is_favorite": getattr(album, "is_favorite", False) or (album.metadata.get("is_favorite", False) if isinstance(album.metadata, dict) else False),

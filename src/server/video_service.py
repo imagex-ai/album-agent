@@ -446,6 +446,14 @@ def probe_video_file(file_path: str) -> Dict[str, Any]:
             logger.warning(f"Error probing video {file_path} with cv2: {e}")
     return info
 
+def is_auto_cloud_sync_enabled() -> bool:
+    """
+    Returns True ONLY if user explicitly enabled AUTO_CLOUD_SYNC in .env or environment.
+    Defaults to False to prevent unwanted uploads and network congestion.
+    """
+    val = os.getenv("AUTO_CLOUD_SYNC", "false").strip().lower()
+    return val in ("true", "1", "yes")
+
 # =====================================================================
 # CLOUD STORAGE MANAGER (Hugging Face Datasets - 10GB+ Free / Sem Cartão)
 # =====================================================================
@@ -750,8 +758,15 @@ class VideoService:
         # If completely empty (no metadata entries AND no remote entries), show sample
         self._ensure_sample_video()
 
-        # Auto-sincronizar qualquer vídeo local existente que ainda não esteja no Hugging Face
-        self.sync_local_videos_to_cloud()
+        # Auto-sincronizar vídeos locais para o Hugging Face APENAS se explicitamente configurado pelo usuário
+        if self.is_auto_sync_enabled():
+            self.sync_local_videos_to_cloud()
+        else:
+            logger.info("[VideoService] Auto-sync para nuvem desativado por padrão (AUTO_CLOUD_SYNC=false). Vídeos permanecem 100% locais.")
+
+    @staticmethod
+    def is_auto_sync_enabled() -> bool:
+        return is_auto_cloud_sync_enabled()
 
     def _migrate_origins(self):
         """Ensures all existing videos have an accurate source_origin ('web' vs 'pc')
@@ -997,19 +1012,22 @@ class VideoService:
                         pass
             except Exception as e:
                 print(f"Error saving videos metadata locally: {e}")
+                return False
 
-        # Async-style: mirror to HF in background thread (throttled to avoid concurrent HF flood)
-        try:
-            now = time.time()
-            if now - getattr(self, "_last_hf_meta_sync", 0.0) >= 5.0:
-                self._last_hf_meta_sync = now
-                snapshot = dict(data)
-                def _sync():
-                    cloud_storage.upload_json(snapshot, "metadata/videos_metadata.json")
-                t = threading.Thread(target=_sync, daemon=True)
-                t.start()
-        except Exception as e:
-            print(f"[VideoService] Error starting metadata sync to HF: {e}")
+        # Async-style: mirror to HF in background thread only if auto-sync is explicitly enabled
+        if self.is_auto_sync_enabled() and cloud_storage.is_connected():
+            try:
+                now = time.time()
+                if now - getattr(self, "_last_hf_meta_sync", 0.0) >= 15.0:
+                    self._last_hf_meta_sync = now
+                    snapshot = dict(data)
+                    def _sync():
+                        cloud_storage.upload_json(snapshot, "metadata/videos_metadata.json")
+                    t = threading.Thread(target=_sync, daemon=True)
+                    t.start()
+            except Exception as e:
+                print(f"[VideoService] Error starting metadata sync to HF: {e}")
+        return True
 
     def _get_video_id(self, rel_path: str) -> str:
         """Generates a stable deterministic ID from relative path."""
@@ -1552,42 +1570,85 @@ class VideoService:
 
     def delete_folder(self, folder_name: str) -> bool:
         """Deletes a folder from disk. Videos inside are moved to 'Geral' to prevent data loss."""
-        if folder_name == "Geral":
+        if folder_name.casefold() == "geral":
             return False  # Cannot delete default folder
 
         folder_path = os.path.join(self.base_dir, folder_name)
         geral_path = os.path.join(self.base_dir, "Geral")
-        os.makedirs(geral_path, exist_ok=True)
-
-        # Move any existing physical video files to Geral
-        if os.path.exists(folder_path):
-            for f in os.listdir(folder_path):
-                src_file = os.path.join(folder_path, f)
-                if os.path.isfile(src_file):
-                    dst_file = os.path.join(geral_path, f)
-                    if os.path.exists(dst_file):
-                        final_f = f"{int(time.time())}_{f}"
-                        dst_file = os.path.join(geral_path, final_f)
-                    try:
-                        shutil.move(src_file, dst_file)
-                    except Exception:
-                        pass
-            try:
-                shutil.rmtree(folder_path)
-            except Exception as e:
-                print(f"Error removing physical folder: {e}")
-
-        # Update metadata for all videos (including stream_url videos)
         meta = self._load_metadata()
-        for vid_id, v in meta.items():
-            rp = v.get("rel_path", "")
-            f_curr = v.get("folder", "")
-            if rp.startswith(folder_name + "/") or f_curr == folder_name:
-                fname = os.path.basename(rp) if rp else f"{v.get('title', 'video')}.mp4"
-                v["rel_path"] = f"Geral/{fname}"
-                v["folder"] = "Geral"
-        self._save_metadata(meta)
-        return True
+        updated_meta = {vid_id: dict(value) for vid_id, value in meta.items()}
+        moved_files = []
+        relocated = {}
+        reserved = {
+            os.path.normcase(v.get("rel_path", "").replace("\\", "/"))
+            for v in meta.values()
+        }
+
+        def available_destination(filename):
+            stem, ext = os.path.splitext(filename)
+            candidate, suffix = filename, 1
+            while (
+                os.path.exists(os.path.join(geral_path, candidate))
+                or os.path.normcase(f"Geral/{candidate}") in reserved
+            ):
+                candidate = f"{stem}_{suffix}{ext}"
+                suffix += 1
+            reserved.add(os.path.normcase(f"Geral/{candidate}"))
+            return os.path.join(geral_path, candidate)
+
+        try:
+            os.makedirs(geral_path, exist_ok=True)
+            if os.path.exists(folder_path):
+                files = [os.path.join(folder_path, name) for name in os.listdir(folder_path)]
+                # Never recursively remove unexpected subfolders or their contents.
+                if any(not os.path.isfile(path) for path in files):
+                    return False
+                for src_file in files:
+                    dst_file = available_destination(os.path.basename(src_file))
+                    shutil.move(src_file, dst_file)
+                    moved_files.append((src_file, dst_file))
+                    old_rel = os.path.relpath(src_file, self.base_dir).replace("\\", "/")
+                    relocated[old_rel] = os.path.relpath(dst_file, self.base_dir).replace("\\", "/")
+
+            for value in updated_meta.values():
+                rel_path = value.get("rel_path", "").replace("\\", "/")
+                if rel_path.startswith(folder_name + "/") or value.get("folder") == folder_name:
+                    if rel_path in relocated:
+                        value["rel_path"] = relocated[rel_path]
+                    else:
+                        # Stream-only videos have no disk file but still need unique paths.
+                        filename = os.path.basename(rel_path) or f"{value.get('id', 'video')}.mp4"
+                        destination = available_destination(filename)
+                        value["rel_path"] = os.path.relpath(destination, self.base_dir).replace("\\", "/")
+                    value["folder"] = "Geral"
+
+            if os.path.exists(folder_path):
+                os.rmdir(folder_path)  # Fails safely if any file was left behind.
+            if self._save_metadata(updated_meta) is False:
+                raise OSError("Could not save relocated video metadata")
+            return True
+        except Exception as e:
+            print(f"Error moving videos out of folder: {e}")
+            # Restore completed moves if a later file or metadata operation failed.
+            unrolled = {}
+            for src_file, dst_file in reversed(moved_files):
+                try:
+                    os.makedirs(os.path.dirname(src_file), exist_ok=True)
+                    if os.path.exists(src_file):
+                        raise FileExistsError(src_file)
+                    shutil.move(dst_file, src_file)
+                except Exception as rollback_error:
+                    print(f"Video remains recoverable at {dst_file}: {rollback_error}")
+                    old_rel = os.path.relpath(src_file, self.base_dir).replace("\\", "/")
+                    unrolled[old_rel] = os.path.relpath(dst_file, self.base_dir).replace("\\", "/")
+            if unrolled:
+                for value in meta.values():
+                    rel_path = value.get("rel_path", "").replace("\\", "/")
+                    if rel_path in unrolled:
+                        value["rel_path"] = unrolled[rel_path]
+                        value["folder"] = "Geral"
+                self._save_metadata(meta)
+            return False
 
     def move_video(self, video_id: str, target_folder: str) -> Optional[Dict[str, Any]]:
         """Moves a video file to another folder on disk while preserving its ID."""
@@ -1795,8 +1856,9 @@ class VideoService:
                 source_url=source_url
             )
 
-            # Upload assíncrono para Hugging Face sem travar a resposta HTTP
-            self._trigger_background_upload(vid_id, target_path, folder, os.path.basename(target_path))
+            # Upload assíncrono para Hugging Face APENAS se auto-sync estiver ativado
+            if self.is_auto_sync_enabled():
+                self._trigger_background_upload(vid_id, target_path, folder, os.path.basename(target_path))
 
             # Gera thumbnail imediatamente
             try:
@@ -1848,8 +1910,9 @@ class VideoService:
                 source_origin=source_origin
             )
 
-            # Upload assíncrono para Hugging Face sem travar a resposta HTTP
-            self._trigger_background_upload(vid_id, target_path, folder, os.path.basename(target_path))
+            # Upload assíncrono para Hugging Face APENAS se auto-sync estiver ativado
+            if self.is_auto_sync_enabled():
+                self._trigger_background_upload(vid_id, target_path, folder, os.path.basename(target_path))
 
             # Gera thumbnail imediatamente
             try:
@@ -1894,7 +1957,8 @@ class VideoService:
             title = os.path.splitext(os.path.basename(target_dest))[0].replace("_", " ")
             rel_path = os.path.relpath(target_dest, self.base_dir).replace("\\", "/")
             vid_id = self._update_single_metadata(target_dest, title=title, folder=target_folder, is_favorite=False, source_origin="pc")
-            self._trigger_background_upload(vid_id, target_dest, target_folder, os.path.basename(target_dest))
+            if self.is_auto_sync_enabled():
+                self._trigger_background_upload(vid_id, target_dest, target_folder, os.path.basename(target_dest))
             try:
                 self.get_or_generate_thumbnail(vid_id)
             except Exception:
@@ -1945,7 +2009,9 @@ class VideoService:
         return False
 
     def _mirror_thumbnail_to_hf(self, video_id: str, thumb_path: str):
-        """Mirrors generated thumbnail to Hugging Face dataset in background."""
+        """Mirrors generated thumbnail to Hugging Face dataset in background only if auto-sync is enabled."""
+        if not self.is_auto_sync_enabled() or not cloud_storage.is_connected():
+            return
         try:
             import threading
             threading.Thread(

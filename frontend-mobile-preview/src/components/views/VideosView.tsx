@@ -1,3 +1,4 @@
+import { useShallow } from 'zustand/react/shallow';
 import React, { useState, useRef, useMemo } from 'react';
 import {
   Film,
@@ -44,6 +45,7 @@ import { formatFileSize } from '../../utils/formatters';
 import { translations } from '../../i18n/translations';
 import { IconBadge } from '../common/IconBadge';
 import { ModalPortal } from '../common/ModalPortal';
+import { VirtualCollection } from '../common/VirtualCollection';
 
 const getVideoResolutionLabel = (video?: Partial<VideoItem>, title?: string, filename?: string) => {
   const h = video?.height || 0;
@@ -120,7 +122,42 @@ export const VideosView: React.FC = () => {
     setActiveAlbumFolder,
     addNotification,
     settings
-  } = useAppStore();
+  } = useAppStore(useShallow(state => ({
+    videos: state.videos,
+    videoFolders: state.videoFolders,
+    activeVideoFolder: state.activeVideoFolder,
+    setActiveVideoFolder: state.setActiveVideoFolder,
+    videoSearchQuery: state.videoSearchQuery,
+    setVideoSearchQuery: state.setVideoSearchQuery,
+    videoFilterFavoritesOnly: state.videoFilterFavoritesOnly,
+    setVideoFilterFavoritesOnly: state.setVideoFilterFavoritesOnly,
+    setActivePlayingVideo: state.setActivePlayingVideo,
+    setActiveFolderModal: state.setActiveFolderModal,
+    uploadVideo: state.uploadVideo,
+    addVideoByUrl: state.addVideoByUrl,
+    deleteVideo: state.deleteVideo,
+    renameVideo: state.renameVideo,
+    deleteVideoFolder: state.deleteVideoFolder,
+    toggleVideoFavorite: state.toggleVideoFavorite,
+    selectedVideoIds: state.selectedVideoIds,
+    toggleSelectVideo: state.toggleSelectVideo,
+    selectAllVideos: state.selectAllVideos,
+    clearSelectedVideos: state.clearSelectedVideos,
+    batchDeleteVideos: state.batchDeleteVideos,
+    uploadProgress: state.uploadProgress,
+    importLocalPath: state.importLocalPath,
+    openVideosFolder: state.openVideosFolder,
+    syncVideos: state.syncVideos,
+    isRenewingVideoStreams: state.isRenewingVideoStreams,
+    renewVideoStreams: state.renewVideoStreams,
+    saveExtractedVideoToGallery: state.saveExtractedVideoToGallery,
+    navigateToView: state.navigateToView,
+    highlightedItemId: state.highlightedItemId,
+    albums: state.albums,
+    setActiveAlbumFolder: state.setActiveAlbumFolder,
+    addNotification: state.addNotification,
+    settings: state.settings,
+  })));
   const isEn = settings?.language === 'en-US';
 
   const t = translations[settings.language]?.videos || translations['en-US'].videos;
@@ -1139,8 +1176,10 @@ export const VideosView: React.FC = () => {
           )}
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-5">
-          {filtered.map(video => {
+        <VirtualCollection items={filtered} itemKey={video => video.id} layoutKey="video-grid" estimatedRowHeight={420}
+          columns={[[0, 1], [640, 2], [1024, 3], [1280, 4]]} pinnedKeys={[...playingVideoIds, ...(activeMenuVideoId ? [activeMenuVideoId] : [])]} highlightedKey={highlightedItemId}
+          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-5"
+          renderItem={video => {
             const isSelected = selectedVideoIds.includes(video.id);
             const dupKey = getCanonicalMediaFingerprint(video.title, video.sourceUrl || video.url, video.height);
             const isDuplicateVideo = Boolean(dupKey && (duplicateVideoMap.get(dupKey) || 0) > 1);
@@ -1709,8 +1748,7 @@ export const VideosView: React.FC = () => {
               </div>
             </div>
             );
-          })}
-        </div>
+          }} />
       )}
 
       {/* Add Video by Direct URL Modal */}

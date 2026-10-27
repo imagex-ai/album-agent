@@ -1,4 +1,5 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
   Film,
   Search,
@@ -43,6 +44,8 @@ export const WebVideoScraperView: React.FC = () => {
     settings,
     videoFolders,
     videos,
+    albums,
+    optimisticSavedItems,
     jobs,
     addNotification,
     navigateToView,
@@ -53,7 +56,23 @@ export const WebVideoScraperView: React.FC = () => {
     clearWebScraperState,
     checkItemSavedStatus,
     markItemAsSavedOptimistically
-  } = useAppStore();
+  } = useAppStore(useShallow(state => ({
+    settings: state.settings,
+    videoFolders: state.videoFolders,
+    videos: state.videos,
+    albums: state.albums,
+    optimisticSavedItems: state.optimisticSavedItems,
+    jobs: state.jobs,
+    addNotification: state.addNotification,
+    navigateToView: state.navigateToView,
+    syncJobs: state.syncJobs,
+    syncVideos: state.syncVideos,
+    webScraperState: state.webScraperState,
+    setWebScraperState: state.setWebScraperState,
+    clearWebScraperState: state.clearWebScraperState,
+    checkItemSavedStatus: state.checkItemSavedStatus,
+    markItemAsSavedOptimistically: state.markItemAsSavedOptimistically,
+  })));
 
   const t = translations[settings.language].webVideoScraper || translations['en-US'].webVideoScraper;
   const isEn = settings.language === 'en-US';
@@ -124,7 +143,7 @@ export const WebVideoScraperView: React.FC = () => {
     return { idSet, urlSet, titleSet };
   }, [videos]);
 
-  const isVideoSavedInGallery = (item: ScannedVideoItem) => {
+  const isVideoSavedInGallery = useCallback((item: ScannedVideoItem) => {
     if (item.already_saved) return true;
     if (item.id && existingGalleryLookup.idSet.has(item.id)) return true;
     if (item.url && existingGalleryLookup.urlSet.has(item.url.toLowerCase().trim())) return true;
@@ -135,7 +154,7 @@ export const WebVideoScraperView: React.FC = () => {
       mediaType: 'video'
     });
     return Boolean(status && status.isSaved);
-  };
+  }, [existingGalleryLookup, checkItemSavedStatus, albums, optimisticSavedItems]);
 
   // In-page duplicate detection map (canonical fingerprint)
   const inPageDuplicateMap = useMemo(() => {
@@ -203,12 +222,12 @@ export const WebVideoScraperView: React.FC = () => {
 
   const newDisplayedVideos = useMemo(() => {
     return displayedVideos.filter(v => !isVideoSavedInGallery(v));
-  }, [displayedVideos, existingGalleryLookup]);
+  }, [displayedVideos, isVideoSavedInGallery]);
 
   const totalSavedCount = useMemo(() => {
     if (!scanResult || !scanResult.videos) return 0;
     return scanResult.videos.filter(v => isVideoSavedInGallery(v)).length;
-  }, [scanResult, existingGalleryLookup]);
+  }, [scanResult, isVideoSavedInGallery]);
 
   const totalNewCount = useMemo(() => {
     if (!scanResult || !scanResult.videos) return 0;
@@ -235,7 +254,7 @@ export const WebVideoScraperView: React.FC = () => {
       }
       return true;
     });
-  }, [inspectingAlbum, inspectorSearchQuery, inspectorSectionFilter, existingGalleryLookup]);
+  }, [inspectingAlbum, inspectorSearchQuery, inspectorSectionFilter, isVideoSavedInGallery]);
 
   useEffect(() => {
     setInspectorVisibleCount(48);

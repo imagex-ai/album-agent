@@ -1175,14 +1175,15 @@ class VideoService:
             self._save_metadata(meta)
             return vid_id
 
-    def list_folders(self) -> List[Dict[str, Any]]:
+    def list_folders(self, all_videos: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         """Lists all physical and metadata folders, properly counting both local and HF cloud videos, deduplicating phantom variants."""
         import unicodedata
         default_geral = os.path.join(self.base_dir, "Geral")
         os.makedirs(default_geral, exist_ok=True)
 
         meta = self._load_metadata()
-        all_videos = self.list_all_videos()
+        if all_videos is None:
+            all_videos = self.list_all_videos()
 
         def _clean_folder_name(name: str) -> str:
             if not name:

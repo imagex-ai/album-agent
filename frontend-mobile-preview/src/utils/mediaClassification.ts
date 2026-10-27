@@ -96,7 +96,27 @@ export const normalizeAlbumMediaTags = (tags: string[] = [], hasGifs: boolean): 
   return Array.from(new Set([...retained, ...(hasGifs ? ['gif', 'animado'] : [])]));
 };
 
-export const getAlbumMediaSummary = (album: Partial<Album>) => {
+type MediaSummary = { hasGifs: boolean; gifCount: number; hasVideos: boolean; videoCount: number; photoCount: number; mediaType: MediaCategory };
+// Media arrays are replaced by store mutations. Weak keys release old libraries
+// and let album metadata/favorite changes reuse the classification work.
+const albumMediaSummaries = new WeakMap<ImageItem[], MediaSummary>();
+const albumVideoTransport = new WeakMap<ImageItem[], boolean>();
+
+export const cacheAlbumVideoTransport = (images: ImageItem[], hasVideo: boolean) => { albumVideoTransport.set(images, hasVideo); };
+export const hasAlbumVideoTransport = (album: Partial<Album>): boolean => {
+  if (!Array.isArray(album.images)) return getAlbumMediaSummary(album).hasVideos;
+  const cached = albumVideoTransport.get(album.images);
+  if (cached !== undefined) return cached;
+  const value = album.images.some(isVideoMedia);
+  albumVideoTransport.set(album.images, value);
+  return value;
+};
+
+export const getAlbumMediaSummary = (album: Partial<Album>): MediaSummary => {
+  if (Array.isArray(album.images)) {
+    const cached = albumMediaSummaries.get(album.images);
+    if (cached) return cached;
+  }
   let gifCount = 0, videoCount = 0, photoCount = 0;
   if (Array.isArray(album.images)) {
     for (const image of album.images) {
@@ -114,10 +134,13 @@ export const getAlbumMediaSummary = (album: Partial<Album>) => {
   const hasGifs = gifCount > 0;
   const hasVideos = videoCount > 0;
   const mediaType: MediaCategory = hasVideos ? 'video' : hasGifs ? 'gif' : 'photo';
-  return { hasGifs, gifCount, hasVideos, videoCount, photoCount, mediaType };
+  const summary = { hasGifs, gifCount, hasVideos, videoCount, photoCount, mediaType };
+  if (Array.isArray(album.images)) albumMediaSummaries.set(album.images, summary);
+  return summary;
 };
 
 export const matchesAlbumMediaFilter = (album: Partial<Album>, filter: 'all' | MediaCategory): boolean => {
+  if (filter === 'all') return true;
   const summary = getAlbumMediaSummary(album);
   if (filter === 'gif') return summary.hasGifs;
   if (filter === 'video') return summary.hasVideos;

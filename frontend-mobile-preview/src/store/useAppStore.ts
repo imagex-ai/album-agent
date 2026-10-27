@@ -11,6 +11,8 @@ import { translations } from "../i18n/translations";
 import { getAlbumMediaSummary, normalizeAlbumMediaTags } from '../utils/mediaClassification';
 import { exitAllFullscreen } from "../services/desktopService";
 import { create } from 'zustand';
+import { createSavedMediaLookup } from '../services/savedMediaLookup';
+import { deferStorageWrite, cancelStorageWrite } from '../services/deferredStorage';
 import {
   Album,
   AlbumFolder,
@@ -186,6 +188,10 @@ interface AppState {
     totalFiles: number;
   } | null;
 
+  // Shorts State
+  shortsActiveIndex: number;
+  setShortsActiveIndex: (index: number) => void;
+
   // Video Actions
   isRenewingVideoStreams: boolean;
   renewVideoStreams: (videoIds?: string[], folder?: string) => Promise<{ succeeded: number; failed: number }>;
@@ -349,7 +355,7 @@ interface AppState {
     activeInspectingUrl: string | null;
   }>) => void;
   clearMultiAlbumState: () => void;
-  syncAlbums: () => Promise<void>;
+  syncAlbums: (refreshAfterCurrent?: boolean) => Promise<void>;
 
   // Album Folders State & Actions
   albumFolders: AlbumFolder[];
@@ -483,7 +489,7 @@ export const triggerJobsPollingLoop = () => {
     try {
       await useAppStore.getState().syncJobs();
     } catch (_) {}
-    const hasActive = useAppStore.getState().jobs.some(j => j.status === 'active' || j.status === 'queued' || j.status === 'paused');
+    const hasActive = useAppStore.getState().jobs.some(j => j.status === 'active' || j.status === 'queued');
     setTimeout(tick, hasActive ? 1200 : 5000);
   };
   setTimeout(tick, 1000);
@@ -536,6 +542,11 @@ export const getCanonicalMediaFingerprint = (title?: string, url?: string, heigh
 };
 
 export const useAppStore = create<AppState>((set, get) => {
+  let savedLookup: ReturnType<typeof createSavedMediaLookup> | undefined;
+  let indexedVideos: VideoItem[] | undefined;
+  let indexedAlbums: Album[] | undefined;
+  let albumSync: Promise<void> | undefined;
+  let albumRefreshRequested = false;
   // Load initial settings, tabs, filters, and history from localStorage if available
   let savedSettings = DEFAULT_SETTINGS;
   let savedTabs: SessionTab[] = [
@@ -852,6 +863,7 @@ export const useAppStore = create<AppState>((set, get) => {
     activeFolderModal: null,
     selectedVideoIds: [],
     uploadProgress: null,
+    shortsActiveIndex: 0,
     trashItems: [],
     trashStats: {
       total_items: 0,
@@ -880,9 +892,9 @@ export const useAppStore = create<AppState>((set, get) => {
         set({ backendOnline: isOnline });
         if (isOnline) {
           const [realAlbums, models, allServerJobs, patterns] = await Promise.all([
-            backendApi.fetchRealAlbums(),
+            get().syncAlbums(false).then(() => [] as Album[]),
             backendApi.fetchAvailableModels(),
-            backendApi.fetchAllJobs(),
+            backendApi.fetchAllJobs().catch(() => []),
             backendApi.fetchDomainPatterns()
           ]);
           await get().syncVideos();
@@ -1060,6 +1072,8 @@ export const useAppStore = create<AppState>((set, get) => {
         triggerJobsPollingLoop();
       } catch (err) {
         console.warn('Backend sync failed:', err);
+      } finally {
+        triggerJobsPollingLoop();
       }
     },
 
@@ -1067,8 +1081,14 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const allServerJobs = await backendApi.fetchAllJobs();
         if (allServerJobs && Array.isArray(allServerJobs)) {
-          const mappedJobs = allServerJobs.map(mapServerJobToExtractionJob);
           const currentJobs = get().jobs;
+          const currentById = new Map(currentJobs.map(job => [job.id, job]));
+          const mappedJobs = allServerJobs.map(raw => {
+            const mapped = mapServerJobToExtractionJob(raw);
+            const previous = currentById.get(mapped.id);
+            if (previous && !raw.started_at) mapped.startTime = previous.startTime;
+            return previous && Object.keys(mapped).every(key => Object.is((mapped as any)[key], (previous as any)[key])) ? previous : mapped;
+          });
           const hadActiveVideoJobs = currentJobs.some(j => j.status === 'active' && (j.mode as any) === 'video_save');
           const stillHasActiveVideoJobs = mappedJobs.some(j => j.status === 'active' && (j.mode as any) === 'video_save');
 
@@ -1107,17 +1127,19 @@ export const useAppStore = create<AppState>((set, get) => {
             }
           }
 
-          set({
-            jobs: mappedJobs,
-            activeJobs: runningMapped,
-            activeJob: currentActive,
-            sessionJobIds: Array.from(currentSessionIds)
+          set(state => {
+            const stable = <T,>(previous: T[], next: T[]) => previous.length === next.length && previous.every((item, index) => item === next[index]) ? previous : next;
+            const jobs = stable(state.jobs, mappedJobs);
+            const activeJobs = stable(state.activeJobs, runningMapped);
+            const sessionJobIds = stable(state.sessionJobIds, Array.from(currentSessionIds));
+            if (jobs === state.jobs && activeJobs === state.activeJobs && currentActive === state.activeJob && sessionJobIds === state.sessionJobIds) return state;
+            return { jobs, activeJobs, activeJob: currentActive, sessionJobIds };
           });
 
           // Detecta tarefas que acabaram de transicionar para 'completed' individualmente
           const justCompletedJobs = mappedJobs.filter(newJ => {
             if (newJ.status !== 'completed') return false;
-            const oldJ = currentJobs.find(oj => oj.id === newJ.id);
+            const oldJ = currentById.get(newJ.id);
             return oldJ && oldJ.status !== 'completed';
           });
 
@@ -1125,10 +1147,12 @@ export const useAppStore = create<AppState>((set, get) => {
             await get().syncVideos();
           }
 
+          const completedVideo = (job: ExtractionJob) => ['video_save', 'video_downloader', 'video_stream_register'].includes(job.mode as string);
+          if (justCompletedJobs.some(completedVideo)) await get().syncVideos();
+          if (justCompletedJobs.some(job => !completedVideo(job))) await get().syncAlbums();
           for (const cj of justCompletedJobs) {
             const isVid = (cj.mode as string) === 'video_save' || (cj.mode as string) === 'video_downloader' || (cj.mode as string) === 'video_stream_register';
             if (isVid) {
-              await get().syncVideos();
               const curLang = (get().settings?.language || 'pt-BR') as 'pt-BR' | 'en-US';
               const tStore = translations[curLang]?.store || translations['pt-BR']?.store;
               get().addNotification({
@@ -1141,7 +1165,6 @@ export const useAppStore = create<AppState>((set, get) => {
               });
               soundEffects.success(get().settings.soundEnabled);
             } else {
-              await get().syncAlbums();
               const curLang = (get().settings?.language || 'pt-BR') as 'pt-BR' | 'en-US';
               const tStore = translations[curLang]?.store || translations['pt-BR']?.store;
               get().addNotification({
@@ -1160,41 +1183,52 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    syncAlbums: async () => {
-      try {
-        const freshAlbums = await backendApi.fetchRealAlbums();
-        if (freshAlbums && Array.isArray(freshAlbums)) {
-          let storedFavs: string[] = [];
-          if (typeof window !== 'undefined') {
-            try {
-              storedFavs = JSON.parse(localStorage.getItem('imagex_favorite_albums') || '[]');
-            } catch (_) {}
+    syncAlbums: async (refreshAfterCurrent = true) => {
+      if (albumSync) { albumRefreshRequested ||= refreshAfterCurrent; return albumSync; }
+      albumSync = (async () => {
+        do {
+          albumRefreshRequested = false;
+          try {
+            const albumsAtStart = get().albums;
+            const freshAlbums = await backendApi.fetchRealAlbums();
+            if (albumRefreshRequested || get().albums !== albumsAtStart) {
+              albumRefreshRequested = true;
+              continue;
+            }
+            if (freshAlbums && Array.isArray(freshAlbums)) {
+              let storedFavs: string[] = [];
+              if (typeof window !== 'undefined') {
+                try {
+                  storedFavs = JSON.parse(localStorage.getItem('imagex_favorite_albums') || '[]');
+                } catch (_) {}
+              }
+              let storedImgFavs: string[] = [];
+              if (typeof window !== 'undefined') {
+                try {
+                  storedImgFavs = JSON.parse(localStorage.getItem('imagex_favorite_images') || '[]');
+                } catch (_) {}
+              }
+              const currentFavSet = new Set([
+                ...get().albums.filter(a => a.isFavorite).map(a => a.id),
+                ...storedFavs
+              ]);
+              const favImgSet = new Set(storedImgFavs);
+              const mergedAlbums = freshAlbums.map(a => ({
+                ...a,
+                isFavorite: a.isFavorite || currentFavSet.has(a.id),
+                images: (a.images || []).some(i => !i.isFavorite && favImgSet.has(i.id))
+                  ? (a.images || []).map(i => favImgSet.has(i.id) && !i.isFavorite ? { ...i, isFavorite: true } : i)
+                  : a.images
+              }));
+              set({ albums: mergedAlbums });
+            }
+            await get().syncAlbumFolders();
+          } catch (err) {
+            console.warn('Failed to sync albums:', err);
           }
-          let storedImgFavs: string[] = [];
-          if (typeof window !== 'undefined') {
-            try {
-              storedImgFavs = JSON.parse(localStorage.getItem('imagex_favorite_images') || '[]');
-            } catch (_) {}
-          }
-          const currentFavSet = new Set([
-            ...get().albums.filter(a => a.isFavorite).map(a => a.id),
-            ...storedFavs
-          ]);
-          const favImgSet = new Set(storedImgFavs);
-          const mergedAlbums = freshAlbums.map(a => ({
-            ...a,
-            isFavorite: a.isFavorite || currentFavSet.has(a.id),
-            images: (a.images || []).map(i => ({
-              ...i,
-              isFavorite: (i as any).isFavorite || favImgSet.has(i.id)
-            }))
-          }));
-          set({ albums: mergedAlbums });
-        }
-        await get().syncAlbumFolders();
-      } catch (err) {
-        console.warn('Failed to sync albums:', err);
-      }
+        } while (albumRefreshRequested);
+      })().finally(() => { albumSync = undefined; });
+      return albumSync;
     },
 
 
@@ -1396,7 +1430,7 @@ export const useAppStore = create<AppState>((set, get) => {
       set((state) => {
         const next = { ...state.webScraperState, ...partial };
         try {
-          localStorage.setItem('imagex_web_scraper_state', JSON.stringify(next));
+          deferStorageWrite('imagex_web_scraper_state', () => JSON.stringify(next));
         } catch (_) {}
         return { webScraperState: next };
       });
@@ -1415,7 +1449,8 @@ export const useAppStore = create<AppState>((set, get) => {
         viewLayout: 'albums'
       };
       try {
-        localStorage.removeItem('imagex_web_scraper_state');
+        cancelStorageWrite('imagex_web_scraper_state');
+          localStorage.removeItem('imagex_web_scraper_state');
       } catch (_) {}
       set({ webScraperState: reset });
     },
@@ -2708,7 +2743,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const updatedLogs = [entry, ...state.logs.slice(0, 1999)];
         if (typeof window !== 'undefined') {
           try {
-            localStorage.setItem('imagex_logs', JSON.stringify(updatedLogs.slice(0, 500)));
+            deferStorageWrite('imagex_logs', () => JSON.stringify(get().logs.slice(0, 500)));
           } catch (_) {}
         }
         return { logs: updatedLogs };
@@ -2718,6 +2753,7 @@ export const useAppStore = create<AppState>((set, get) => {
     clearLogs: () => {
       if (typeof window !== 'undefined') {
         try {
+          cancelStorageWrite('imagex_logs');
           localStorage.removeItem('imagex_logs');
         } catch (_) {}
       }
@@ -3106,9 +3142,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const targetFolder = (folder || 'Geral').trim() || 'Geral';
       const res = await backendApi.uploadPhotoAlbum(title, files, targetFolder);
       if (res && res.success) {
-        const albums = await backendApi.fetchRealAlbums();
-        set({ albums });
-        await get().syncAlbumFolders();
+        await get().syncAlbums();
         soundEffects.success(settings.soundEnabled);
         const curLang = (get().settings?.language || 'pt-BR') as 'pt-BR' | 'en-US';
         const tStore = translations[curLang]?.store || translations['pt-BR']?.store;
@@ -3309,6 +3343,7 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!video) exitAllFullscreen();
       set({ activePlayingVideo: video });
     },
+    setShortsActiveIndex: (index) => set({ shortsActiveIndex: index }),
     setActiveFolderModal: (modal) => set({ activeFolderModal: modal }),
 
     // Trash Bin Actions
@@ -3327,9 +3362,8 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const restored = await backendApi.restoreTrash(trashIds);
         if (restored.length > 0) {
-          const freshAlbums = await backendApi.fetchRealAlbums();
+          await get().syncAlbums();
           set(state => ({
-            albums: freshAlbums,
             selectedTrashIds: state.selectedTrashIds.filter(id => !restored.includes(id))
           }));
           await Promise.all([get().fetchTrash(), get().syncVideos()]);
@@ -3621,92 +3655,12 @@ export const useAppStore = create<AppState>((set, get) => {
         };
       }
 
-      const cleanTitle = (title || '').toLowerCase().trim();
-      const normTitle = cleanTitle.replace(/[_\-\.\s]+/g, ' ');
-
-      const extractKey = (u?: string) => {
-        if (!u) return '';
-        const mPh = u.match(/viewkey=([a-zA-Z0-9]+)/i);
-        if (mPh) return mPh[1];
-        const mEp = u.match(/video-([a-zA-Z0-9]{6,})/i);
-        if (mEp) return mEp[1];
-        const mPvv = u.match(/\/videos\/(-?\d+\/\d+\/[a-zA-Z0-9_]+)/i);
-        if (mPvv) return mPvv[1];
-        return u.split('?')[0].toLowerCase();
-      };
-
-      const targetKey = extractKey(url);
-
-      // 1. Verificar em Vídeos Salvos na Galeria
-      for (const v of videos) {
-        const vKey = extractKey(v.sourceUrl || v.url);
-        const vFingerprint = getCanonicalMediaFingerprint(v.title, v.sourceUrl || v.url, v.height);
-        const sameFingerprint = Boolean(targetFingerprint && vFingerprint && targetFingerprint === vFingerprint);
-        const vTitleNorm = (v.title || '').toLowerCase().replace(/[_\-\.\s]+/g, ' ');
-        const sameSource = Boolean(targetKey && vKey && targetKey === vKey);
-        const sameTitle = Boolean(normTitle && vTitleNorm && (normTitle === vTitleNorm || normTitle.includes(vTitleNorm) || vTitleNorm.includes(normTitle)));
-
-        if (sameFingerprint || sameSource || (sameTitle && normTitle.length > 8)) {
-          const vH = (v as any).height || ((v as any).resolution && parseInt(String((v as any).resolution).split('x')[1] || String((v as any).resolution))) || 0;
-          const targetH = height || 0;
-
-          if (targetH > 0 && vH > 0 && Math.abs(targetH - vH) > 50) {
-            const qual = vH >= 1080 ? '1080p HD' : (vH >= 720 ? '720p HD' : `${vH}p`);
-            return {
-              isSaved: true,
-              isExactDuplicate: false,
-              hasAlternativeResolution: true,
-              savedFolder: v.folder || 'Extraídos',
-              folder: v.folder || 'Extraídos',
-              targetId: v.id,
-              targetView: 'videos' as const,
-              qualityLabel: qual,
-            };
-          } else {
-            return {
-              isSaved: true,
-              isExactDuplicate: true,
-              hasAlternativeResolution: false,
-              savedFolder: v.folder || 'Extraídos',
-              folder: v.folder || 'Extraídos',
-              targetId: v.id,
-              targetView: 'videos' as const,
-            };
-          }
-        }
+      if (!savedLookup || indexedVideos !== videos || indexedAlbums !== albums) {
+        indexedVideos = videos;
+        indexedAlbums = albums;
+        savedLookup = createSavedMediaLookup(videos, albums, getCanonicalMediaFingerprint);
       }
-
-      // 2. Verificar em Álbuns Salvos na Galeria
-      for (const a of albums) {
-        const aKey = extractKey(a.sourceUrl);
-        const aFingerprint = getCanonicalMediaFingerprint(a.title, a.sourceUrl);
-        const sameFingerprint = Boolean(targetFingerprint && aFingerprint && targetFingerprint === aFingerprint);
-        const aTitleNorm = (a.title || '').toLowerCase().replace(/[_\-\.\s]+/g, ' ');
-        const sameSource = Boolean(targetKey && aKey && targetKey === aKey);
-        const sameTitle = Boolean(normTitle && aTitleNorm && normTitle === aTitleNorm);
-
-        if (sameFingerprint || sameSource || (sameTitle && normTitle.length > 8)) {
-          return {
-            isSaved: true,
-            isExactDuplicate: true,
-            hasAlternativeResolution: false,
-            savedFolder: a.folder || 'Geral',
-            folder: a.folder || 'Geral',
-            targetId: a.id,
-            targetView: 'gallery' as const,
-          };
-        }
-      }
-
-      return {
-        isSaved: false,
-        isExactDuplicate: false,
-        hasAlternativeResolution: false,
-        savedFolder: '',
-        folder: '',
-        targetId: '',
-        targetView: 'videos' as const,
-      };
+      return savedLookup(params);
     },
   };
 });

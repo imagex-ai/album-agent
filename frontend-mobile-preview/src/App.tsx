@@ -1,3 +1,4 @@
+import { useShallow } from 'zustand/react/shallow';
 import { toggleDesktopFullscreen, restoreDesktopWindow, exitAllFullscreen } from './services/desktopService';
 import React, { useEffect, useState, useRef } from 'react';
 import { AlertTriangle } from 'lucide-react';
@@ -53,7 +54,14 @@ export const App: React.FC = () => {
     syncBackendData,
     activeTabId,
     activeAlbumId
-  } = useAppStore();
+  } = useAppStore(useShallow(state => ({
+    currentView: state.currentView,
+    navigateToView: state.navigateToView,
+    settings: state.settings,
+    syncBackendData: state.syncBackendData,
+    activeTabId: state.activeTabId,
+    activeAlbumId: state.activeAlbumId,
+  })));
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const mainContainerRef = useRef<HTMLElement | null>(null);
 
@@ -225,8 +233,8 @@ export const App: React.FC = () => {
           </ErrorBoundary>
         </main>
 
-        {/* Spotify-style Mini-Dock for background extractions */}
-        <MiniTaskDock />
+        {/* Spotify-style Mini-Dock for background extractions (Hidden in Shorts to prevent overlay collision) */}
+        {currentView !== 'shorts' && <MiniTaskDock />}
       </div>
 
       {/* Global Modals & Drawers */}

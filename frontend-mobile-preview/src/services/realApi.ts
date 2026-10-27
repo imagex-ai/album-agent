@@ -1,14 +1,26 @@
 import { Album, AlbumFolder, ExtractionJob, ImageItem, DomainPattern, VideoItem, VideoFolder, TrashItem, TrashStats, ScanPageVideosResponse, OllamaHealthStatus, OllamaModelInfo, MultiAlbumPreviewImage } from '../types';
 import { colorPaletteCache } from './colorExtractor';
-import { getAlbumMediaSummary, getMediaCategory, inferMediaFormat, isVideoMedia, normalizeAlbumMediaTags, unwrapMediaSource } from '../utils/mediaClassification';
+import { cacheAlbumVideoTransport, getAlbumMediaSummary, getMediaCategory, inferMediaFormat, isVideoMedia, normalizeAlbumMediaTags, unwrapMediaSource } from '../utils/mediaClassification';
 
 export class BackendApiClient {
+  private inFlight = new Map<string, Promise<any>>();
+  private jobsEtag: string | null = null;
+  private previousJobs: any[] | null = null;
+
+  private coalesce<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const existing = this.inFlight.get(key);
+    if (existing) return existing;
+    const request = load().finally(() => { if (this.inFlight.get(key) === request) this.inFlight.delete(key); });
+    this.inFlight.set(key, request);
+    return request;
+  }
+
   /**
    * Checks if the Python FastAPI backend is live and reachable.
    */
   async checkBackendHealth(): Promise<boolean> {
     try {
-      const res = await fetch('/api/jobs/active', { method: 'GET', cache: 'no-store' });
+      const res = await fetch('/api/health', { method: 'GET', cache: 'no-store' });
       return res.ok;
     } catch {
       return false;
@@ -19,15 +31,39 @@ export class BackendApiClient {
    * Fetches all real albums saved in data/albums/ on disk.
    */
   async fetchRealAlbums(): Promise<Album[]> {
-    try {
-      const res = await fetch('/api/albums', { cache: 'no-store' });
-      if (!res.ok) return [];
-      const data = await res.json();
-      return data.map((item: any) => this.mapBackendAlbumToFrontend(item));
-    } catch (err) {
-      console.warn('Backend API not available for albums:', err);
-      return [];
-    }
+    return this.coalesce('albums', async () => {
+      // Keep full-record consumers (Shorts, export, duplicates) compatible, but
+      // parse/map bounded pages and yield between chunks so input stays usable.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const albums: Album[] = [];
+        let after: string | undefined;
+        let restart = false;
+        while (true) {
+          const params = new URLSearchParams({ limit: '24' });
+          if (after) params.set('after', after);
+          const res = await fetch(`/api/albums?${params}`, { cache: 'no-store' });
+          if (res.status === 409 && attempt === 0) { restart = true; break; }
+          if (!res.ok) throw new Error(`Albums request failed: ${res.status}`);
+          const page = await res.json();
+          if (!Array.isArray(page)) throw new Error('Invalid album response');
+          let sliceStarted = performance.now();
+          for (const item of page) {
+            albums.push(this.mapBackendAlbumToFrontend(item));
+            if (performance.now() - sliceStarted >= 8) {
+              await new Promise<void>(resolve => setTimeout(resolve, 0));
+              sliceStarted = performance.now();
+            }
+          }
+          // Older backends ignore paging; accept their complete list once.
+          if (res.headers?.get('X-Library-Paging') !== 'cursor' || page.length < 24) break;
+          const cursor = page[page.length - 1]?.session_id || page[page.length - 1]?.album_id;
+          if (!cursor || cursor === after) throw new Error('Invalid album page cursor');
+          after = cursor;
+        }
+        if (!restart) return albums;
+      }
+      throw new Error('Library changed during synchronization');
+    });
   }
 
   /**
@@ -78,13 +114,18 @@ export class BackendApiClient {
    * Fetches all persistent jobs from the Python backend (data/jobs.json).
    */
   async fetchAllJobs(): Promise<any[]> {
-    try {
-      const res = await fetch('/api/jobs', { cache: 'no-store' });
-      if (!res.ok) return [];
-      return await res.json();
-    } catch {
-      return [];
-    }
+    return this.coalesce('jobs', async () => {
+      const headers: Record<string, string> = {};
+      if (this.jobsEtag && this.previousJobs) headers['If-None-Match'] = this.jobsEtag;
+      const res = await fetch('/api/jobs', { cache: 'no-store', headers });
+      if (res.status === 304 && this.previousJobs) return this.previousJobs;
+      if (!res.ok) throw new Error(`Jobs request failed: ${res.status}`);
+      const jobs = await res.json();
+      if (!Array.isArray(jobs)) throw new Error('Invalid jobs response');
+      this.jobsEtag = res.headers?.get('ETag') || null;
+      this.previousJobs = jobs;
+      return jobs;
+    });
   }
 
   /**
@@ -627,68 +668,70 @@ export class BackendApiClient {
    * Fetches all videos and folders from data/videos/ on disk.
    */
   async fetchVideos(healThumbnails: boolean = false): Promise<{ videos: VideoItem[]; folders: VideoFolder[] }> {
-    try {
-      const url = healThumbnails ? '/api/videos?heal=true' : '/api/videos';
-      const res = await fetch(url, { cache: 'no-store' });
-      if (!res.ok) return { videos: [], folders: [] };
-      const data = await res.json();
-      return {
-        videos: (data.videos || []).map((v: any) => {
-          const effFolder = (v.folder || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-          const isWeb = Boolean(
-            v.source_origin === 'web' ||
-            (v.source_origin !== 'pc' && (
-              (v.source_url && (v.source_url.startsWith('http://') || v.source_url.startsWith('https://'))) ||
-              v.source_id ||
-              v.custom_stream_url ||
-              effFolder.startsWith('extra') ||
-              v.storage_location === 'stream_url'
-            ))
-          );
-          const resolvedOrigin = v.source_origin ? v.source_origin : (isWeb ? 'web' : 'pc');
-          return {
-            id: v.id,
-            title: v.title,
-            filename: v.filename,
-            folder: v.folder,
-            fileSizeBytes: v.file_size_bytes || 0,
-            format: v.format || 'MP4',
-            isFavorite: v.is_favorite || false,
-            createdAt: v.created_at || '',
-            relPath: v.rel_path,
-            storageLocation: (v.storage_location === 'render_local' ? 'local' : (v.storage_location || 'local')),
-            sourceOrigin: resolvedOrigin,
-            cloudUrl: v.cloud_url,
-            sourceUrl: v.source_url || v.sourceUrl || v.url,
-            sourceId: v.source_id,
-            url: v.url || v.source_url,
-            streamUrl: v.stream_url,
-            downloadUrl: v.download_url,
-            thumbnailUrl: v.thumbnail_url || `/api/videos/${v.id}/thumbnail`,
-            width: v.width || 0,
-            height: v.height || 0,
-            fps: v.fps || 0,
-            durationSeconds: v.duration_seconds || 0,
-            introEnd: v.intro_end || 0,
-            highlightStart: v.highlight_start || 0,
-            highlightEnd: v.highlight_end || 0,
-            highlightScore: v.highlight_score || 0,
-            highlights: v.highlights || [],
-            streamStatus: v.stream_status,
-            streamError: v.stream_error
-          };
-        }),
-        folders: (data.folders || []).map((f: any) => ({
-          id: f.id,
-          name: f.name,
-          videoCount: f.video_count || 0,
-          totalSizeBytes: f.total_size_bytes || 0
-        }))
-      };
-    } catch (err) {
-      console.warn('Backend API not available for videos:', err);
-      return { videos: [], folders: [] };
-    }
+    return this.coalesce(`videos:${healThumbnails}`, async () => {
+      try {
+        const url = healThumbnails ? '/api/videos?heal=true' : '/api/videos';
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) return { videos: [], folders: [] };
+        const data = await res.json();
+        return {
+          videos: (data.videos || []).map((v: any) => {
+            const effFolder = (v.folder || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+            const isWeb = Boolean(
+              v.source_origin === 'web' ||
+              (v.source_origin !== 'pc' && (
+                (v.source_url && (v.source_url.startsWith('http://') || v.source_url.startsWith('https://'))) ||
+                v.source_id ||
+                v.custom_stream_url ||
+                effFolder.startsWith('extra') ||
+                v.storage_location === 'stream_url'
+              ))
+            );
+            const resolvedOrigin = v.source_origin ? v.source_origin : (isWeb ? 'web' : 'pc');
+            return {
+              id: v.id,
+              title: v.title,
+              filename: v.filename,
+              folder: v.folder,
+              fileSizeBytes: v.file_size_bytes || 0,
+              format: v.format || 'MP4',
+              isFavorite: v.is_favorite || false,
+              createdAt: v.created_at || '',
+              relPath: v.rel_path,
+              storageLocation: (v.storage_location === 'render_local' ? 'local' : (v.storage_location || 'local')),
+              sourceOrigin: resolvedOrigin,
+              cloudUrl: v.cloud_url,
+              sourceUrl: v.source_url || v.sourceUrl || v.url,
+              sourceId: v.source_id,
+              url: v.url || v.source_url,
+              streamUrl: v.stream_url,
+              downloadUrl: v.download_url,
+              thumbnailUrl: v.thumbnail_url || `/api/videos/${v.id}/thumbnail`,
+              width: v.width || 0,
+              height: v.height || 0,
+              fps: v.fps || 0,
+              durationSeconds: v.duration_seconds || 0,
+              introEnd: v.intro_end || 0,
+              highlightStart: v.highlight_start || 0,
+              highlightEnd: v.highlight_end || 0,
+              highlightScore: v.highlight_score || 0,
+              highlights: v.highlights || [],
+              streamStatus: v.stream_status,
+              streamError: v.stream_error
+            };
+          }),
+          folders: (data.folders || []).map((f: any) => ({
+            id: f.id,
+            name: f.name,
+            videoCount: f.video_count || 0,
+            totalSizeBytes: f.total_size_bytes || 0
+          }))
+        };
+      } catch (err) {
+        console.warn('Backend API not available for videos:', err);
+        return { videos: [], folders: [] };
+      }
+    });
   }
 
   async uploadVideo(
@@ -1144,6 +1187,7 @@ export class BackendApiClient {
       return `/api/proxy-video-stream?url=${encodeURIComponent(url)}&referer=${encodeURIComponent(ref)}`;
     };
 
+    let hasVideoTransport = false;
     const images: ImageItem[] = (raw.images || []).map((img: any, idx: number) => {
       let orig = img.original_url || img.src || img.thumbnail_url;
       let thumb = img.thumbnail_url || img.src || img.original_url;
@@ -1213,6 +1257,7 @@ export class BackendApiClient {
         videoStreamUrl: img.video_stream_url
       };
       const transportIsVideo = isVideoMedia(mediaHints);
+      hasVideoTransport ||= transportIsVideo;
       const category = getMediaCategory(mediaHints);
       const mediaType: 'image' | 'video' | 'gif' = transportIsVideo ? 'video' : category === 'gif' ? 'gif' : 'image';
       const isAnimated = category === 'gif';
@@ -1288,6 +1333,7 @@ export class BackendApiClient {
     const updatedAt = raw.updated_at || raw.metadata?.updated_at || raw.metadata?.saved_at || createdAt;
 
 
+    cacheAlbumVideoTransport(images, hasVideoTransport);
     const mediaSummary = getAlbumMediaSummary({ images });
 
     const isLocalOrigin = raw.source_origin === 'local' ||

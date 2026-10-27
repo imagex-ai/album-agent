@@ -1,0 +1,11 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["frontend-mobile-preview/src"],
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Table Selection", "Scrollbar", "Toast"],
+  "ownership": { "Select/Listbox": "native" },
+  "evidence": {
+    "failurePaths": "scripts/test_performance_contracts.cjs",
+    "collectionBehavior": "tests/test_library_responses.py"
+  }
+}

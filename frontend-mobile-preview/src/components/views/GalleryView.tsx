@@ -1,3 +1,4 @@
+import { useShallow } from 'zustand/react/shallow';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LayoutGrid,
@@ -43,10 +44,11 @@ import { GalleryViewMode, Album } from '../../types';
 import { translations } from '../../i18n/translations';
 import { matchesPaletteFuzzy, CHROMATIC_PALETTE_COLORS, colorPaletteCache } from '../../services/colorExtractor';
 import { formatFileSize } from '../../utils/formatters';
-import { getAlbumMediaSummary, isVideoMedia, matchesAlbumMediaFilter } from '../../utils/mediaClassification';
+import { getAlbumMediaSummary, hasAlbumVideoTransport, matchesAlbumMediaFilter } from '../../utils/mediaClassification';
 import { IconBadge } from '../common/IconBadge';
 import { ColorFilterPopover } from '../common/ColorFilterPopover';
 import { ModalPortal } from '../common/ModalPortal';
+import { StableVirtualTable, VirtualCollection } from '../common/VirtualCollection';
 
 export const GalleryView: React.FC = () => {
   const {
@@ -91,16 +93,58 @@ export const GalleryView: React.FC = () => {
     isRenewingBatchStreams,
     batchRenewProgress,
     refreshBatchAlbumStreams
-  } = useAppStore();
+  } = useAppStore(useShallow(state => ({
+    albums: state.albums,
+    albumFolders: state.albumFolders,
+    syncAlbums: state.syncAlbums,
+    syncAlbumFolders: state.syncAlbumFolders,
+    activeAlbumFolder: state.activeAlbumFolder,
+    setActiveAlbumFolder: state.setActiveAlbumFolder,
+    activeAlbumFolderModal: state.activeAlbumFolderModal,
+    setActiveAlbumFolderModal: state.setActiveAlbumFolderModal,
+    createAlbumFolder: state.createAlbumFolder,
+    renameAlbumFolder: state.renameAlbumFolder,
+    deleteAlbumFolder: state.deleteAlbumFolder,
+    moveAlbumsToFolder: state.moveAlbumsToFolder,
+    galleryViewMode: state.galleryViewMode,
+    setGalleryViewMode: state.setGalleryViewMode,
+    gallerySearchQuery: state.gallerySearchQuery,
+    setGallerySearchQuery: state.setGallerySearchQuery,
+    galleryColorFilter: state.galleryColorFilter,
+    setGalleryColorFilter: state.setGalleryColorFilter,
+    galleryTagFilter: state.galleryTagFilter,
+    setGalleryTagFilter: state.setGalleryTagFilter,
+    gallerySortBy: state.gallerySortBy,
+    setGallerySortBy: state.setGallerySortBy,
+    gallerySortOrder: state.gallerySortOrder,
+    toggleGallerySortOrder: state.toggleGallerySortOrder,
+    selectedAlbumIds: state.selectedAlbumIds,
+    toggleSelectAlbum: state.toggleSelectAlbum,
+    selectAllAlbums: state.selectAllAlbums,
+    clearSelectedAlbums: state.clearSelectedAlbums,
+    toggleFavoriteAlbum: state.toggleFavoriteAlbum,
+    navigateToView: state.navigateToView,
+    deleteAlbum: state.deleteAlbum,
+    updateAlbum: state.updateAlbum,
+    openExportModal: state.openExportModal,
+    openLightbox: state.openLightbox,
+    setSlideshowOpen: state.setSlideshowOpen,
+    setGlobalSliderConfig: state.setGlobalSliderConfig,
+    settings: state.settings,
+    highlightedItemId: state.highlightedItemId,
+    isRenewingBatchStreams: state.isRenewingBatchStreams,
+    batchRenewProgress: state.batchRenewProgress,
+    refreshBatchAlbumStreams: state.refreshBatchAlbumStreams,
+  })));
   const isEn = settings?.language === 'en-US';
 
   const t: any = translations[settings.language].gallery || {};
   const tGlobalSlider: any = translations[settings.language].globalSlider || {};
-  const { uploadPhotoAlbum } = useAppStore();
+  const uploadPhotoAlbum = useAppStore(state => state.uploadPhotoAlbum);
 
   // Sync albums and folders on mount
   useEffect(() => {
-    syncAlbums();
+    syncAlbums(false);
     syncAlbumFolders();
   }, [syncAlbums, syncAlbumFolders]);
 
@@ -244,7 +288,7 @@ export const GalleryView: React.FC = () => {
 
   // Stream renewal follows the transport, including MP4 animations categorized as GIFs.
   const isAlbumWithVideos = (album: Album) => {
-    return Array.isArray(album.images) ? album.images.some(isVideoMedia) : getAlbumMediaSummary(album).hasVideos;
+    return hasAlbumVideoTransport(album);
   };
 
   // Botão de Renovar Streams: visível quando o filtro de vídeo está ativo ou quando uma pasta com vídeos está selecionada
@@ -938,7 +982,7 @@ export const GalleryView: React.FC = () => {
       {galleryViewMode === 'details' ? (
         /* Windows Explorer Detailed Table Mode with Touch Scroll Container */
         <div className="glass-panel rounded-2xl border border-border overflow-x-auto touch-scroll shadow-sm">
-          <table className="w-full text-left text-xs min-w-[700px] border-collapse">
+          <StableVirtualTable className="w-full text-left text-xs min-w-[700px] border-collapse">
             <thead className="bg-surface-elevated border-b border-border text-slate-400 font-semibold font-mono text-[11px] uppercase tracking-wider">
               <tr>
                 <th className="p-3 w-10 text-center">
@@ -966,8 +1010,8 @@ export const GalleryView: React.FC = () => {
                 <th className="p-3 text-right">{isEn ? "Actions" : "Ações"}</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-white/5">
-              {filtered.map(album => (
+            <VirtualCollection items={filtered} itemKey={album => album.id} layoutKey="album-table" tableColumns={8} gap={0} estimatedRowHeight={72} highlightedKey={highlightedItemId}
+              className="divide-y divide-white/5" renderItem={album => (
                 <tr
                   key={album.id}
                   onClick={() => navigateToView('album-detail', album.id)}
@@ -1046,14 +1090,13 @@ export const GalleryView: React.FC = () => {
                     </div>
                   </td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              )} />
+          </StableVirtualTable>
         </div>
       ) : galleryViewMode === 'list' ? (
         /* List with Interactive Thumbnail Carousel Mode (Restored in Full!) */
-        <div className="space-y-4">
-          {filtered.map(album => (
+        <VirtualCollection items={filtered} itemKey={album => album.id} layoutKey="album-list" gap={16} estimatedRowHeight={180} highlightedKey={highlightedItemId}
+          className="space-y-4" renderItem={album => (
             <div
               key={album.id}
               onClick={() => navigateToView('album-detail', album.id)}
@@ -1151,11 +1194,11 @@ export const GalleryView: React.FC = () => {
                 )}
               </div>
             </div>
-          ))}
-        </div>
+          )} />
       ) : (
         /* Standard Grid Views (XL, LG, MD) Responsive */
-        <div
+        <VirtualCollection items={filtered} itemKey={album => album.id} layoutKey={`album-${galleryViewMode}`} estimatedRowHeight={350} highlightedKey={highlightedItemId}
+          columns={galleryViewMode === 'grid-xl' ? [[0, 1], [640, 2], [1024, 3]] : galleryViewMode === 'grid-md' ? [[0, 2], [640, 3], [1024, 5]] : [[0, 1], [640, 2], [1024, 4]]}
           className={`gpu-accelerated-grid grid gap-3 sm:gap-5 ${
             galleryViewMode === 'grid-xl'
               ? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3'
@@ -1163,8 +1206,7 @@ export const GalleryView: React.FC = () => {
               ? 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-5'
               : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-4'
           }`}
-        >
-          {filtered.map(album => {
+          renderItem={album => {
             const isSelected = selectedAlbumIds.includes(album.id);
             const mediaSummary = getAlbumMediaSummary(album);
             const albumKey = getCanonicalMediaFingerprint(album.title, album.sourceUrl);
@@ -1366,8 +1408,7 @@ export const GalleryView: React.FC = () => {
               </div>
             </div>
             );
-          })}
-        </div>
+          }} />
       )}
 
       {/* Empty State when no albums match filters or folder */}

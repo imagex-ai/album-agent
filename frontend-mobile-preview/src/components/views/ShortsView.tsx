@@ -22,9 +22,11 @@ import {
   FastForward,
   X,
   RotateCcw,
-  Zap
+  Zap,
+  AlertTriangle
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
+import { toggleAppFullscreen, exitAllFullscreen } from '../../services/desktopService';
 import { translations } from '../../i18n/translations';
 import { VideoHighlight } from '../../types';
 
@@ -90,6 +92,16 @@ function formatCleanCaption(rawTitle: string): string {
     .trim() || rawTitle;
 }
 
+function sanitizeHighlightLabel(rawLabel?: string, fallback: string = 'Clímax'): string {
+  if (!rawLabel) return fallback;
+  const cleaned = rawLabel
+    .replace(/^[\?\s\uFFFD\u200B\uFEFF🥇🥈🥉▶️⚡🔥✨#0-9\.\-_:]+/, '')
+    .replace(/[\?\uFFFD]+/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return cleaned || fallback;
+}
+
 function getEffectiveHighlightStart(item?: ShortsItem, hlIdx?: number): number {
   if (!item || hlIdx === -1) return 0; // Explicitly chosen: Início do vídeo (0:00)
   const effectiveIdx = hlIdx !== undefined ? hlIdx : 0;
@@ -100,6 +112,23 @@ function getEffectiveHighlightStart(item?: ShortsItem, hlIdx?: number): number {
     return item.startTime;
   }
   return 0;
+}
+
+function getEffectiveHighlightRange(item?: ShortsItem, hlIdx?: number, desiredWindow: number = 30): { start: number; end: number } {
+  if (!item) return { start: 0, end: desiredWindow };
+  if (hlIdx === -1) {
+    return { start: 0, end: desiredWindow };
+  }
+  const effectiveIdx = hlIdx !== undefined ? hlIdx : 0;
+  if (item.highlights && item.highlights[effectiveIdx]) {
+    const start = item.highlights[effectiveIdx].start || 0;
+    return { start, end: start + desiredWindow };
+  }
+  if (item.startTime && item.startTime > 0) {
+    const start = item.startTime;
+    return { start, end: start + desiredWindow };
+  }
+  return { start: 0, end: desiredWindow };
 }
 
 function checkVideoFullyLoaded(v: HTMLVideoElement | null): boolean {
@@ -140,6 +169,8 @@ export const ShortsView: React.FC = () => {
     setSlideshowOpen,
     openTabs,
     settings,
+    shortsActiveIndex,
+    setShortsActiveIndex,
   } = useAppStore();
   const t = translations[settings.language];
 
@@ -164,7 +195,9 @@ export const ShortsView: React.FC = () => {
   const [expandedCaptionId, setExpandedCaptionId] = useState<string | null>(null);
   const [videoProgress, setVideoProgress] = useState<number>(0);
 
-  const [activeIndex, setActiveIndex] = useState<number>(0);
+  const [activeIndex, setActiveIndex] = useState<number>(() => {
+    return typeof shortsActiveIndex === 'number' && shortsActiveIndex >= 0 ? shortsActiveIndex : 0;
+  });
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [heartBurstId, setHeartBurstId] = useState<string | null>(null);
   const [highlightIndexMap, setHighlightIndexMap] = useState<Record<string, number>>({});
@@ -172,6 +205,50 @@ export const ShortsView: React.FC = () => {
   const [isAnalyzingActive, setIsAnalyzingActive] = useState<boolean>(false);
   const [isActiveMediaReady, setIsActiveMediaReady] = useState<boolean>(false);
   const canPreloadNext = isActiveMediaReady && !isAnalyzingActive;
+
+  // Interactive Climax Scrubber State
+  const [isScrubbing, setIsScrubbing] = useState<boolean>(false);
+  const isScrubbingRef = useRef<boolean>(false);
+  isScrubbingRef.current = isScrubbing;
+  const [hoverScrubTime, setHoverScrubTime] = useState<{ time: number; pct: number } | null>(null);
+  const wasPlayingBeforeScrubRef = useRef<boolean>(false);
+
+  // Fullscreen State
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+
+  // Immersive Mode & Playback Error Controls
+  const [areControlsVisible, setAreControlsVisible] = useState<boolean>(true);
+  const [videoErrorMap, setVideoErrorMap] = useState<Record<string, string>>({});
+  const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const errorSkipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastWheelTimestampRef = useRef<number>(0);
+  const wheelAccumulatorRef = useRef<number>(0);
+  const wheelResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTouchEndTimestampRef = useRef<number>(0);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // Fullscreen change listener to sync isFullscreen state across browser & desktop
+  useEffect(() => {
+    const handleFsChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement || (document as any).webkitFullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', handleFsChange);
+    document.addEventListener('webkitfullscreenchange', handleFsChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFsChange);
+      document.removeEventListener('webkitfullscreenchange', handleFsChange);
+    };
+  }, []);
+
+  const resetControlsTimer = useCallback(() => {
+    setAreControlsVisible(true);
+    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+    if (!isPausedRef.current) {
+      controlsTimeoutRef.current = setTimeout(() => {
+        setAreControlsVisible(false);
+      }, 3500);
+    }
+  }, []);
 
   const handleCycleHighlight = useCallback((item: ShortsItem) => {
     const list = (item.highlights && item.highlights.length > 0)
@@ -201,6 +278,8 @@ export const ShortsView: React.FC = () => {
       ...prev,
       [item.id]: nextIdx,
     }));
+    setVideoProgress(0);
+    resetControlsTimer();
 
     const vid = activeVideoRef.current;
     if (vid) {
@@ -213,7 +292,7 @@ export const ShortsView: React.FC = () => {
         vid.play().catch(() => {});
       }
     }
-  }, [highlightIndexMap]);
+  }, [highlightIndexMap, resetControlsTimer]);
 
   const containerHeightInit = () => {
     if (typeof window !== 'undefined' && window.innerHeight > 0) {
@@ -223,16 +302,20 @@ export const ShortsView: React.FC = () => {
   };
   const [containerHeight, setContainerHeight] = useState<number>(containerHeightInit);
 
-  // Global Escape key listener to exit Shorts view
+  // Global Escape key listener (closes filter drawer first if open, else exits Shorts view)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        handleExitShorts();
+        if (showFiltersBar) {
+          setShowFiltersBar(false);
+        } else {
+          handleExitShorts();
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleExitShorts]);
+  }, [showFiltersBar, handleExitShorts]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const activeVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -262,6 +345,10 @@ export const ShortsView: React.FC = () => {
       if (programmaticTimeoutRef.current) clearTimeout(programmaticTimeoutRef.current);
       if (singleTapTimerRef.current) clearTimeout(singleTapTimerRef.current);
       if (heartBurstTimeoutRef.current) clearTimeout(heartBurstTimeoutRef.current);
+      if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+      if (errorSkipTimerRef.current) clearTimeout(errorSkipTimerRef.current);
+      if (wheelResetTimerRef.current) clearTimeout(wheelResetTimerRef.current);
+      exitAllFullscreen(setIsFullscreen);
     };
   }, []);
 
@@ -453,6 +540,23 @@ export const ShortsView: React.FC = () => {
     return list;
   }, [allItems, mediaFilter, orientationFilter, selectedFolder, sequenceMode, shuffleSeed]);
 
+  const handleChangeHighlightDuration = useCallback((dur: number) => {
+    setHighlightDuration(dur);
+    const item = feedItems[activeIndexRef.current];
+    const vid = activeVideoRef.current;
+    if (item && item.kind === 'video' && vid) {
+      const range = getEffectiveHighlightRange(item, highlightIndexMap[item.id], dur);
+      const targetStart = (vid.duration > 0 && range.start >= vid.duration) ? 0 : range.start;
+      const targetEnd = (vid.duration > 0) ? Math.min(vid.duration, Math.max(targetStart + 1, range.end)) : Math.max(targetStart + 1, range.end);
+      if (vid.currentTime >= targetEnd - 0.15) {
+        vid.currentTime = targetStart;
+      }
+      const windowLen = Math.max(1, targetEnd - targetStart);
+      const elapsed = Math.max(0, vid.currentTime - targetStart);
+      setVideoProgress(Math.min(100, Math.max(0, (elapsed / windowLen) * 100)));
+    }
+  }, [feedItems, highlightIndexMap]);
+
   // Guard activeIndex within feed boundary and align scroll if catalog shrinks
   useEffect(() => {
     if (feedItems.length > 0 && activeIndex >= feedItems.length) {
@@ -537,6 +641,10 @@ export const ShortsView: React.FC = () => {
     if (scrollTimeoutRef.current) {
       clearTimeout(scrollTimeoutRef.current);
       scrollTimeoutRef.current = null;
+    }
+    if (errorSkipTimerRef.current) {
+      clearTimeout(errorSkipTimerRef.current);
+      errorSkipTimerRef.current = null;
     }
 
     if (bounded === activeIndexRef.current) {
@@ -978,19 +1086,104 @@ export const ShortsView: React.FC = () => {
     return () => clearTimeout(timer);
   }, [autoAdvance, isPaused, activeIndex, feedItems, scrollToIndex]);
 
-  // Keyboard navigation (ArrowUp, ArrowDown, Space, M, R)
+  const handleFavoriteOnly = useCallback((item: ShortsItem) => {
+    resetControlsTimer();
+    if (!item.isFavorite) {
+      if (item.sourceVideoId) {
+        toggleVideoFavorite(item.sourceVideoId);
+      } else if (item.sourceAlbumId && item.sourceImageId) {
+        toggleFavoriteImage(item.sourceAlbumId, item.sourceImageId);
+      }
+    }
+    setHeartBurstId(item.id);
+    if (heartBurstTimeoutRef.current) {
+      clearTimeout(heartBurstTimeoutRef.current);
+    }
+    heartBurstTimeoutRef.current = setTimeout(() => {
+      setHeartBurstId(prev => (prev === item.id ? null : prev));
+      heartBurstTimeoutRef.current = null;
+    }, 750);
+  }, [toggleVideoFavorite, toggleFavoriteImage, resetControlsTimer]);
+
+  const handleToggleFavorite = useCallback((item: ShortsItem) => {
+    resetControlsTimer();
+    if (item.sourceVideoId) {
+      toggleVideoFavorite(item.sourceVideoId);
+    } else if (item.sourceAlbumId && item.sourceImageId) {
+      toggleFavoriteImage(item.sourceAlbumId, item.sourceImageId);
+    }
+    if (!item.isFavorite) {
+      setHeartBurstId(item.id);
+      if (heartBurstTimeoutRef.current) {
+        clearTimeout(heartBurstTimeoutRef.current);
+      }
+      heartBurstTimeoutRef.current = setTimeout(() => {
+        setHeartBurstId(prev => (prev === item.id ? null : prev));
+        heartBurstTimeoutRef.current = null;
+      }, 750);
+    }
+  }, [toggleVideoFavorite, toggleFavoriteImage, resetControlsTimer]);
+
+  // Keyboard navigation (ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Space, H/C, L, F, M, R)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return;
+      if (showFiltersBar) return;
+      resetControlsTimer();
+      const currentItem = feedItems[activeIndexRef.current];
+
       if (e.key === 'ArrowDown' || e.key === 'PageDown') {
         e.preventDefault();
-        scrollToIndex(activeIndex + 1);
+        scrollToIndex(activeIndexRef.current + 1);
       } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
         e.preventDefault();
-        scrollToIndex(activeIndex - 1);
+        scrollToIndex(activeIndexRef.current - 1);
       } else if (e.key === ' ' || e.code === 'Space') {
         e.preventDefault();
         setIsPaused(p => !p);
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const vid = activeVideoRef.current;
+        if (vid && currentItem && currentItem.kind === 'video') {
+          const range = getEffectiveHighlightRange(currentItem, highlightIndexMap[currentItem.id], highlightDuration);
+          const targetStart = (vid.duration > 0 && range.start >= vid.duration) ? 0 : range.start;
+          const targetEnd = (vid.duration > 0) ? Math.min(vid.duration, Math.max(targetStart + 1, range.end)) : Math.max(targetStart + 1, range.end);
+          const newTime = Math.max(targetStart, vid.currentTime - 5);
+          try {
+            vid.currentTime = newTime;
+            const windowLen = Math.max(1, targetEnd - targetStart);
+            const elapsed = Math.max(0, newTime - targetStart);
+            setVideoProgress(Math.min(100, Math.max(0, (elapsed / windowLen) * 100)));
+          } catch (_) {}
+        }
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        const vid = activeVideoRef.current;
+        if (vid && currentItem && currentItem.kind === 'video') {
+          const range = getEffectiveHighlightRange(currentItem, highlightIndexMap[currentItem.id], highlightDuration);
+          const targetStart = (vid.duration > 0 && range.start >= vid.duration) ? 0 : range.start;
+          const targetEnd = (vid.duration > 0) ? Math.min(vid.duration, Math.max(targetStart + 1, range.end)) : Math.max(targetStart + 1, range.end);
+          const newTime = Math.min(targetEnd - 0.25, vid.currentTime + 5);
+          try {
+            vid.currentTime = newTime;
+            const windowLen = Math.max(1, targetEnd - targetStart);
+            const elapsed = Math.max(0, newTime - targetStart);
+            setVideoProgress(Math.min(100, Math.max(0, (elapsed / windowLen) * 100)));
+          } catch (_) {}
+        }
+      } else if (e.key.toLowerCase() === 'h' || e.key.toLowerCase() === 'c') {
+        e.preventDefault();
+        if (currentItem && currentItem.kind === 'video') {
+          handleCycleHighlight(currentItem);
+        }
+      } else if (e.key.toLowerCase() === 'l') {
+        e.preventDefault();
+        if (currentItem) {
+          handleToggleFavorite(currentItem);
+        }
+      } else if (e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        toggleAppFullscreen(isFullscreen, setIsFullscreen);
       } else if (e.key.toLowerCase() === 'm') {
         e.preventDefault();
         handleToggleMute();
@@ -1002,26 +1195,153 @@ export const ShortsView: React.FC = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeIndex, scrollToIndex, handleToggleMute]);
+  }, [
+    showFiltersBar,
+    scrollToIndex,
+    handleToggleMute,
+    handleCycleHighlight,
+    handleToggleFavorite,
+    feedItems,
+    highlightIndexMap,
+    highlightDuration,
+    resetControlsTimer,
+    isFullscreen
+  ]);
 
-  const handleToggleFavorite = useCallback((item: ShortsItem) => {
-    if (item.sourceVideoId) {
-      toggleVideoFavorite(item.sourceVideoId);
-    } else if (item.sourceAlbumId && item.sourceImageId) {
-      toggleFavoriteImage(item.sourceAlbumId, item.sourceImageId);
+  // Modern Web Guidance: Touch/Mouse Pointer Event Scrubber Seek & Drag
+  const updateScrubFromPointer = useCallback((clientX: number, trackEl: HTMLElement, targetItem: ShortsItem) => {
+    if (targetItem.kind !== 'video') return;
+    const vid = activeVideoRef.current;
+    if (!vid) return;
+
+    const rect = trackEl.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const relX = Math.max(0, Math.min(rect.width, clientX - rect.left));
+    const pct = relX / rect.width;
+
+    const range = getEffectiveHighlightRange(targetItem, highlightIndexMap[targetItem.id], highlightDuration);
+    const targetStart = (vid.duration > 0 && range.start >= vid.duration) ? 0 : range.start;
+    const targetEnd = (vid.duration > 0) ? Math.min(vid.duration, Math.max(targetStart + 1, range.end)) : Math.max(targetStart + 1, range.end);
+
+    const newTime = targetStart + pct * Math.max(1, targetEnd - targetStart);
+    try {
+      vid.currentTime = newTime;
+    } catch (_) {}
+    setVideoProgress(pct * 100);
+    setHoverScrubTime({ time: newTime, pct: pct * 100 });
+    resetControlsTimer();
+  }, [highlightIndexMap, highlightDuration, resetControlsTimer]);
+
+  const handleScrubberPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>, targetItem: ShortsItem) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const trackEl = e.currentTarget;
+    try {
+      trackEl.setPointerCapture(e.pointerId);
+    } catch (_) {}
+
+    const vid = activeVideoRef.current;
+    if (vid) {
+      wasPlayingBeforeScrubRef.current = !isPausedRef.current && !vid.paused;
+      if (wasPlayingBeforeScrubRef.current) {
+        try {
+          vid.pause();
+        } catch (_) {}
+      }
+    } else {
+      wasPlayingBeforeScrubRef.current = false;
     }
-    setHeartBurstId(item.id);
-    if (heartBurstTimeoutRef.current) {
-      clearTimeout(heartBurstTimeoutRef.current);
+
+    setIsScrubbing(true);
+    isScrubbingRef.current = true;
+    updateScrubFromPointer(e.clientX, trackEl, targetItem);
+  }, [updateScrubFromPointer]);
+
+  const handleScrubberPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>, targetItem: ShortsItem) => {
+    const trackEl = e.currentTarget;
+    if (isScrubbingRef.current) {
+      e.preventDefault();
+      e.stopPropagation();
+      updateScrubFromPointer(e.clientX, trackEl, targetItem);
+    } else {
+      if (targetItem.kind !== 'video') return;
+      const rect = trackEl.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const relX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+      const pct = relX / rect.width;
+      const vid = activeVideoRef.current;
+      const duration = vid?.duration || 0;
+      const range = getEffectiveHighlightRange(targetItem, highlightIndexMap[targetItem.id], highlightDuration);
+      const targetStart = (duration > 0 && range.start >= duration) ? 0 : range.start;
+      const targetEnd = (duration > 0) ? Math.min(duration, Math.max(targetStart + 1, range.end)) : Math.max(targetStart + 1, range.end);
+      const previewTime = targetStart + pct * Math.max(1, targetEnd - targetStart);
+      setHoverScrubTime({ time: previewTime, pct: pct * 100 });
     }
-    heartBurstTimeoutRef.current = setTimeout(() => {
-      setHeartBurstId(prev => (prev === item.id ? null : prev));
-      heartBurstTimeoutRef.current = null;
-    }, 750);
-  }, [toggleVideoFavorite, toggleFavoriteImage]);
+  }, [highlightIndexMap, highlightDuration, updateScrubFromPointer]);
+
+  const handleScrubberPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isScrubbingRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch (_) {}
+    setIsScrubbing(false);
+    isScrubbingRef.current = false;
+    setHoverScrubTime(null);
+    const vid = activeVideoRef.current;
+    if (vid && wasPlayingBeforeScrubRef.current && !isPausedRef.current) {
+      vid.play().catch(() => {});
+    }
+    wasPlayingBeforeScrubRef.current = false;
+  }, []);
+
+  const handleScrubberPointerLeave = useCallback(() => {
+    if (!isScrubbingRef.current) {
+      setHoverScrubTime(null);
+    }
+  }, []);
+
+  // Desktop Normalized Smooth Mouse Wheel Navigation
+  useEffect(() => {
+    const rootEl = rootRef.current;
+    if (!rootEl) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      if ((e.target as HTMLElement)?.closest('.no-shorts-wheel')) return;
+      e.preventDefault();
+      resetControlsTimer();
+
+      wheelAccumulatorRef.current += e.deltaY;
+      if (wheelResetTimerRef.current) clearTimeout(wheelResetTimerRef.current);
+      wheelResetTimerRef.current = setTimeout(() => {
+        wheelAccumulatorRef.current = 0;
+      }, 200);
+
+      const now = Date.now();
+      if (now - lastWheelTimestampRef.current < 380) return;
+
+      if (Math.abs(wheelAccumulatorRef.current) >= 45) {
+        lastWheelTimestampRef.current = now;
+        const direction = wheelAccumulatorRef.current > 0 ? 1 : -1;
+        wheelAccumulatorRef.current = 0;
+        scrollToIndex(activeIndexRef.current + direction);
+      }
+    };
+
+    rootEl.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      rootEl.removeEventListener('wheel', handleWheel);
+      if (wheelResetTimerRef.current) clearTimeout(wheelResetTimerRef.current);
+    };
+  }, [scrollToIndex, resetControlsTimer]);
 
   // Disambiguate single-tap vs double-tap and reject scroll displacement
   const handleTouchStart = (e: React.TouchEvent) => {
+    resetControlsTimer();
     isTouchInteractionRef.current = true;
     isProgrammaticScrollRef.current = false;
     if (e.touches.length === 1) {
@@ -1039,15 +1359,19 @@ export const ShortsView: React.FC = () => {
     isTouchInteractionRef.current = false;
   }, []);
 
+  const DOUBLE_TAP_MAX_DELAY = 240;
+
   const handleSlideTap = useCallback((item: ShortsItem) => {
+    resetControlsTimer();
     const now = Date.now();
-    if (lastTapRef.current.id === item.id && now - lastTapRef.current.time < 320) {
+    if (lastTapRef.current.id === item.id && now - lastTapRef.current.time < DOUBLE_TAP_MAX_DELAY) {
       if (singleTapTimerRef.current) {
         clearTimeout(singleTapTimerRef.current);
         singleTapTimerRef.current = null;
       }
       lastTapRef.current = { time: 0, id: '' };
-      handleToggleFavorite(item);
+      // Double tap strictly adds to favorite or affixes heart animation; NEVER unfavorites!
+      handleFavoriteOnly(item);
     } else {
       lastTapRef.current = { time: now, id: item.id };
       if (singleTapTimerRef.current) {
@@ -1056,9 +1380,9 @@ export const ShortsView: React.FC = () => {
       singleTapTimerRef.current = setTimeout(() => {
         setIsPaused(p => !p);
         singleTapTimerRef.current = null;
-      }, 280);
+      }, DOUBLE_TAP_MAX_DELAY);
     }
-  }, [handleToggleFavorite]);
+  }, [handleFavoriteOnly, resetControlsTimer]);
 
   const handleTouchEnd = useCallback((e: React.TouchEvent, item: ShortsItem) => {
     if (!touchStartPosRef.current) return;
@@ -1067,6 +1391,7 @@ export const ShortsView: React.FC = () => {
     const dx = touch.clientX - touchStartPosRef.current.x;
     const dy = touch.clientY - touchStartPosRef.current.y;
     touchStartPosRef.current = null;
+    lastTouchEndTimestampRef.current = Date.now();
 
     // Movement > 12px indicates scroll/swipe gesture, not a stationary tap
     if (Math.hypot(dx, dy) > 12) {
@@ -1078,7 +1403,7 @@ export const ShortsView: React.FC = () => {
   }, [handleSlideTap]);
 
   const handleSlideClick = useCallback((item: ShortsItem) => {
-    if (isTouchInteractionRef.current) {
+    if (isTouchInteractionRef.current || Date.now() - lastTouchEndTimestampRef.current < 450) {
       isTouchInteractionRef.current = false;
       return;
     }
@@ -1100,15 +1425,35 @@ export const ShortsView: React.FC = () => {
     setVideoProgress(0);
     setExpandedCaptionId(null);
     setIsPaused(false);
-  }, [activeIndex]);
+    setIsScrubbing(false);
+    isScrubbingRef.current = false;
+    setHoverScrubTime(null);
+    if (errorSkipTimerRef.current) {
+      clearTimeout(errorSkipTimerRef.current);
+      errorSkipTimerRef.current = null;
+    }
+    resetControlsTimer();
+    if (typeof setShortsActiveIndex === 'function') {
+      setShortsActiveIndex(activeIndex);
+    }
+  }, [activeIndex, setShortsActiveIndex, resetControlsTimer]);
 
   const hasActiveCustomFilters =
     orientationFilter !== 'all' || selectedFolder !== '' || sequenceMode !== 'random';
 
   return (
-    <div className="relative w-full h-full bg-black overflow-hidden flex flex-col select-none">
+    <div
+      ref={rootRef}
+      onMouseMove={resetControlsTimer}
+      onTouchMove={resetControlsTimer}
+      className="relative w-full h-full bg-black overflow-hidden flex flex-col select-none"
+    >
       {/* Ultra-Clean Social Media Top Overlay Bar (TikTok / Reels Style) */}
-      <div className="absolute top-0 inset-x-0 z-30 pt-2.5 pb-6 px-3 sm:px-5 bg-gradient-to-b from-black/80 via-black/35 to-transparent pointer-events-none">
+      <div
+        className={`absolute top-0 inset-x-0 z-30 pt-2.5 pb-6 px-3 sm:px-5 bg-gradient-to-b from-black/80 via-black/35 to-transparent pointer-events-none transition-all duration-300 ${
+          areControlsVisible || isPaused || showFiltersBar ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4'
+        }`}
+      >
         <div className="max-w-[540px] mx-auto flex items-center justify-between gap-2 pointer-events-auto flex-nowrap">
           {/* Left: Exit/Back Button + Clean Category Tabs with Glowing Active Underline */}
           <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-nowrap overflow-hidden">
@@ -1204,12 +1549,12 @@ export const ShortsView: React.FC = () => {
       {/* Bottom Sheet Filter & Preferences Drawer (Closed by Default) */}
       {showFiltersBar && (
         <div
-          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-end justify-center"
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-end justify-center no-shorts-wheel"
           onClick={() => setShowFiltersBar(false)}
         >
           <div
             onClick={e => e.stopPropagation()}
-            className="w-full max-w-[540px] bg-slate-950/95 backdrop-blur-2xl border-t border-x border-white/15 rounded-t-3xl p-4 sm:p-5 shadow-2xl space-y-4 max-h-[82dvh] overflow-y-auto"
+            className="w-full max-w-[540px] bg-slate-950/95 backdrop-blur-2xl border-t border-x border-white/15 rounded-t-3xl p-4 sm:p-5 shadow-2xl space-y-4 max-h-[82dvh] overflow-y-auto no-shorts-wheel"
           >
             {/* Drag Handle */}
             <div className="w-10 h-1 rounded-full bg-white/20 mx-auto -mt-1 mb-1" />
@@ -1387,7 +1732,7 @@ export const ShortsView: React.FC = () => {
                 {[15, 30, 60].map(dur => (
                   <button
                     key={dur}
-                    onClick={() => setHighlightDuration(dur)}
+                    onClick={() => handleChangeHighlightDuration(dur)}
                     className={`py-2 px-2.5 rounded-xl text-xs font-bold border flex items-center justify-center gap-1 transition-all cursor-pointer ${
                       highlightDuration === dur
                         ? 'bg-amber-500/25 text-amber-300 border-amber-400 shadow-lg shadow-amber-500/20'
@@ -1438,9 +1783,6 @@ export const ShortsView: React.FC = () => {
           onScroll={handleScroll}
           onTouchStart={handleTouchStart}
           onTouchCancel={handleTouchCancel}
-          onWheel={() => {
-            isProgrammaticScrollRef.current = false;
-          }}
           className="flex-1 w-full h-full overflow-y-scroll snap-y snap-mandatory no-scrollbar touch-pan-y overscroll-contain"
           style={{
             scrollSnapType: 'y mandatory',
@@ -1534,8 +1876,21 @@ export const ShortsView: React.FC = () => {
                           playsInline
                           {...({ 'webkit-playsinline': 'true', 'x5-playsinline': 'true' } as any)}
                           preload="auto"
-                          loop={!autoAdvance}
+                          loop={false}
                           muted={isActive ? isMuted : true}
+                          onError={(e) => {
+                            if (!isActive) return;
+                            const v = e.currentTarget;
+                            const code = v.error?.code;
+                            const msg = code === 2 ? 'Erro de rede ao carregar vídeo' : code === 3 ? 'Falha na decodificação do vídeo' : code === 4 ? 'Formato não suportado ou link expirado' : 'Falha ao carregar stream';
+                            setVideoErrorMap(prev => ({ ...prev, [item.id]: msg }));
+                            if (autoAdvance) {
+                              if (errorSkipTimerRef.current) clearTimeout(errorSkipTimerRef.current);
+                              errorSkipTimerRef.current = setTimeout(() => {
+                                scrollToIndex(idx + 1);
+                              }, 2400);
+                            }
+                          }}
                           onLoadedMetadata={(e) => {
                             const v = e.currentTarget;
                             const target = getEffectiveHighlightStart(item, highlightIndexMap[item.id]);
@@ -1593,19 +1948,53 @@ export const ShortsView: React.FC = () => {
                           }}
                           onTimeUpdate={(e) => {
                             if (!isActive) return;
+                            if (isScrubbingRef.current) return;
                             const v = e.currentTarget;
-                            if (v.duration > 0) {
-                              setVideoProgress((v.currentTime / v.duration) * 100);
-                            }
                             if (!isActiveMediaReady && checkVideoFullyLoaded(v)) {
                               setIsActiveMediaReady(true);
                             }
+
+                            const range = getEffectiveHighlightRange(item, highlightIndexMap[item.id], highlightDuration);
+                            const targetStart = (v.duration > 0 && range.start >= v.duration) ? 0 : range.start;
+                            const targetEnd = (v.duration > 0) ? Math.min(v.duration, Math.max(targetStart + 1, range.end)) : Math.max(targetStart + 1, range.end);
+
+                            // Boundary check: Climax duration window finished
+                            if (v.currentTime >= targetEnd - 0.15) {
+                              if (autoAdvance) {
+                                scrollToIndex(idx + 1);
+                                return;
+                              } else {
+                                try {
+                                  v.currentTime = targetStart;
+                                  if (!isPausedRef.current) {
+                                    v.play().catch(() => {});
+                                  }
+                                } catch (_) {}
+                                setVideoProgress(0);
+                                return;
+                              }
+                            }
+
+                            // Calculate synchronized climax window progress (0% to 100%)
+                            const windowLen = Math.max(1, targetEnd - targetStart);
+                            const elapsed = Math.max(0, v.currentTime - targetStart);
+                            const pct = Math.min(100, Math.max(0, (elapsed / windowLen) * 100));
+                            setVideoProgress(pct);
                           }}
                           onEnded={() => {
                             if (isActive) {
                               setIsActiveMediaReady(true);
                               if (autoAdvance) {
                                 scrollToIndex(idx + 1);
+                              } else {
+                                const range = getEffectiveHighlightRange(item, highlightIndexMap[item.id], highlightDuration);
+                                const vid = activeVideoRef.current;
+                                if (vid) {
+                                  const targetStart = (vid.duration > 0 && range.start >= vid.duration) ? 0 : range.start;
+                                  vid.currentTime = targetStart;
+                                  vid.play().catch(() => {});
+                                }
+                                setVideoProgress(0);
                               }
                             }
                           }}
@@ -1613,6 +2002,31 @@ export const ShortsView: React.FC = () => {
                             fitMode === 'cover' ? 'object-cover' : 'object-contain'
                           }`}
                         />
+                      )}
+
+                      {/* Video Playback Error Overlay */}
+                      {isActive && videoErrorMap[item.id] && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md z-25 p-6 text-center space-y-3">
+                          <div className="w-12 h-12 rounded-2xl bg-rose-500/20 text-rose-400 border border-rose-500/30 flex items-center justify-center shadow-lg">
+                            <AlertTriangle size={24} />
+                          </div>
+                          <div className="space-y-1 max-w-[260px]">
+                            <p className="text-white text-xs font-bold">{videoErrorMap[item.id]}</p>
+                            <p className="text-slate-400 text-[11px] leading-relaxed">
+                              {autoAdvance ? 'Avançando automaticamente para o próximo...' : 'Passe para o próximo vídeo no feed'}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              scrollToIndex(idx + 1);
+                            }}
+                            className="px-4 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-white text-xs font-bold transition-all cursor-pointer shadow-md"
+                          >
+                            Próximo Short
+                          </button>
+                        </div>
                       )}
                     </div>
                   ) : (
@@ -1655,7 +2069,9 @@ export const ShortsView: React.FC = () => {
                     onTouchStart={e => e.stopPropagation()}
                     onTouchEnd={e => e.stopPropagation()}
                     onTouchCancel={e => e.stopPropagation()}
-                    className="absolute bottom-0 inset-x-0 pt-16 pb-4 sm:pb-5 px-3.5 sm:px-5 pr-16 sm:pr-20 bg-gradient-to-t from-black/90 via-black/45 to-transparent flex items-end justify-between z-20 pointer-events-none"
+                    className={`absolute bottom-0 inset-x-0 pt-16 pb-4 sm:pb-5 px-3.5 sm:px-5 pr-16 sm:pr-20 bg-gradient-to-t from-black/90 via-black/45 to-transparent flex items-end justify-between z-20 pointer-events-none transition-all duration-300 ${
+                      areControlsVisible || isPaused || showFiltersBar ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-3'
+                    }`}
                   >
                     <div className="space-y-1.5 min-w-0 flex-1 pointer-events-auto">
                       {/* Creator / Folder Handle Pill + Subtle Format Chip */}
@@ -1707,18 +2123,21 @@ export const ShortsView: React.FC = () => {
                             const isGold = r === 'gold' || r === 1 || activeHlIdx === 0;
                             const isSilver = r === 'silver' || r === 2 || activeHlIdx === 1;
 
+                            const defaultLabel = isGold ? 'Clímax Principal' : isSilver ? 'Destaque Secundário' : 'Gancho Dinâmico';
+                            const cleanLabel = sanitizeHighlightLabel(curHl.label, defaultLabel);
+
                             if (isGold) {
-                              badgeText = `🥇 ${curHl.label || 'Clímax Principal'} (${formatTime(curHl.start)})`;
+                              badgeText = `🥇 ${cleanLabel} (${formatTime(curHl.start)})`;
                               mobileBadgeText = `🥇 ${formatTime(curHl.start)}`;
                               badgeStyle = 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border-amber-500/40 shadow-glow-amber';
                               badgeIcon = <Zap size={10} className="fill-amber-400 text-amber-400 animate-pulse shrink-0" />;
                             } else if (isSilver) {
-                              badgeText = `🥈 ${curHl.label || 'Destaque Secundário'} (${formatTime(curHl.start)})`;
+                              badgeText = `🥈 ${cleanLabel} (${formatTime(curHl.start)})`;
                               mobileBadgeText = `🥈 ${formatTime(curHl.start)}`;
                               badgeStyle = 'bg-orange-500/20 hover:bg-orange-500/30 text-orange-300 border-orange-500/40';
                               badgeIcon = <Flame size={10} className="fill-orange-400 text-orange-400 shrink-0" />;
                             } else {
-                              badgeText = `🥉 ${curHl.label || 'Gancho Dinâmico'} (${formatTime(curHl.start)})`;
+                              badgeText = `🥉 ${cleanLabel} (${formatTime(curHl.start)})`;
                               mobileBadgeText = `🥉 ${formatTime(curHl.start)}`;
                               badgeStyle = 'bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border-cyan-500/40';
                               badgeIcon = <Sparkles size={10} className="fill-cyan-400 text-cyan-400 shrink-0" />;
@@ -1770,7 +2189,9 @@ export const ShortsView: React.FC = () => {
                     onTouchStart={e => e.stopPropagation()}
                     onTouchEnd={e => e.stopPropagation()}
                     onTouchCancel={e => e.stopPropagation()}
-                    className="absolute right-2.5 sm:right-3.5 bottom-4 sm:bottom-5 z-30 flex flex-col items-center gap-3"
+                    className={`absolute right-2.5 sm:right-3.5 bottom-4 sm:bottom-5 z-30 flex flex-col items-center gap-3 transition-all duration-300 ${
+                      areControlsVisible || isPaused || showFiltersBar ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-4'
+                    }`}
                   >
                     {/* 1. Like / Favorite */}
                     <button
@@ -1842,17 +2263,32 @@ export const ShortsView: React.FC = () => {
                     <button
                       onClick={() => setFitMode(m => (m === 'cover' ? 'contain' : 'cover'))}
                       className="flex flex-col items-center gap-0.5 group cursor-pointer active:scale-90 transition-transform"
-                      title={fitMode === 'cover' ? t.shorts.fitContain : t.shorts.fitCover}
+                      title={fitMode === 'cover' ? (settings.language === 'en-US' ? 'Fit to screen' : 'Enquadrar') : (settings.language === 'en-US' ? 'Fill screen' : 'Preencher')}
                     >
                       <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-black/30 hover:bg-black/50 text-white border border-white/15 backdrop-blur-md flex items-center justify-center transition-all shadow-lg">
                         {fitMode === 'cover' ? <Minimize size={18} /> : <Maximize size={18} />}
                       </div>
                       <span className="text-[10px] font-semibold text-white/90 drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)]">
-                        {fitMode === 'cover' ? t.shorts.fitContain : t.shorts.fitCover}
+                        {settings.language === 'en-US' ? (fitMode === 'cover' ? 'Fit' : 'Fill') : (fitMode === 'cover' ? 'Enquadrar' : 'Preencher')}
                       </span>
                     </button>
 
-                    {/* 4. Open Source Album / Video Library (Sleek Glass Disc/Square) */}
+                    {/* 4. Fullscreen Real Toggle */}
+                    <button
+                      onClick={() => toggleAppFullscreen(isFullscreen, setIsFullscreen)}
+                      className="flex flex-col items-center gap-0.5 group cursor-pointer active:scale-90 transition-transform"
+                      title={settings.language === 'en-US' ? (isFullscreen ? 'Exit Fullscreen (F)' : 'Fullscreen (F)') : (isFullscreen ? 'Sair da Tela Cheia (F)' : 'Tela Cheia (F)')}
+                      aria-label={settings.language === 'en-US' ? (isFullscreen ? 'Exit Fullscreen' : 'Fullscreen') : (isFullscreen ? 'Sair da Tela Cheia' : 'Tela Cheia')}
+                    >
+                      <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-black/30 hover:bg-black/50 text-white border border-white/15 backdrop-blur-md flex items-center justify-center transition-all shadow-lg">
+                        {isFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
+                      </div>
+                      <span className="text-[10px] font-semibold text-white/90 drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)]">
+                        {settings.language === 'en-US' ? (isFullscreen ? 'Windowed' : 'Fullscreen') : (isFullscreen ? 'Janela' : 'Tela Cheia')}
+                      </span>
+                    </button>
+
+                    {/* 5. Open Source Album / Video Library (Sleek Glass Disc/Square) */}
                     <button
                       onClick={() => handleOpenSource(item)}
                       className="flex flex-col items-center gap-0.5 group cursor-pointer active:scale-90 transition-transform"
@@ -1866,7 +2302,7 @@ export const ShortsView: React.FC = () => {
                       </span>
                     </button>
 
-                    {/* 5. Desktop-Only Prev / Next Snap Buttons (Hidden on Mobile Touch) */}
+                    {/* 6. Desktop-Only Prev / Next Snap Buttons (Hidden on Mobile Touch) */}
                     <div className="hidden md:flex flex-col gap-1.5 pt-1">
                       <button
                         onClick={() => scrollToIndex(idx - 1)}
@@ -1885,24 +2321,72 @@ export const ShortsView: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Ultra-Thin Social Progress Bar at Bottom Edge (2px) */}
+                  {/* Interactive Social Progress Bar at Bottom Edge with Drag & Hover Scrubber */}
                   {isActive && (
-                    <div className="absolute bottom-0 inset-x-0 h-[2px] bg-white/15 z-30 pointer-events-none overflow-hidden">
-                      {item.kind === 'video' ? (
+                    <div
+                      onPointerDown={(e) => handleScrubberPointerDown(e, item)}
+                      onPointerMove={(e) => handleScrubberPointerMove(e, item)}
+                      onPointerUp={handleScrubberPointerUp}
+                      onPointerCancel={handleScrubberPointerUp}
+                      onLostPointerCapture={handleScrubberPointerUp}
+                      onPointerLeave={handleScrubberPointerLeave}
+                      onClick={(e) => e.stopPropagation()}
+                      onTouchStart={(e) => e.stopPropagation()}
+                      onTouchEnd={(e) => e.stopPropagation()}
+                      onTouchCancel={(e) => e.stopPropagation()}
+                      className="absolute bottom-0 inset-x-0 h-8 flex items-end pb-1 z-30 group/scrubber cursor-pointer select-none"
+                      style={{
+                        touchAction: 'none',
+                        WebkitUserSelect: 'none',
+                        userSelect: 'none',
+                      }}
+                    >
+                      {/* Floating Timestamp Tooltip */}
+                      {item.kind === 'video' && hoverScrubTime !== null && (
                         <div
-                          className="h-full bg-white/90 transition-[width] duration-150 ease-linear"
-                          style={{ width: `${Math.min(100, Math.max(0, videoProgress))}%` }}
-                        />
-                      ) : autoAdvance && !isPaused ? (
-                        <div
-                          key={`prog-${item.id}-${activeIndex}`}
-                          className="h-full bg-white/80 origin-left"
+                          className="absolute -top-7 px-2 py-0.5 rounded-md bg-black/85 backdrop-blur-md border border-white/20 text-white font-mono text-[11px] font-bold shadow-xl pointer-events-none whitespace-nowrap transition-transform duration-75"
                           style={{
-                            width: '100%',
-                            animation: 'shortsProgressFill 4.2s linear forwards',
+                            left: `${Math.min(92, Math.max(8, hoverScrubTime.pct))}%`,
+                            transform: 'translateX(-50%)',
                           }}
-                        />
-                      ) : null}
+                        >
+                          {formatTime(hoverScrubTime.time)}
+                        </div>
+                      )}
+
+                      {/* Track */}
+                      <div
+                        className={`w-full transition-[height] duration-150 bg-white/20 relative rounded-full ${
+                          isScrubbing ? 'h-[7px] bg-white/30' : 'h-[3px] group-hover/scrubber:h-[6px]'
+                        }`}
+                      >
+                        {item.kind === 'video' ? (
+                          <div
+                            className={`h-full bg-white shadow-[0_0_8px_rgba(255,255,255,0.85)] relative rounded-full ${
+                              isScrubbing ? '' : 'transition-[width] duration-150 ease-linear'
+                            }`}
+                            style={{ width: `${Math.min(100, Math.max(0, videoProgress))}%` }}
+                          >
+                            {/* Thumb Indicator */}
+                            <div
+                              className={`absolute right-0 top-1/2 -translate-y-1/2 translate-x-1/2 w-3.5 h-3.5 rounded-full bg-white shadow-[0_0_10px_rgba(255,255,255,0.9)] transition-transform duration-100 pointer-events-none ${
+                                isScrubbing
+                                  ? 'scale-125 opacity-100 ring-2 ring-white/50'
+                                  : 'opacity-0 scale-0 group-hover/scrubber:opacity-100 group-hover/scrubber:scale-100'
+                              }`}
+                            />
+                          </div>
+                        ) : autoAdvance && !isPaused ? (
+                          <div
+                            key={`prog-${item.id}-${activeIndex}`}
+                            className="h-full bg-white/80 origin-left rounded-full"
+                            style={{
+                              width: '100%',
+                              animation: 'shortsProgressFill 4.2s linear forwards',
+                            }}
+                          />
+                        ) : null}
+                      </div>
                     </div>
                   )}
                 </div>

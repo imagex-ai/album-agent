@@ -74,9 +74,10 @@ def run_sync_route(coroutine):
 
 def album_delete_route(trash):
     namespace = dict(globals(), trash_service=trash, _completed_albums={"album": object()},
-                     _disk_album_mtimes={"album.json": 1}, _summaries_dirty=False,
+                     _disk_album_mtimes={"album.json": 1}, _summaries_dirty=False, _album_summary_revision=0,
                      _load_albums_from_disk=lambda: None,
                      AgentDebugger=SimpleNamespace(get_ui_summary=lambda album: {"title": "Sample", "images": []}))
+    load_unit("src/server/server.py", "_mark_album_summaries_dirty", namespace)
     return load_unit("src/server/server.py", "delete_album", namespace), namespace
 
 

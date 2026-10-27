@@ -280,6 +280,7 @@ export const SlideshowModal: React.FC = () => {
 
   // Build full pool of enriched images across either current album or entire app
   const rawPool = useMemo<EnrichedSlideImage[]>(() => {
+    if (!slideshowOpen) return [];
     const sourceAlbums =
       globalSliderConfig.scope === 'all_app'
         ? albums
@@ -336,7 +337,7 @@ export const SlideshowModal: React.FC = () => {
       });
     });
     return list;
-  }, [albums, activeAlbumObj, globalSliderConfig.scope]);
+  }, [slideshowOpen, albums, activeAlbumObj, globalSliderConfig.scope]);
 
   // Extract available artists & folders for filter pills
   const availableArtists = useMemo(() => {

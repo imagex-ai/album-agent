@@ -56,8 +56,11 @@ export const HomeView: React.FC = () => {
   } = useAppStore();
 
   useEffect(() => {
-    syncAlbums();
-    syncVideos();
+    // App initializes the library once. Later visits refresh in the background.
+    if (useAppStore.getState().backendOnline) {
+      syncAlbums(false);
+      syncVideos();
+    }
   }, [syncAlbums, syncVideos]);
 
   const isEn = settings.language === 'en-US';

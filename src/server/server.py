@@ -54,6 +54,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from .video_service import video_service, sanitize_folder_name
 from .trash_service import trash_service
+from .library_responses import LibraryResponseCache, accepts_gzip, album_page
 
 from ..core.models import Album, AlbumImage, ResolutionMethod, TelemetryMetrics
 from ..core.media_classification import normalize_media_item, update_album_media_metadata, apply_image_animation, verify_media_animation, filter_album_media, media_category
@@ -234,6 +235,14 @@ _completed_albums: Dict[str, Album] = {}
 _disk_album_mtimes: Dict[str, float] = {}
 _cached_album_summaries: List[Dict[str, Any]] = []
 _summaries_dirty: bool = True
+_album_summary_revision = 0
+
+
+def _mark_album_summaries_dirty():
+    global _summaries_dirty, _album_summary_revision
+    _summaries_dirty = True
+    _album_summary_revision += 1
+
 _active_event_queues: Dict[str, asyncio.Queue] = {}
 _session_events_history: Dict[str, List[Dict[str, Any]]] = {}
 _active_jobs: Dict[str, Dict[str, Any]] = {}
@@ -361,7 +370,7 @@ def _load_jobs_from_disk(clear_zombies: bool = False):
 
     # Seed existing completed albums into persistent jobs ledger if not present
     updated = False
-    for aid, a in _completed_albums.items():
+    for aid, a in tuple(_completed_albums.items()):
         if aid not in _active_jobs:
             img_count = len(a.images)
             _active_jobs[aid] = {
@@ -671,7 +680,7 @@ async def _finalize_extracted_media(album: Album, media_filter: str = "all") -> 
 
 def _save_album_to_disk(album_id: str, album: Album):
     global _summaries_dirty
-    _summaries_dirty = True
+    _mark_album_summaries_dirty()
     """Saves completed album to data/albums/<album_id>.json on disk AND mirrors to HF."""
     try:
         sanitize_album_images(album)
@@ -1027,7 +1036,7 @@ def _load_albums_from_disk():
         changed = True
 
     if changed:
-        _summaries_dirty = True
+        _mark_album_summaries_dirty()
 
 
 # Load any existing albums, jobs and thumbnails on startup
@@ -5132,7 +5141,7 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
 
 
 @app.get("/api/jobs")
-async def get_all_jobs():
+async def get_all_jobs(request: Request):
     """
     Returns full persistent ledger of jobs from data/jobs.json
     sorted newest first.
@@ -5140,7 +5149,19 @@ async def get_all_jobs():
     _load_jobs_from_disk()
     jobs = list(_active_jobs.values())
     jobs.sort(key=lambda j: j.get("started_at", ""), reverse=True)
-    return jobs
+    def encode_jobs():
+        body = json.dumps(jobs, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        return body, '"' + hashlib.sha256(body).hexdigest() + '"'
+    body, etag = await asyncio.to_thread(encode_jobs)
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache", "Vary": "Accept-Encoding"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    if accepts_gzip(request.headers.get("accept-encoding", "")):
+        import gzip
+        body = await asyncio.to_thread(gzip.compress, body, compresslevel=1, mtime=0)
+        headers["Content-Encoding"] = "gzip"
+        headers["Vary"] = "Accept-Encoding"
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 @app.get("/api/jobs/active")
@@ -5606,55 +5627,75 @@ async def stream_events(session_id: str):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+_album_response_cache = LibraryResponseCache()
+_album_response_lock = threading.RLock()
+
+
 @app.get("/api/albums")
-async def list_albums(
+def list_albums(
+    request: Request,
     filter: Optional[str] = None,
     media_type: Optional[str] = None,
-    limit_images_per_album: Optional[int] = Query(None, description="Max preview images per album for lightweight gallery summary")
+    limit_images_per_album: Optional[int] = Query(None, ge=0, description="Max preview images per album for lightweight gallery summary"),
+    limit: Optional[int] = Query(None, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    after: Optional[str] = None
 ):
     """Lists all saved albums with in-memory caching for sub-millisecond response time."""
-    global _summaries_dirty, _cached_album_summaries
-    _load_albums_from_disk()
+    with _album_response_lock:
+        global _summaries_dirty, _cached_album_summaries
+        _load_albums_from_disk()
 
-    if _summaries_dirty or not _cached_album_summaries:
-        summaries = []
-        for sid, a in _completed_albums.items():
-            summary = AgentDebugger.get_ui_summary(a)
-            summary["session_id"] = sid
-            if "audit_trails" in summary:
-                summary["audit_trails"] = []
-            summary["file_mtime"] = _disk_album_mtimes.get(f"{sid}.json", 0)
-            summary["created_at"] = getattr(a, "created_at", None) or summary.get("created_at") or (a.metadata.get("saved_at") if isinstance(a.metadata, dict) else None)
-            summary["updated_at"] = getattr(a, "updated_at", None) or summary.get("updated_at") or summary["created_at"]
-            summary["is_favorite"] = getattr(a, "is_favorite", False) or (a.metadata.get("is_favorite", False) if isinstance(a.metadata, dict) else False)
-            summaries.append(summary)
+        if _summaries_dirty or not _cached_album_summaries:
+            revision = _album_summary_revision
+            summaries = []
+            for sid, a in tuple(_completed_albums.items()):
+                summary = AgentDebugger.get_ui_summary(a)
+                summary["session_id"] = sid
+                if "audit_trails" in summary:
+                    summary["audit_trails"] = []
+                summary["file_mtime"] = _disk_album_mtimes.get(f"{sid}.json", 0)
+                summary["created_at"] = getattr(a, "created_at", None) or summary.get("created_at") or (a.metadata.get("saved_at") if isinstance(a.metadata, dict) else None)
+                summary["updated_at"] = getattr(a, "updated_at", None) or summary.get("updated_at") or summary["created_at"]
+                summary["is_favorite"] = getattr(a, "is_favorite", False) or (a.metadata.get("is_favorite", False) if isinstance(a.metadata, dict) else False)
+                summaries.append(summary)
 
-        summaries.sort(
-            key=lambda x: (x.get("created_at") or (x.get("metadata") or {}).get("saved_at", ""), x.get("file_mtime", 0)),
-            reverse=True
-        )
+            summaries.sort(
+                key=lambda x: (x.get("created_at") or (x.get("metadata") or {}).get("saved_at", ""), x.get("file_mtime", 0)),
+                reverse=True
+            )
 
-        seen_album_ids: set = set()
-        deduped_summaries = []
-        for s in summaries:
-            aid = s.get("session_id") or s.get("album_id")
-            if aid and aid in seen_album_ids:
-                continue
-            if aid:
-                seen_album_ids.add(aid)
-            deduped_summaries.append(s)
-        _cached_album_summaries = deduped_summaries
-        _summaries_dirty = False
+            seen_album_ids: set = set()
+            deduped_summaries = []
+            for s in summaries:
+                aid = s.get("session_id") or s.get("album_id")
+                if aid and aid in seen_album_ids:
+                    continue
+                if aid:
+                    seen_album_ids.add(aid)
+                deduped_summaries.append(s)
+            _cached_album_summaries = deduped_summaries
+            _summaries_dirty = revision != _album_summary_revision
 
-    result = _cached_album_summaries
+        result = _cached_album_summaries
 
-    if filter == "gifs" or media_type == "gif":
-        result = [
-            s for s in result
-            if s.get("has_gifs", False)
-        ]
+        if filter == "gifs" or media_type == "gif":
+            result = [
+                s for s in result
+                if s.get("has_gifs", False)
+            ]
 
-    return result
+        try:
+            page = album_page(result, after=after, offset=offset, limit=limit, limit_images=limit_images_per_album)
+        except KeyError:
+            raise HTTPException(status_code=409, detail="Library changed; restart pagination")
+        accept = request.headers.get("accept-encoding", "")
+        compressed = accepts_gzip(accept)
+        body = _album_response_cache.encode(_cached_album_summaries, (filter, media_type, after, offset, limit, limit_images_per_album), page, compressed)
+        headers = {"X-Total-Count": str(len(result)), "X-Library-Paging": "cursor", "Vary": "Accept-Encoding", "Cache-Control": "private, no-cache"}
+        if compressed:
+            headers["Content-Encoding"] = "gzip"
+        return Response(content=body, media_type="application/json", headers=headers)
 
 
 async def probe_and_update_album_metadata(album: Album, session_id: str = None, save_to_disk: bool = True, force: bool = False) -> Album:
@@ -6190,7 +6231,7 @@ async def delete_album(session_id: str):
 
     del _completed_albums[session_id]
     global _summaries_dirty
-    _summaries_dirty = True
+    _mark_album_summaries_dirty()
     _disk_album_mtimes.pop(f"{session_id}.json", None)
 
     return {"session_id": session_id, "deleted": True, "trash_item": trash_item}
@@ -8271,14 +8312,18 @@ async def batch_save_videos_endpoint(req: BatchSaveVideosRequest):
 
 
 @app.get("/api/videos")
-async def get_videos_and_folders(heal: bool = False):
+def get_videos_and_folders(request: Request, heal: bool = False):
     """Lists all stored videos and folders on disk. Optionally heals missing thumbnails in background."""
     if heal:
         video_service.auto_heal_all_thumbnails(background=True)
-    return {
-        "videos": video_service.list_all_videos(),
-        "folders": video_service.list_folders()
-    }
+    videos = video_service.list_all_videos()
+    body = json.dumps({"videos": videos, "folders": video_service.list_folders(videos)}, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    headers = {"Vary": "Accept-Encoding"}
+    if accepts_gzip(request.headers.get("accept-encoding", "")):
+        import gzip
+        body = gzip.compress(body, compresslevel=1, mtime=0)
+        headers["Content-Encoding"] = "gzip"
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 @app.post("/api/videos/sync")
@@ -8947,7 +8992,7 @@ async def sync_huggingface_data():
     # 5. Forcar atualizacao do cache de albuns na memoria
     global _last_albums_dir_mtime, _summaries_dirty
     _last_albums_dir_mtime = 0.0
-    _summaries_dirty = True
+    _mark_album_summaries_dirty()
     _load_albums_from_disk()
 
     total = results["restored_albums"] + results["restored_pc_albums"] + results["restored_videos"]

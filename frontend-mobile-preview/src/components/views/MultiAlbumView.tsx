@@ -114,7 +114,7 @@ export const MultiAlbumView: React.FC = () => {
 
   // Sync albums & jobs on mount
   useEffect(() => {
-    syncAlbums();
+    syncAlbums(false);
     syncJobs();
   }, []);
 

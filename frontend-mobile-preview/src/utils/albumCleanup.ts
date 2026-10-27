@@ -64,23 +64,39 @@ export const mergeCleanupScanAlbums = (
 /** Metadata-only suggestions. A candidate is never permission to delete its occurrences. */
 export const buildCleanupGroups = (albums: Album[], reviewedReasons?: ReadonlyMap<string, CleanupReason>): CleanupGroup[] => {
   const bySource = new Map<string, CleanupEntry[]>();
+  const seenInSource = new Set<string>();
+
   for (const album of albums) {
     for (const image of album.images || []) {
       if (isVideoMedia(image)) continue;
-      const sourceKey = getDuplicateSourceKey(image.rawOriginalUrl || image.originalUrl || '');
+      const rawUrl = image.rawOriginalUrl || image.originalUrl || '';
+      const sourceKey = getDuplicateSourceKey(rawUrl);
       if (!sourceKey) continue;
-      const entries = bySource.get(sourceKey) || [];
-      const incoming = { image, albumId: album.id, albumTitle: album.title };
-      if (!entries.some(entry => getCleanupEntryKey(entry) === getCleanupEntryKey(incoming))) {
-        entries.push(incoming);
+
+      const dedupeKey = album.id + '\0' + (image.backendImageRef?.id || image.candidateId || image.id || rawUrl);
+      const combined = sourceKey + '\0' + dedupeKey;
+      if (seenInSource.has(combined)) continue;
+      seenInSource.add(combined);
+
+      let entries = bySource.get(sourceKey);
+      if (!entries) {
+        entries = [];
+        bySource.set(sourceKey, entries);
       }
-      bySource.set(sourceKey, entries);
+      entries.push({ image, albumId: album.id, albumTitle: album.title });
     }
   }
 
   const result: CleanupGroup[] = [];
+  const keywordQuickCheck = /(?:svg|ico|favicon|icons?|logos?|sprite|loading|spinner|spacer|placeholder|header)/i;
+
   for (const [sourceKey, entries] of bySource) {
-    const source = unwrapMediaSource(entries[0].image.rawOriginalUrl || entries[0].image.originalUrl || '');
+    const rawUrl = entries[0].image.rawOriginalUrl || entries[0].image.originalUrl || '';
+    const hasReviewedReason = Boolean(reviewedReasons?.has(sourceKey));
+    const isCandidateKeyword = keywordQuickCheck.test(rawUrl);
+    if (!isCandidateKeyword && !hasReviewedReason && entries.length < 5) continue;
+
+    const source = unwrapMediaSource(rawUrl);
     let pathname = '';
     try {
       pathname = decodeURIComponent(new URL(source, 'https://imagex.local').pathname).toLowerCase();

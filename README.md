@@ -1,6 +1,23 @@
-# ⚡ IMAGEX.AI v5.5
+# ⚡ IMAGEX.AI v5.6
 
 Autonomous platform for intelligent extraction, organization, and inspection of web albums and videos in their original maximum resolution. 🚀✨
+
+---
+
+## 🌟 What's New in v5.6 (Release Notes)
+
+* 🔄 **Autonomous Auto-Update Engine (Dual-Mode):**
+  * **GitHub Release Discovery:** Automated background version detection querying GitHub Releases with SemVer comparison and a 15-minute in-memory cache (`/api/updates/check`).
+  * **One-Click Autonomous Update:** Performs end-to-end updates automatically with live step reporting, dependency validation, Vite production rebuilds, and safe application reloading.
+  * **Dual Execution Architecture:**
+    * **Source / Git Repository Mode:** Autonomous `git fetch` + `git pull origin main`, environment validation, and optimized frontend bundle generation.
+    * **Windows Standalone Executable (.exe) Mode:** Downloads new compiled executable assets from GitHub releases and performs an atomic background binary swap via `apply_update.bat` after process termination.
+  * **Modern Accessible Dialog:** Native `<dialog>` component adhering to modern web guidance with scroll containment (`overscroll-behavior: contain`), accessible naming (`aria-labelledby`), and in-progress cancel guards to avoid interrupted builds.
+  * **Realtime Progress & Live Terminal Logs:** Visual progress bar (0% to 100%), 4-stage checklist, and collapsible terminal window streaming compilation and synchronization logs.
+  * **User Choice & Version Dismissal:** Options to "Update Now", "Remind Later", or "Ignore this Version" (remembered in `localStorage`).
+  * **UI & Settings Integration:**
+    * Clickable version badge in the Sidebar header with animated pulsating update indicators.
+    * Dedicated "System Updates" control card in Settings with a manual "Check for Updates" trigger.
 
 ---
 

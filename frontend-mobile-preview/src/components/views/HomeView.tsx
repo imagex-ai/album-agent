@@ -20,6 +20,7 @@ import { useAppStore } from '../../store/useAppStore';
 import { translations } from '../../i18n/translations';
 import { Album, VideoItem, ViewId } from '../../types';
 import { IconBadge, IconBadgeVariant } from '../common/IconBadge';
+import { getAlbumMediaSummary } from '../../utils/mediaClassification';
 
 interface UnifiedRecentItem {
   id: string;
@@ -34,13 +35,8 @@ interface UnifiedRecentItem {
 }
 
 const isGifAlbum = (album: Album): boolean => {
-  return Boolean(
-    album.hasGifs ||
-    album.mediaType === 'gif' ||
-    album.tags?.some(tag => tag.toLowerCase().includes('gif') || tag.toLowerCase().includes('animad')) ||
-    album.images?.some(img => img.mediaType === 'gif' || img.isAnimated || img.format === 'gif' || /\.(gif)(\?|$)/i.test(img.originalUrl || img.previewUrl || '')) ||
-    album.title?.toLowerCase().includes('gif')
-  );
+  const summary = getAlbumMediaSummary(album);
+  return summary.gifCount > 0 && summary.photoCount === 0;
 };
 
 export const HomeView: React.FC = () => {
@@ -105,7 +101,7 @@ export const HomeView: React.FC = () => {
         folder: album.folder || (isEn ? 'General' : 'Geral'),
         thumbnailUrl: cover,
         subLabel: isGif
-          ? `${album.imageCount || album.images?.length || 0} ${t.statGifs || 'GIFs'}`
+          ? `${album.gifCount || album.imageCount || album.images?.length || 0} ${t.statGifs || 'GIFs'}`
           : `${album.imageCount || album.images?.length || 0} ${isEn ? 'photos' : 'fotos'}`,
         album
       });
@@ -488,8 +484,8 @@ export const HomeView: React.FC = () => {
                         </span>
                       </div>
 
-                      {/* Folder Overlay Badge */}
-                      {item.folder && (
+                      {/* Folder Overlay Badge - only display for specific custom folders, not default root folder */}
+                      {item.folder && item.folder !== 'Geral' && item.folder !== 'General' && item.folder !== 'My Fun new Collection' && (
                         <div className="absolute bottom-2 left-2 z-10">
                           <span className="text-[10px] font-medium px-2 py-0.5 rounded-md bg-black/75 text-slate-300 backdrop-blur-md border border-white/10 flex items-center gap-1">
                             <Folder size={10} className="text-purple-400" />

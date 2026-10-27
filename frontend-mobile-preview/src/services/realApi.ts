@@ -1,3 +1,26 @@
+
+export interface UpdateCheckResponse {
+  update_available: boolean;
+  current_version: string;
+  latest_version: string;
+  release_name: string;
+  release_notes: string;
+  published_at: string;
+  html_url: string;
+  is_git_repo: boolean;
+  repository: string;
+  checked_at: number;
+  error?: string | null;
+}
+
+export interface UpdateStatusResponse {
+  status: 'idle' | 'in_progress' | 'completed' | 'error';
+  progress: number;
+  step: string;
+  message: string;
+  error?: string | null;
+  logs: string[];
+}
 import { Album, AlbumFolder, ExtractionJob, ImageItem, DomainPattern, VideoItem, VideoFolder, TrashItem, TrashStats, ScanPageVideosResponse, OllamaHealthStatus, OllamaModelInfo, MultiAlbumPreviewImage } from '../types';
 import { colorPaletteCache } from './colorExtractor';
 import { cacheAlbumVideoTransport, getAlbumMediaSummary, getMediaCategory, inferMediaFormat, isVideoMedia, normalizeAlbumMediaTags, unwrapMediaSource } from '../utils/mediaClassification';
@@ -1424,12 +1447,20 @@ export class BackendApiClient {
 
     const totalCount = raw.total_images ?? raw.image_count ?? raw.totalImages ?? images.length;
     const isTruncated = totalCount > images.length;
+    const isPureGif = isTruncated
+      ? (raw.media_type === 'gif' || raw.mediaType === 'gif' || (mediaSummary.photoCount === 0 && mediaSummary.gifCount > 0)) && (raw.gif_count === totalCount || raw.gifCount === totalCount || (!raw.image_count && mediaSummary.photoCount === 0))
+      : (mediaSummary.photoCount === 0 && mediaSummary.gifCount > 0);
     const resolvedHasGifs = isTruncated
       ? Boolean(mediaSummary.hasGifs || raw.has_gifs || raw.hasGifs)
       : mediaSummary.hasGifs;
     const resolvedGifCount = isTruncated
       ? Math.max(mediaSummary.gifCount || 0, raw.gif_count || raw.gifCount || 0)
       : mediaSummary.gifCount;
+
+    const albumMediaType: 'photo' | 'video' | 'gif' =
+      mediaSummary.photoCount > 0 ? (mediaSummary.videoCount > mediaSummary.photoCount ? 'video' : 'photo') :
+      mediaSummary.videoCount > 0 ? 'video' :
+      isPureGif ? 'gif' : 'photo';
 
     return {
       id: raw.session_id || raw.album_id || `album-${Date.now()}`,
@@ -1451,16 +1482,16 @@ export class BackendApiClient {
         'Original',
         sourceDomain.split('.')[0] || 'Web',
         'Extraction',
-        ...normalizeAlbumMediaTags(raw.tags || [], resolvedHasGifs)
+        ...normalizeAlbumMediaTags(raw.tags || [], isPureGif)
       ])),
       images: images,
       extractionMode: 'ai_react',
       durationSeconds: raw.metadata?.duration || 12.4,
-      mediaType: (mediaSummary.mediaType !== 'photo' ? mediaSummary.mediaType : (raw.media_type || raw.mediaType || mediaSummary.mediaType)),
+      mediaType: albumMediaType,
       hasGifs: resolvedHasGifs,
       gifCount: resolvedGifCount,
       sourceOrigin: isLocalOrigin ? 'local' : 'remote',
-      folder: raw.folder || raw.metadata?.folder || 'Geral',
+      folder: (raw.folder && raw.folder !== 'My Fun new Collection') ? raw.folder : ((raw.metadata?.folder && raw.metadata.folder !== 'My Fun new Collection') ? raw.metadata.folder : 'Geral'),
       isFavorite: raw.is_favorite ?? raw.isFavorite ?? raw.metadata?.is_favorite ?? false,
       syncStats: raw.sync_stats || raw.syncStats,
       syncMessage: raw.sync_message || raw.syncMessage
@@ -2020,6 +2051,83 @@ export class BackendApiClient {
       return { success: true, filePath: data.file_path, filename: data.filename };
     } catch (err: any) {
       return { success: false, error: err.message || 'Connection failure to local backend.' };
+    }
+  }
+  /**
+   * Verifica no GitHub se existe uma versão mais recente disponível.
+   */
+  async checkForUpdates(force: boolean = false): Promise<UpdateCheckResponse> {
+    try {
+      const res = await fetch(`/api/updates/check?force=${force}`);
+      if (!res.ok) {
+        return {
+          update_available: false,
+          current_version: '5.5.0',
+          latest_version: '5.5.0',
+          release_name: '',
+          release_notes: '',
+          published_at: '',
+          html_url: '',
+          is_git_repo: true,
+          repository: 'jardieljw/album-agent',
+          checked_at: Date.now() / 1000,
+          error: `HTTP ${res.status}`
+        };
+      }
+      return await res.json();
+    } catch (err: any) {
+      return {
+        update_available: false,
+        current_version: '5.5.0',
+        latest_version: '5.5.0',
+        release_name: '',
+        release_notes: '',
+        published_at: '',
+        html_url: '',
+        is_git_repo: true,
+        repository: 'jardieljw/album-agent',
+        checked_at: Date.now() / 1000,
+        error: err.message || String(err)
+      };
+    }
+  }
+
+  /**
+   * Obtém o progresso atual do processo autônomo de atualização.
+   */
+  async getUpdateStatus(): Promise<UpdateStatusResponse> {
+    try {
+      const res = await fetch('/api/updates/status');
+      if (!res.ok) {
+        return { status: 'error', progress: 0, step: '', message: `HTTP ${res.status}`, logs: [] };
+      }
+      return await res.json();
+    } catch (err: any) {
+      return { status: 'error', progress: 0, step: '', message: err.message || String(err), logs: [] };
+    }
+  }
+
+  /**
+   * Dispara a execução da atualização autônoma em segundo plano no backend.
+   */
+  async applyUpdate(): Promise<{ status: string; message: string }> {
+    try {
+      const res = await fetch('/api/updates/apply', { method: 'POST' });
+      return await res.json();
+    } catch (err: any) {
+      return { status: 'error', message: err.message || String(err) };
+    }
+  }
+
+  /**
+   * Solicita o reinício limpo do servidor local após a conclusão da atualização.
+   */
+  async restartServer(delay: number = 2.0, port: number = 8100): Promise<{ status: string; message: string }> {
+    try {
+      const res = await fetch(`/api/updates/restart?delay=${delay}&port=${port}`, { method: 'POST' });
+      return await res.json();
+    } catch (err: any) {
+      return { status: 'error', message: err.message || String(err) };
     }
   }
 }

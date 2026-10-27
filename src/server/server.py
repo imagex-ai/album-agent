@@ -84,6 +84,13 @@ from ..agent.copilot_channel import (
 from ..scout.surgical_scout import GeminiSurgicalScout, parse_image_dimensions, get_canonical_media_key
 from ..scout.layout_explorer import GeminiLayoutExplorer
 from ..scout.knowledge_bridge import ScoutKnowledgeBridge
+from ..updater import (
+    check_for_updates,
+    apply_update_async,
+    get_update_status,
+    restart_server,
+    get_repo_name
+)
 from ..core.network_profiles import (
     resolve_anti_hotlink_headers,
     get_apex_domain,
@@ -1015,7 +1022,17 @@ def _load_albums_from_disk():
                     needs_disk_persist = ("created_at" not in data or "updated_at" not in data)
                     alb_instance = Album(**data)
 
+                    # Heal folder if contaminated with "My Fun new Collection"
+                    if alb_instance.folder == "My Fun new Collection":
+                        alb_instance.folder = "Geral"
+                        if isinstance(alb_instance.metadata, dict):
+                            alb_instance.metadata["folder"] = "Geral"
+                        needs_disk_persist = True
+
                     sanitize_album_images(alb_instance)
+                    if set(alb_instance.tags or []) != set(data.get("tags") or []):
+                        needs_disk_persist = True
+
                     healed = ensure_album_cover(alb_instance)
                     if healed or needs_disk_persist:
                         try:
@@ -1198,14 +1215,41 @@ def _infer_extension_from_magic_or_mime(raw_bytes: bytes = b"", content_type: st
     return ".jpg" 
 
 
+APP_VERSION = "5.6.0"
+
+
 @app.get("/api/health")
 async def health_check():
     """System health check and version information."""
     return {
         "status": "ok",
-        "version": "5.5.0",
+        "version": APP_VERSION,
         "timestamp": time.time()
     }
+
+
+@app.get("/api/updates/check")
+async def check_updates(force: bool = False):
+    """Checks GitHub for new releases and compares with current version."""
+    return check_for_updates(current_version=APP_VERSION, force=force)
+
+
+@app.get("/api/updates/status")
+async def update_status():
+    """Returns the current autonomous update state and progress logs."""
+    return get_update_status()
+
+
+@app.post("/api/updates/apply")
+async def apply_update():
+    """Starts the autonomous update sequence in the background."""
+    return apply_update_async()
+
+
+@app.post("/api/updates/restart")
+async def trigger_restart(delay: float = 2.0, port: int = 8100):
+    """Triggers a clean restart of the server process."""
+    return restart_server(delay_seconds=delay, port=port)
 
 
 @app.get("/api/debug-probe")
@@ -2102,7 +2146,11 @@ async def _re_resolve_video_stream(target_page: str, target_height: Optional[int
     Re-extracts fresh stream URLs via yt-dlp for target_page, updates domain cookies,
     and returns (fresh_stream_url, all_formats_info).
     """
-    import yt_dlp
+    try:
+        import yt_dlp
+    except ImportError:
+        logger.warning("yt-dlp is not installed; video streams cannot be refreshed.")
+        return [], [getattr(img, "id", str(i)) for i, img in enumerate(getattr(album, "images", [])) if getattr(img, "media_type", None) == "video"]
     raw_hdrs = _get_video_download_headers(target_page, target_page)
     cookie_str = raw_hdrs.get("Cookie") or raw_hdrs.get("cookie")
     hdrs = {k: v for k, v in raw_hdrs.items() if k.lower() != "cookie"}
@@ -2694,7 +2742,7 @@ def _load_custom_album_folders() -> List[str]:
             with open(ALBUM_FOLDERS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    return [str(x).strip() for x in data if str(x).strip()]
+                    return [str(x).strip() for x in data if str(x).strip() and str(x).strip() != "My Fun new Collection"]
         except Exception as e:
             logger.warning(f"Failed to load album_folders.json: {e}")
     return []
@@ -5714,7 +5762,12 @@ def list_albums(
         if filter == "gifs" or media_type == "gif":
             result = [
                 s for s in result
-                if s.get("has_gifs", False)
+                if s.get("gif_count", 0) > 0 and s.get("gif_count", 0) >= s.get("total_images", 0)
+            ]
+        elif filter == "photos" or media_type == "photo":
+            result = [
+                s for s in result
+                if s.get("total_images", 0) > s.get("gif_count", 0)
             ]
 
         try:
@@ -10194,7 +10247,11 @@ async def _refresh_single_image_stream(img, default_page: Optional[str] = None) 
     Returns (success, error_message). Updates img in-place on success.
     """
     import re as _re
-    import yt_dlp
+    try:
+        import yt_dlp
+    except ImportError:
+        logger.warning('yt-dlp is not installed.')
+        return [], []
 
     candidates = [
         getattr(img, "source_page", None) or "",
@@ -10301,7 +10358,11 @@ async def _refresh_album_video_streams(album: Album) -> tuple[list, list]:
     efficiently with genuine file sizes and dimensions.
     """
     import re as _re
-    import yt_dlp
+    try:
+        import yt_dlp
+    except ImportError:
+        logger.warning('yt-dlp is not installed.')
+        return [], []
 
     video_imgs = [img for img in album.images if getattr(img, "media_type", None) == "video"]
     if not video_imgs:

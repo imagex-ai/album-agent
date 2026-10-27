@@ -147,4 +147,33 @@ test('typing a video URL leaves explicit GIF selection intact', () => {
   new Function('module','setSingleUrl','setMediaTypeFilter',code)(module,()=>{},()=>{setFilterCalls+=1;});
   module.exports('https://example.test/watch/123');
   assert.equal(setFilterCalls,0);
+});test('photo album with preview GIFs is classified as photo and matches photo filter, not gif filter', () => {
+  const images = [
+    ...Array(382).fill(null).map((_, i) => ({ originalUrl: `https://cdn.test/photo_${i}.jpg`, format: 'jpeg' })),
+    ...Array(10).fill(null).map((_, i) => ({ originalUrl: `https://cdn.test/anim_${i}.gif`, format: 'gif', isAnimated: true }))
+  ];
+  const album = { images };
+  const summary = media.getAlbumMediaSummary(album);
+  assert.equal(summary.mediaType, 'photo');
+  assert.equal(summary.photoCount, 382);
+  assert.equal(summary.gifCount, 10);
+  assert.equal(media.matchesAlbumMediaFilter(album, 'photo'), true);
+  assert.equal(media.matchesAlbumMediaFilter(album, 'gif'), false);
+  const tags = media.normalizeAlbumMediaTags(['Original', 'media_gallery'], false);
+  assert.equal(tags.includes('gif'), false);
+  assert.equal(tags.includes('animado'), false);
+});
+
+test('pure GIF album with no photos is classified as gif and matches gif filter', () => {
+  const images = Array(15).fill(null).map((_, i) => ({ originalUrl: `https://cdn.test/anim_${i}.gif`, format: 'gif', isAnimated: true }));
+  const album = { images };
+  const summary = media.getAlbumMediaSummary(album);
+  assert.equal(summary.mediaType, 'gif');
+  assert.equal(summary.photoCount, 0);
+  assert.equal(summary.gifCount, 15);
+  assert.equal(media.matchesAlbumMediaFilter(album, 'photo'), false);
+  assert.equal(media.matchesAlbumMediaFilter(album, 'gif'), true);
+  const tags = media.normalizeAlbumMediaTags(['Original'], true);
+  assert.equal(tags.includes('gif'), true);
+  assert.equal(tags.includes('animado'), true);
 });

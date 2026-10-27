@@ -91,9 +91,9 @@ export const getMediaExtension = (item: MediaItem): string => {
   return isVideoMedia(item) ? 'mp4' : 'jpg';
 };
 
-export const normalizeAlbumMediaTags = (tags: string[] = [], hasGifs: boolean): string[] => {
+export const normalizeAlbumMediaTags = (tags: string[] = [], isGifAlbum: boolean = false): string[] => {
   const retained = tags.filter(tag => !['gif', 'animado'].includes(tag.toLowerCase()));
-  return Array.from(new Set([...retained, ...(hasGifs ? ['gif', 'animado'] : [])]));
+  return Array.from(new Set([...retained, ...(isGifAlbum ? ['gif', 'animado'] : [])]));
 };
 
 type MediaSummary = { hasGifs: boolean; gifCount: number; hasVideos: boolean; videoCount: number; photoCount: number; mediaType: MediaCategory };
@@ -133,7 +133,12 @@ export const getAlbumMediaSummary = (album: Partial<Album>): MediaSummary => {
   }
   const hasGifs = gifCount > 0;
   const hasVideos = videoCount > 0;
-  const mediaType: MediaCategory = hasVideos ? 'video' : hasGifs ? 'gif' : 'photo';
+  // A photo album containing ordinary images must NOT be classified as an Animated GIF album.
+  // It is only a GIF album if it has gifs and NO ordinary photos.
+  const mediaType: MediaCategory =
+    photoCount > 0 ? (videoCount > photoCount ? 'video' : 'photo') :
+    hasVideos ? (videoCount >= gifCount ? 'video' : 'gif') :
+    hasGifs ? 'gif' : 'photo';
   const summary = { hasGifs, gifCount, hasVideos, videoCount, photoCount, mediaType };
   if (Array.isArray(album.images)) albumMediaSummaries.set(album.images, summary);
   return summary;
@@ -142,8 +147,8 @@ export const getAlbumMediaSummary = (album: Partial<Album>): MediaSummary => {
 export const matchesAlbumMediaFilter = (album: Partial<Album>, filter: 'all' | MediaCategory): boolean => {
   if (filter === 'all') return true;
   const summary = getAlbumMediaSummary(album);
-  if (filter === 'gif') return summary.hasGifs;
-  if (filter === 'video') return summary.hasVideos;
-  if (filter === 'photo') return !summary.hasGifs && !summary.hasVideos;
+  if (filter === 'photo') return summary.photoCount > 0 || (!summary.hasGifs && !summary.hasVideos);
+  if (filter === 'video') return summary.hasVideos && summary.videoCount >= summary.photoCount;
+  if (filter === 'gif') return summary.gifCount > 0 && summary.photoCount === 0;
   return true;
 };

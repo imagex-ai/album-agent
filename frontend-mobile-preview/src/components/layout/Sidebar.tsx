@@ -45,7 +45,7 @@ interface NavSection {
 
 export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseMobile }) => {
   const [collapsed, setCollapsed] = useState(false);
-  const { currentView, navigateToView, setSlideshowOpen, albums, videos, trashItems, jobs, logs, settings } = useAppStore();
+  const { currentView, navigateToView, setSlideshowOpen, albums, videos, trashItems, jobs, logs, settings, updateInfo, setUpdateModalOpen } = useAppStore();
   const t = translations[settings.language].sidebar;
 
   const activeJobsCount = jobs.filter(j => j.status === 'active').length;
@@ -70,7 +70,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
         { id: 'videos' as ViewId, label: t.videoGallery, icon: Film, badge: videos.length > 0 ? videos.length.toString() : null },
         { id: 'shorts' as ViewId, label: t.shortsFeed || 'Shorts & Reels', icon: Flame, badge: 'HOT', badgeColor: 'bg-rose-500/20 text-rose-300 border border-rose-500/30' },
         { id: 'duplicates' as ViewId, label: t.duplicatesFinder, icon: Copy, badge: null },
-        { id: 'trash' as ViewId, label: t.trash || 'Trash', icon: Trash2, badge: trashItems.length > 0 ? trashItems.length.toString() : null, badgeColor: 'bg-rose-500/20 text-rose-300 border border-rose-500/30' },
+        { id: 'trash' as ViewId, label: t.trash || 'Trash', icon: Trash2, badge: trashItems.length > 0 ? trashItems.length.toString() : null },
       ]
     },
     {
@@ -106,17 +106,43 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
             <div>
               <div className="font-extrabold text-sm tracking-wider text-slate-100 flex items-center gap-1.5">
                 IMAGEX.AI
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-brand-500/20 text-brand-400 font-mono font-semibold">
-                  v5.5
-                </span>
+                <button
+                  type="button"
+                  onClick={() => setUpdateModalOpen(true)}
+                  className="text-[10px] px-1.5 py-0.5 rounded bg-brand-500/20 hover:bg-brand-500/30 text-brand-400 font-mono font-semibold transition-colors cursor-pointer flex items-center gap-1"
+                  title={settings.language === 'en-US' ? 'Check for updates' : 'Verificar atualizações do app'}
+                >
+                  v5.6
+                  {updateInfo?.update_available && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
+                  )}
+                </button>
+                {updateInfo?.update_available && (
+                  <button
+                    type="button"
+                    onClick={() => setUpdateModalOpen(true)}
+                    className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold animate-pulse hover:bg-amber-500/30 transition-colors cursor-pointer"
+                    title={settings.language === 'en-US' ? 'New version available! Click to update.' : 'Nova versão disponível! Clique para atualizar.'}
+                  >
+                    UPDATE
+                  </button>
+                )}
               </div>
               <p className="text-[11px] text-slate-400 font-medium">Enterprise Extraction</p>
             </div>
           </div>
         ) : (
-          <div className="w-10 h-10 mx-auto rounded-xl bg-gradient-to-tr from-brand-600 to-accent-purple flex items-center justify-center font-bold text-white shadow-glow-brand">
+          <button
+            type="button"
+            onClick={() => setUpdateModalOpen(true)}
+            className="w-10 h-10 mx-auto rounded-xl bg-gradient-to-tr from-brand-600 to-accent-purple flex items-center justify-center font-bold text-white shadow-glow-brand relative cursor-pointer"
+            title="IMAGEX.AI v5.6"
+          >
             X
-          </div>
+            {updateInfo?.update_available && (
+              <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-amber-400 border-2 border-slate-950 animate-pulse" />
+            )}
+          </button>
         )}
 
         {/* Mobile Close Button */}

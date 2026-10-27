@@ -53,7 +53,7 @@ export const BatchQueueView: React.FC = () => {
   const [singleUrl, setSingleUrl] = useState('');
   const [multiUrlsText, setMultiUrlsText] = useState('');
   const [priority, setPriority] = useState<'high' | 'medium' | 'low'>('medium');
-  const [selectedFolder, setSelectedFolder] = useState<string>(settings.defaultAlbumFolder || 'Geral');
+  const [selectedFolder, setSelectedFolder] = useState<string>((settings.defaultAlbumFolder && settings.defaultAlbumFolder !== 'My Fun new Collection') ? settings.defaultAlbumFolder : 'Geral');
   const [batchEngine, setBatchEngine] = useState<AiEngineType>(() => {
     return activeAiEngine === 'ai_react' ? 'ai_react' : 'gemini_surgical_scout';
   });

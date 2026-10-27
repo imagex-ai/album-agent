@@ -18,6 +18,7 @@ import { ContactSheetModal } from './components/common/ContactSheetModal';
 import { CoPilotModal } from './components/common/CoPilotModal';
 import { ExportModal } from './components/common/ExportModal';
 import { KeybindingsModal } from './components/common/KeybindingsModal';
+import { UpdateModal } from './components/common/UpdateModal';
 import { VideoPlayerModal } from './components/common/VideoPlayerModal';
 import { FolderModal } from './components/common/FolderModal';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
@@ -246,6 +247,7 @@ export const App: React.FC = () => {
       <CoPilotModal />
       <ExportModal />
       <KeybindingsModal />
+      <UpdateModal />
       <ErrorBoundary
         fallback={(_error, reset) => (
           <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">

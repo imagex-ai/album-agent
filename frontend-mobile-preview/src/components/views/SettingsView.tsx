@@ -37,6 +37,7 @@ import {
   Terminal,
   Cloud,
   Copy,
+  Download,
   Check,
   ExternalLink,
   Loader2,
@@ -74,8 +75,14 @@ export const SettingsView: React.FC = () => {
     ollamaStatus,
     ollamaModels,
     isCheckingOllama,
-    checkOllamaHealth
+    checkOllamaHealth,
+    updateInfo,
+    isCheckingUpdate,
+    checkForUpdates,
+    setUpdateModalOpen
   } = useAppStore();
+
+  const updaterT: any = translations[settings.language]?.updater || translations['pt-BR']?.updater || {};
 
   const t: any = translations[settings.language].settings || {};
   const isEn = settings.language === 'en-US';
@@ -333,6 +340,84 @@ export const SettingsView: React.FC = () => {
         <p className="text-xs text-slate-400 mt-1">
           {t.subtitle}
         </p>
+      </div>
+
+            {/* System Updates Card */}
+      <div className="glass-panel p-4 sm:p-6 rounded-3xl border border-brand-500/30 bg-gradient-to-r from-brand-950/20 via-surface/60 to-surface/90 space-y-4 shadow-glow-brand">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <IconBadge icon={<Sparkles size={18} className="text-amber-300" />} variant="neon" size="md" />
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="font-extrabold text-sm text-slate-100">
+                  {updaterT.systemSectionTitle || 'Atualizações do Sistema'}
+                </h3>
+                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-brand-500/20 text-brand-300 border border-brand-500/30">
+                  v5.5
+                </span>
+                {updateInfo?.update_available && (
+                  <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse">
+                    {updaterT.newVersionBadge || 'NOVA VERSÃO'}
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                {updaterT.systemSectionDesc || 'Detecção e instalação autônoma de novas versões diretamente do GitHub.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            <button
+              type="button"
+              onClick={() => checkForUpdates(false, true)}
+              disabled={isCheckingUpdate}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-surface-elevated hover:bg-surface border border-border text-xs font-semibold text-slate-200 transition-colors cursor-pointer"
+            >
+              <RefreshCw size={13} className={isCheckingUpdate ? 'animate-spin text-brand-400' : 'text-slate-400'} />
+              <span>{isCheckingUpdate ? (updaterT.checking || 'Verificando...') : (updaterT.checkNow || 'Verificar Atualizações')}</span>
+            </button>
+
+            {updateInfo?.update_available && (
+              <button
+                type="button"
+                onClick={() => setUpdateModalOpen(true)}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-xs font-bold text-white shadow-lg shadow-brand-600/30 transition-all cursor-pointer"
+              >
+                <Download size={14} />
+                <span>{updaterT.updateNow || 'Atualizar Agora'}</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Update status banner */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-2xl bg-surface/80 border border-border text-xs">
+          <div className="flex items-center gap-2">
+            {updateInfo?.update_available ? (
+              <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
+            ) : (
+              <CheckCircle2 size={16} className="text-emerald-400" />
+            )}
+            <span className="text-slate-300 font-medium">
+              {updateInfo?.update_available
+                ? (isEn
+                    ? `Update available: ${updateInfo.latest_version} (${updateInfo.release_name})`
+                    : `Nova versão disponível: ${updateInfo.latest_version} (${updateInfo.release_name})`)
+                : (updaterT.upToDate || 'O app está atualizado na versão mais recente.')}
+            </span>
+          </div>
+
+          {updateInfo?.html_url && updateInfo.update_available && (
+            <button
+              type="button"
+              onClick={() => setUpdateModalOpen(true)}
+              className="text-brand-400 hover:text-brand-300 font-semibold underline text-[11px] self-start sm:self-auto cursor-pointer"
+            >
+              {isEn ? 'View release notes & update' : 'Ver novidades e atualizar'}
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Section 0: Secure API Keys & Cloud Connections */}

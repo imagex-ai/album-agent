@@ -1,4 +1,5 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { Copy, Trash2, CheckCircle2, ShieldCheck, AlertCircle, ImageOff, Shapes, ChevronDown, ChevronUp, FolderHeart, Film, Play, ExternalLink } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { ImageItem } from '../../types';
@@ -36,7 +37,22 @@ const ReviewPreview: React.FC<{ image: ImageItem; label: string; unavailable: st
 };
 
 export const DuplicatesView: React.FC = () => {
-  const { albums, videos, removeImagesFromAlbum, addNotification, openLightbox, settings, navigateToView, deleteAlbum, deleteVideo, syncVideos, setActivePlayingVideo, fetchTrash } = useAppStore();
+  const { albums, videos, removeImagesFromAlbum, addNotification, openLightbox, settings, navigateToView, deleteAlbum, deleteVideo, syncVideos, setActivePlayingVideo, fetchTrash } = useAppStore(
+    useShallow(state => ({
+      albums: state.albums,
+      videos: state.videos,
+      removeImagesFromAlbum: state.removeImagesFromAlbum,
+      addNotification: state.addNotification,
+      openLightbox: state.openLightbox,
+      settings: state.settings,
+      navigateToView: state.navigateToView,
+      deleteAlbum: state.deleteAlbum,
+      deleteVideo: state.deleteVideo,
+      syncVideos: state.syncVideos,
+      setActivePlayingVideo: state.setActivePlayingVideo,
+      fetchTrash: state.fetchTrash,
+    }))
+  );
   const [filterQuery, setFilterQuery] = useState('');
   const [activePanel, setActivePanel] = useState<'duplicates' | 'cleanup' | 'albums' | 'videos'>('duplicates');
   const [selectedCleanupKeys, setSelectedCleanupKeys] = useState<string[]>([]);
@@ -76,10 +92,10 @@ export const DuplicatesView: React.FC = () => {
   const [mediaRemoving, setMediaRemoving] = useState(false);
   const videoController = useRef<AbortController | null>(null);
   const mediaRemovalLock = useRef(false);
-  const videoFingerprint = (items: typeof videos) => JSON.stringify([...items].sort((a, b) => a.id.localeCompare(b.id)));
-  const currentVideoFingerprint = videoFingerprint(videos);
-  const albumFingerprint = (items: typeof albums) => JSON.stringify([...items].sort((a, b) => a.id.localeCompare(b.id)).map(album => [album.id, getCleanupAlbumFingerprint(album), album]));
-  const currentAlbumFingerprint = albumFingerprint(albums);
+  const videoFingerprint = (items: typeof videos) => items.map(v => `${v.id}:${v.fileSizeBytes || 0}`).sort().join(';');
+  const currentVideoFingerprint = useMemo(() => (videoResult || activePanel === 'videos') ? videoFingerprint(videos) : '', [videos, videoResult, activePanel]);
+  const albumFingerprint = (items: typeof albums) => items.map(a => `${a.id}:${a.updatedAt || ''}:${a.imageCount}`).sort().join(';');
+  const currentAlbumFingerprint = useMemo(() => localAlbumResult ? albumFingerprint(albums) : '', [albums, localAlbumResult]);
   const albumById = useMemo(() => new Map(albums.map(album => [album.id, album])), [albums]);
   const missingLocalAlbumIds = Boolean(localAlbumResult?.groups.some(group => group.albumIds.some(id => !albumById.has(id))));
   const validLocalAlbumResult = localAlbumResult?.fingerprint === currentAlbumFingerprint && !missingLocalAlbumIds ? localAlbumResult : null;
@@ -101,11 +117,19 @@ export const DuplicatesView: React.FC = () => {
     }
   }, [currentVideoFingerprint, missingVideoIds, videoResult]);
   const query = filterQuery.trim().toLowerCase();
-  const filteredAlbumGroups = albumGroups.filter(group => !query || group.albums.some(album => `${album.title} ${album.sourceUrl} ${album.folder || ''}`.toLowerCase().includes(query)));
-  const filteredLocalAlbumGroups = (validLocalAlbumResult?.groups || []).map(group => ({ ...group, albums: group.albumIds.map(id => albumById.get(id)).filter((album): album is NonNullable<typeof album> => Boolean(album)) })).filter(group => group.albums.length > 1 && (!query || group.albums.some(album => `${album.title} ${album.sourceUrl} ${album.folder || ''}`.toLowerCase().includes(query))));
+  const filteredAlbumGroups = useMemo(() => {
+    return albumGroups.filter(group => !query || group.albums.some(album => `${album.title} ${album.sourceUrl} ${album.folder || ''}`.toLowerCase().includes(query)));
+  }, [albumGroups, query]);
+  const filteredLocalAlbumGroups = useMemo(() => {
+    return (validLocalAlbumResult?.groups || []).map(group => ({ ...group, albums: group.albumIds.map(id => albumById.get(id)).filter((album): album is NonNullable<typeof album> => Boolean(album)) })).filter(group => group.albums.length > 1 && (!query || group.albums.some(album => `${album.title} ${album.sourceUrl} ${album.folder || ''}`.toLowerCase().includes(query))));
+  }, [validLocalAlbumResult, albumById, query]);
   const sourceVideoGroups = useMemo(() => buildVideoSourceGroups(videos), [videos]);
-  const filteredSourceVideoGroups = sourceVideoGroups.map(group => ({ ...group, videos: group.videoIds.map(id => videoById.get(id)).filter((video): video is NonNullable<typeof video> => Boolean(video)) })).filter(group => group.videos.length > 1 && (!query || group.videos.some(video => `${video.title} ${video.filename} ${video.folder} ${video.sourceUrl || video.url || video.cloudUrl || ''}`.toLowerCase().includes(query))));
-  const filteredVideoGroups = (validVideoResult?.groups || []).map(group => ({ ...group, videos: group.videoIds.map(id => videoById.get(id)).filter((video): video is NonNullable<typeof video> => Boolean(video)) })).filter(group => group.videos.length > 1 && (!query || group.videos.some(video => `${video.title} ${video.filename} ${video.folder}`.toLowerCase().includes(query))));
+  const filteredSourceVideoGroups = useMemo(() => {
+    return sourceVideoGroups.map(group => ({ ...group, videos: group.videoIds.map(id => videoById.get(id)).filter((video): video is NonNullable<typeof video> => Boolean(video)) })).filter(group => group.videos.length > 1 && (!query || group.videos.some(video => `${video.title} ${video.filename} ${video.folder} ${video.sourceUrl || video.url || video.cloudUrl || ''}`.toLowerCase().includes(query))));
+  }, [sourceVideoGroups, videoById, query]);
+  const filteredVideoGroups = useMemo(() => {
+    return (validVideoResult?.groups || []).map(group => ({ ...group, videos: group.videoIds.map(id => videoById.get(id)).filter((video): video is NonNullable<typeof video> => Boolean(video)) })).filter(group => group.videos.length > 1 && (!query || group.videos.some(video => `${video.title} ${video.filename} ${video.folder}`.toLowerCase().includes(query))));
+  }, [validVideoResult, videoById, query]);
   const busy = isRemoving || isScanning || localAlbumScanning || videoScanning || mediaRemoving;
 
 
@@ -159,13 +183,25 @@ export const DuplicatesView: React.FC = () => {
   const cleanupSourceKeys = useMemo(() => new Set(cleanupGroups.map(group => group.sourceKey)), [cleanupGroups]);
   const clusters: DuplicateCluster[] = useMemo(() => {
     const groups = new Map<string, CleanupEntry[]>();
-    albums.forEach(album => (album.images || []).forEach(image => {
-      const source = getDuplicateSourceKey(image.rawOriginalUrl || image.originalUrl || '');
-      if (!source || cleanupSourceKeys.has(source)) return;
-      const entries = groups.get(source) || [];
-      if (!entries.some(entry => entry.albumId === album.id && entry.image.id === image.id)) entries.push({ image, albumId: album.id, albumTitle: album.title });
-      groups.set(source, entries);
-    }));
+    const seenInSource = new Set<string>();
+
+    for (const album of albums) {
+      for (const image of album.images || []) {
+        const source = getDuplicateSourceKey(image.rawOriginalUrl || image.originalUrl || '');
+        if (!source || cleanupSourceKeys.has(source)) continue;
+        const dedupeKey = source + '\0' + album.id + '\0' + image.id;
+        if (seenInSource.has(dedupeKey)) continue;
+        seenInSource.add(dedupeKey);
+
+        let entries = groups.get(source);
+        if (!entries) {
+          entries = [];
+          groups.set(source, entries);
+        }
+        entries.push({ image, albumId: album.id, albumTitle: album.title });
+      }
+    }
+
     const result: DuplicateCluster[] = [];
     groups.forEach((items, source) => {
       if (items.length < 2) return;
@@ -197,7 +233,9 @@ export const DuplicatesView: React.FC = () => {
     : [];
   const visibleCleanupKeys = displayedCleanupGroups.flatMap(group => group.entries.map(getCleanupEntryKey));
   const allVisibleSelected = visibleCleanupKeys.length > 0 && visibleCleanupKeys.every(key => selectedCleanupKeys.includes(key));
-  const totalRedundantCount = filteredClusters.reduce((count, cluster) => count + cluster.redundantItems.length, 0);
+  const totalRedundantCount = useMemo(() => {
+    return filteredClusters.reduce((count, cluster) => count + cluster.redundantItems.length, 0);
+  }, [filteredClusters]);
 
   useEffect(() => {
     setVisibleClusterCount(16);
@@ -208,12 +246,14 @@ export const DuplicatesView: React.FC = () => {
     setVisibleLocalAlbumGroups(16);
   }, [filterQuery, activePanel]);
   useEffect(() => {
+    if (activePanel !== 'cleanup' || selectedCleanupKeys.length === 0) return;
     const available = new Set(filteredCleanupGroups.slice(0, visibleCleanupCount).flatMap(group => group.entries.map(getCleanupEntryKey)));
     setSelectedCleanupKeys(previous => {
+      if (previous.length === 0) return previous;
       const retained = previous.filter(key => available.has(key));
       return retained.length === previous.length ? previous : retained;
     });
-  }, [filteredCleanupGroups, visibleCleanupCount]);
+  }, [activePanel, filteredCleanupGroups, visibleCleanupCount]);
 
   const formatBytes = (bytes: number): string => bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`;
   const toggleEntries = (entries: CleanupEntry[]) => {

@@ -47,7 +47,7 @@ import {
 } from '../services/mockData';
 import { soundEffects } from '../services/soundEffects';
 import { ambientAudio } from '../services/ambientAudio';
-import { backendApi } from '../services/realApi';
+import { backendApi, UpdateCheckResponse, UpdateStatusResponse } from '../services/realApi';
 import { scrollRestorationManager, getViewScrollKey } from '../services/scrollRestoration';
 import { matchesPaletteFuzzy, colorPaletteCache } from '../services/colorExtractor';
 
@@ -400,6 +400,18 @@ interface AppState {
   // Optimistic Saved Registry
   optimisticSavedItems: Record<string, { folder: string; targetId: string; targetView: 'videos' | 'gallery'; timestamp: number }>;
   markItemAsSavedOptimistically: (params: { url?: string; title?: string; folder: string; targetId?: string; targetView?: 'videos' | 'gallery' }) => void;
+  // Auto-Update Engine
+  updateInfo: UpdateCheckResponse | null;
+  isCheckingUpdate: boolean;
+  updateModalOpen: boolean;
+  updateStatus: UpdateStatusResponse | null;
+  isApplyingUpdate: boolean;
+  dismissedUpdateVersion: string | null;
+  checkForUpdates: (silent?: boolean, force?: boolean) => Promise<void>;
+  setUpdateModalOpen: (open: boolean) => void;
+  dismissUpdate: (version: string) => void;
+  remindUpdateLater: () => void;
+  applyAppUpdate: () => Promise<void>;
 }
 
 export const mapServerJobToExtractionJob = (raw: any): ExtractionJob => {
@@ -594,7 +606,15 @@ export const useAppStore = create<AppState>((set, get) => {
   if (typeof window !== 'undefined') {
     try {
       const stored = localStorage.getItem('imagex_settings');
-      if (stored) savedSettings = { ...DEFAULT_SETTINGS, ...JSON.parse(stored) };
+      if (stored) {
+        savedSettings = { ...DEFAULT_SETTINGS, ...JSON.parse(stored) };
+        if (savedSettings.defaultAlbumFolder === 'My Fun new Collection') {
+          savedSettings.defaultAlbumFolder = 'Geral';
+          try {
+            localStorage.setItem('imagex_settings', JSON.stringify(savedSettings));
+          } catch (_) {}
+        }
+      }
 
       const storedTabs = localStorage.getItem('imagex_open_tabs');
       if (storedTabs) {
@@ -708,6 +728,13 @@ export const useAppStore = create<AppState>((set, get) => {
   };
 
   return {
+    // Auto-Update Initial State
+    updateInfo: null,
+    isCheckingUpdate: false,
+    updateModalOpen: false,
+    updateStatus: null,
+    isApplyingUpdate: false,
+    dismissedUpdateVersion: typeof window !== 'undefined' ? localStorage.getItem('imagex_dismissed_update') : null,
     currentView: savedCurrentView,
     openTabs: savedTabs,
     activeTabId: savedActiveTabId,
@@ -901,6 +928,9 @@ export const useAppStore = create<AppState>((set, get) => {
           await get().syncVideos();
           await get().syncAlbumFolders();
           await get().fetchTrash();
+          setTimeout(() => {
+            get().checkForUpdates(true, false);
+          }, 3500);
           if (models && models.length > 0) {
             set({ availableModels: models });
           }
@@ -3657,6 +3687,103 @@ export const useAppStore = create<AppState>((set, get) => {
         savedLookup = createSavedMediaLookup(videos, albums, getCanonicalMediaFingerprint);
       }
       return savedLookup(params);
+    },
+
+    checkForUpdates: async (silent = false, force = false) => {
+      set({ isCheckingUpdate: true });
+      try {
+        const data = await backendApi.checkForUpdates(force);
+        set({ updateInfo: data, isCheckingUpdate: false });
+
+        const dismissed = get().dismissedUpdateVersion;
+        if (data.update_available) {
+          if (!silent) {
+            set({ updateModalOpen: true });
+          } else if (data.latest_version !== dismissed) {
+            set({ updateModalOpen: true });
+          }
+        } else if (!silent) {
+          const isEn = get().settings.language === 'en-US';
+          get().addNotification({
+            type: 'success',
+            title: isEn ? 'App is Up to Date' : 'App Atualizado',
+            message: isEn
+              ? `You are running the latest version of IMAGEX.AI (${data.current_version}).`
+              : `Você está na versão mais recente do IMAGEX.AI (${data.current_version}).`
+          });
+        }
+      } catch (e: any) {
+        set({ isCheckingUpdate: false });
+        if (!silent) {
+          get().addNotification({
+            type: 'error',
+            title: 'Erro ao verificar atualizações',
+            message: e.message || String(e)
+          });
+        }
+      }
+    },
+
+    setUpdateModalOpen: (open) => set({ updateModalOpen: open }),
+
+    dismissUpdate: (version) => {
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem('imagex_dismissed_update', version);
+        } catch (_) {}
+      }
+      set({ dismissedUpdateVersion: version, updateModalOpen: false });
+    },
+
+    remindUpdateLater: () => {
+      set({ updateModalOpen: false });
+    },
+
+    applyAppUpdate: async () => {
+      set({ isApplyingUpdate: true });
+      try {
+        const res = await backendApi.applyUpdate();
+        if (res.status === 'error') {
+          set({ isApplyingUpdate: false });
+          get().addNotification({
+            type: 'error',
+            title: 'Falha na Atualização',
+            message: res.message
+          });
+          return;
+        }
+
+        const pollInterval = setInterval(async () => {
+          try {
+            const status = await backendApi.getUpdateStatus();
+            set({ updateStatus: status });
+
+            if (status.status === 'completed') {
+              clearInterval(pollInterval);
+              setTimeout(async () => {
+                try {
+                  await backendApi.restartServer(1.5);
+                } catch (_) {}
+                setTimeout(() => {
+                  if (typeof window !== 'undefined') {
+                    window.location.reload();
+                  }
+                }, 1800);
+              }, 1200);
+            } else if (status.status === 'error') {
+              clearInterval(pollInterval);
+              set({ isApplyingUpdate: false });
+            }
+          } catch (_) {}
+        }, 750);
+      } catch (err: any) {
+        set({ isApplyingUpdate: false });
+        get().addNotification({
+          type: 'error',
+          title: 'Falha ao iniciar atualização',
+          message: err.message || String(err)
+        });
+      }
     },
   };
 });

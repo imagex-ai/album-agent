@@ -399,7 +399,8 @@ export const MultiAlbumView: React.FC = () => {
     return null;
   };
 
-  const effectiveFolder = destinationFolder.trim() || settings.defaultAlbumFolder || performerName.trim() || 'Geral';
+  const safeDefaultFolder = settings.defaultAlbumFolder && settings.defaultAlbumFolder !== 'My Fun new Collection' ? settings.defaultAlbumFolder : '';
+  const effectiveFolder = destinationFolder.trim() || performerName.trim() || safeDefaultFolder || 'Geral';
 
   // Helper that attaches custom subset selection (selected_image_urls) to an album payload if the user selected specific images
   const enrichAlbumWithSelection = (album: DiscoveredItem, overrideSelectedUrls?: string[]) => {
@@ -1843,7 +1844,7 @@ export const MultiAlbumView: React.FC = () => {
           : t.folderModalSingleTitle}
         subtitle={t.folderModalSubtitle}
         existingFolders={albumFolders.map(f => f.name)}
-        defaultFolder={destinationFolder.trim() || settings.defaultAlbumFolder || performerName.trim() || (t.folderPlaceholder || 'General')}
+        defaultFolder={destinationFolder.trim() || performerName.trim() || safeDefaultFolder || (t.folderPlaceholder || 'General')}
         type="album"
         onConfirm={(selectedFolder: string) => {
           setDestinationFolder(selectedFolder);

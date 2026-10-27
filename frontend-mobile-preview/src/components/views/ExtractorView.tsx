@@ -461,7 +461,7 @@ export const ExtractorView: React.FC = () => {
         <div className="relative z-10 max-w-3xl">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-500/20 text-brand-400 font-semibold text-xs border border-brand-500/30 mb-3">
             <Sparkles size={13} />
-            <span>Autonomous Image Intelligence Studio v5.5</span>
+            <span>Autonomous Image Intelligence Studio v5.6</span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-100 tracking-tight mb-2">
             {t.title}

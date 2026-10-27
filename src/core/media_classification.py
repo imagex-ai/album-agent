@@ -79,11 +79,12 @@ def media_category(item):
 def update_album_media_metadata(album):
     """Recompute generated flags/tags, including when the last image is removed."""
     gif_count = sum(media_category(image) == "gif" for image in album.images)
+    photo_count = sum(media_category(image) == "photo" for image in album.images)
     if not isinstance(album.metadata, dict):
         album.metadata = {}
     album.metadata.update(has_gifs=bool(gif_count), gif_count=gif_count)
     album.tags = [tag for tag in (album.tags or []) if str(tag).lower() not in ("gif", "animado")]
-    if gif_count:
+    if gif_count and photo_count == 0:
         album.tags.extend(["gif", "animado"])
     return album
 

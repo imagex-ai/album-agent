@@ -118,18 +118,38 @@ export const getAlbumMediaSummary = (album: Partial<Album>): MediaSummary => {
     if (cached) return cached;
   }
   let gifCount = 0, videoCount = 0, photoCount = 0;
-  if (Array.isArray(album.images)) {
+  if (Array.isArray(album.images) && album.images.length > 0) {
     for (const image of album.images) {
       const category = getMediaCategory(image);
       if (category === 'gif') gifCount += 1;
       else if (category === 'video') videoCount += 1;
       else photoCount += 1;
     }
+    const totalReported = album.imageCount ?? album.images.length;
+    if (totalReported > album.images.length) {
+      // Truncated preview array: do not allow a lone preview GIF or video to classify the entire gallery
+      const knownGifCount = album.gifCount ?? (album.mediaType === 'gif' ? totalReported : (album.hasGifs ? Math.max(gifCount, 1) : gifCount));
+      const knownVideoCount = album.mediaType === 'video' ? Math.max(videoCount, 1) : videoCount;
+      if (album.mediaType === 'photo') {
+        photoCount = Math.max(photoCount, 1, totalReported - knownGifCount - knownVideoCount);
+        gifCount = knownGifCount;
+      } else if (album.mediaType === 'gif') {
+        photoCount = 0;
+        gifCount = Math.max(gifCount, knownGifCount, totalReported);
+      } else if (album.mediaType === 'video') {
+        videoCount = Math.max(videoCount, knownVideoCount);
+      } else {
+        if (totalReported > knownGifCount) {
+          photoCount = Math.max(photoCount, totalReported - knownGifCount - knownVideoCount);
+        }
+      }
+    }
   } else {
     // Only genuinely unloaded summaries may rely on their explicit aggregate fields.
-    gifCount = album.gifCount || (album.hasGifs || album.mediaType === 'gif' ? 1 : 0);
-    videoCount = album.mediaType === 'video' ? Math.max(1, (album.imageCount || 0) - gifCount) : 0;
-    photoCount = Math.max(0, (album.imageCount || 0) - gifCount - videoCount);
+    const totalReported = album.imageCount || 0;
+    gifCount = album.gifCount || (album.mediaType === 'gif' ? totalReported : (album.hasGifs ? 1 : 0));
+    videoCount = album.mediaType === 'video' ? Math.max(1, totalReported - gifCount) : 0;
+    photoCount = album.mediaType === 'gif' ? 0 : Math.max(0, totalReported - gifCount - videoCount);
   }
   const hasGifs = gifCount > 0;
   const hasVideos = videoCount > 0;

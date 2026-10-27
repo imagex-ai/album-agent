@@ -177,3 +177,29 @@ test('pure GIF album with no photos is classified as gif and matches gif filter'
   assert.equal(tags.includes('gif'), true);
   assert.equal(tags.includes('animado'), true);
 });
+test('truncated photo album with lone GIF preview is classified as photo and never matches gif filter', () => {
+  const truncatedAlbum = {
+    imageCount: 392,
+    images: [{ originalUrl: 'https://cdn.test/preview.gif', format: 'gif', isAnimated: true }]
+  };
+  const summary = media.getAlbumMediaSummary(truncatedAlbum);
+  assert.equal(summary.mediaType, 'photo');
+  assert.equal(summary.photoCount, 391);
+  assert.equal(summary.gifCount, 1);
+  assert.equal(media.matchesAlbumMediaFilter(truncatedAlbum, 'photo'), true);
+  assert.equal(media.matchesAlbumMediaFilter(truncatedAlbum, 'gif'), false);
+});
+
+test('truncated pure GIF album retains gif classification', () => {
+  const truncatedGifAlbum = {
+    imageCount: 20,
+    mediaType: 'gif',
+    images: [{ originalUrl: 'https://cdn.test/preview.gif', format: 'gif', isAnimated: true }]
+  };
+  const summary = media.getAlbumMediaSummary(truncatedGifAlbum);
+  assert.equal(summary.mediaType, 'gif');
+  assert.equal(summary.photoCount, 0);
+  assert.equal(summary.gifCount, 20);
+  assert.equal(media.matchesAlbumMediaFilter(truncatedGifAlbum, 'photo'), false);
+  assert.equal(media.matchesAlbumMediaFilter(truncatedGifAlbum, 'gif'), true);
+});

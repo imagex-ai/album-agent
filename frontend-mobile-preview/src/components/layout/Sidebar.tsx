@@ -112,7 +112,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
                   className="text-[10px] px-1.5 py-0.5 rounded bg-brand-500/20 hover:bg-brand-500/30 text-brand-400 font-mono font-semibold transition-colors cursor-pointer flex items-center gap-1"
                   title={settings.language === 'en-US' ? 'Check for updates' : 'Verificar atualizações do app'}
                 >
-                  v5.6
+                  v5.6.1
                   {updateInfo?.update_available && (
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
                   )}
@@ -136,7 +136,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
             type="button"
             onClick={() => setUpdateModalOpen(true)}
             className="w-10 h-10 mx-auto rounded-xl bg-gradient-to-tr from-brand-600 to-accent-purple flex items-center justify-center font-bold text-white shadow-glow-brand relative cursor-pointer"
-            title="IMAGEX.AI v5.6"
+            title="IMAGEX.AI v5.6.1"
           >
             X
             {updateInfo?.update_available && (

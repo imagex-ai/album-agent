@@ -1,6 +1,19 @@
-# ⚡ IMAGEX.AI v5.6
+# ⚡ IMAGEX.AI v5.6.1
 
-Autonomous platform for intelligent extraction, organization, and inspection of web albums and videos in their original maximum resolution. 🚀✨
+Autonomous platform for intelligent extraction, organization, and inspection of web albums and videos in their original maximum resolution. 🚀🔍
+
+---
+
+## ⚡ What's New in v5.6.1 (Release Notes)
+
+* 🎯 **Precision Media Classification (Zero False-Positive GIFs):**
+  * **Strict Pure GIF Isolation:** Resolves an issue where ordinary image galleries containing preview animations were incorrectly classified under Animated GIFs. Albums are now strictly classified as Animated GIFs only when `photoCount === 0 && gifCount > 0`.
+  * **Truncated Feeds & Preview Resilience:** Hardened `getAlbumMediaSummary` to accurately compute photo counts across truncated preview feeds and large galleries (e.g. 392+ items), preventing preview thumbnails from dominating gallery classification.
+  * **Accurate Filter Matching:** Refined `matchesAlbumMediaFilter` and tags normalization to guarantee photo collections appear cleanly in the Photo Albums tab.
+
+* 📁 **Folder Destination Sanitization & Healing:**
+  * Cleaned up legacy corrupted folder tags (`"My Fun new Collection"`) across frontend views (`HomeView`, `MultiAlbumView`, `BatchQueueView`), client-side storage, and backend album persistence.
+  * Standardized folder defaults cleanly to `"Geral"` or designated target collections.
 
 ---
 

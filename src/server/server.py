@@ -100,6 +100,7 @@ from ..core.network_profiles import (
     get_enrichment_api_url,
     get_video_host_indicators,
     suggest_smart_folder_name,
+    load_cookie_string_into_cookiejar,
 )
 
 logger = logging.getLogger("agent_server")
@@ -682,6 +683,8 @@ def _save_album_to_disk(album_id: str, album: Album):
     global _summaries_dirty
     _mark_album_summaries_dirty()
     """Saves completed album to data/albums/<album_id>.json on disk AND mirrors to HF."""
+    persisted = False
+    tmp_path = os.path.join(ALBUMS_DIR, f"{album_id}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         sanitize_album_images(album)
         ensure_album_cover(album)
@@ -742,14 +745,15 @@ def _save_album_to_disk(album_id: str, album: Album):
 
         album_data = album.model_dump() if hasattr(album, "model_dump") else album.dict()
 
-        with open(fpath, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(album_data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, fpath)
+        persisted = True
         logger.info(f"Persisted album to disk: {fpath}")
 
         # Mirror album to HF in background thread only if auto-sync is explicitly enabled
         if is_auto_cloud_sync_enabled():
             try:
-                import threading
                 from src.server.video_service import cloud_storage as _cs
                 def _sync_album():
                     _cs.upload_json(album_data, f"albums/{album_id}.json")
@@ -769,6 +773,13 @@ def _save_album_to_disk(album_id: str, album: Album):
             _save_jobs_to_disk()
     except Exception as e:
         logger.warning(f"Failed to persist album to disk: {e}")
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+    return persisted
 
 
 _hf_restore_done = False  # Ensures HF restore runs only once at startup
@@ -2092,7 +2103,9 @@ async def _re_resolve_video_stream(target_page: str, target_height: Optional[int
     and returns (fresh_stream_url, all_formats_info).
     """
     import yt_dlp
-    hdrs = {k: v for k, v in _get_video_download_headers(target_page, target_page).items() if k.lower() != "cookie"}
+    raw_hdrs = _get_video_download_headers(target_page, target_page)
+    cookie_str = raw_hdrs.get("Cookie") or raw_hdrs.get("cookie")
+    hdrs = {k: v for k, v in raw_hdrs.items() if k.lower() != "cookie"}
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -2103,6 +2116,8 @@ async def _re_resolve_video_stream(target_page: str, target_height: Optional[int
     def _extract():
         nonlocal extracted_cookies
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            if cookie_str:
+                load_cookie_string_into_cookiejar(ydl.cookiejar, cookie_str, target_page)
             inf = ydl.extract_info(target_page, download=False)
             extracted_cookies = {c.name: c.value for c in ydl.cookiejar}
             return inf
@@ -2788,12 +2803,15 @@ async def rename_album_folder(req: RenameAlbumFolderRequest):
     _save_custom_album_folders(custom)
 
     _load_albums_from_disk()
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     for aid, alb in _completed_albums.items():
         curr_folder = getattr(alb, "folder", None) or (alb.metadata.get("folder") if isinstance(alb.metadata, dict) else None) or "Geral"
         if curr_folder == old_name:
             alb.folder = new_name
+            alb.updated_at = now_ts
             if isinstance(alb.metadata, dict):
                 alb.metadata["folder"] = new_name
+                alb.metadata["updated_at"] = now_ts
             _save_album_to_disk(aid, alb)
 
     folders, total = _get_all_album_folders_with_counts()
@@ -2814,12 +2832,15 @@ async def delete_album_folder(req: DeleteAlbumFolderRequest):
     _save_custom_album_folders(custom)
 
     _load_albums_from_disk()
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     for aid, alb in _completed_albums.items():
         curr_folder = getattr(alb, "folder", None) or (alb.metadata.get("folder") if isinstance(alb.metadata, dict) else None) or "Geral"
         if curr_folder == folder_name:
             alb.folder = "Geral"
+            alb.updated_at = now_ts
             if isinstance(alb.metadata, dict):
                 alb.metadata["folder"] = "Geral"
+                alb.metadata["updated_at"] = now_ts
             _save_album_to_disk(aid, alb)
 
     folders, total = _get_all_album_folders_with_counts()
@@ -2836,12 +2857,15 @@ async def move_albums(req: MoveAlbumsRequest):
 
     _load_albums_from_disk()
     moved_count = 0
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     for aid in req.album_ids:
         alb = _completed_albums.get(aid)
         if alb:
             alb.folder = target
+            alb.updated_at = now_ts
             if isinstance(alb.metadata, dict):
                 alb.metadata["folder"] = target
+                alb.metadata["updated_at"] = now_ts
             _save_album_to_disk(aid, alb)
             moved_count += 1
 
@@ -3486,7 +3510,7 @@ async def start_analysis(req: AnalyzeRequest):
     _session_events_history[session_id] = []
     _completed_albums.pop(session_id, None)
 
-    engine_type = (req.engine_type or "ai_react").lower()
+    engine_type = (req.engine_type or "ai_react").strip().lower()
     mode_name = "ai_react" if engine_type == "ai_react" else "autonomous"
 
     _active_jobs[session_id] = {
@@ -3595,7 +3619,7 @@ async def start_batch_analysis(req: BatchAnalyzeRequest):
     for u in valid_urls:
         s_id = f"sess_{abs(hash(u + str(datetime.now(timezone.utc).timestamp()))) % 1000000}"
         _active_event_queues[s_id] = asyncio.Queue()
-        engine_type = (req.engine_type or "ai_react").lower()
+        engine_type = (req.engine_type or "ai_react").strip().lower()
         mode_name = "ai_react" if engine_type == "ai_react" else "autonomous"
         _active_jobs[s_id] = {
             "session_id": s_id,
@@ -3840,8 +3864,9 @@ async def _run_gemini_surgical_task(session_id: str, req: AnalyzeRequest, semaph
             local_model = req.model_name if (req.model_name and "gemini" not in req.model_name.lower()) else "qwen2.5:32b"
 
             clean_req_url = req.url.strip().rstrip("/")
+            selected_urls = getattr(req, "selected_image_urls", None)
             cached_preview = _multi_album_preview_cache.get(clean_req_url) or _multi_album_preview_cache.get(req.url.strip())
-            if cached_preview and getattr(cached_preview, "images", None) and len(cached_preview.images) > 0:
+            if selected_urls and cached_preview and getattr(cached_preview, "images", None) and len(cached_preview.images) > 0:
                 album = cached_preview.model_copy(deep=True)
             else:
                 album = await scout.extract_album(
@@ -3853,7 +3878,6 @@ async def _run_gemini_surgical_task(session_id: str, req: AnalyzeRequest, semaph
                 if getattr(album, "images", None) and len(album.images) > 0:
                     _multi_album_preview_cache[clean_req_url] = album.model_copy(deep=True)
 
-            selected_urls = getattr(req, "selected_image_urls", None)
             if selected_urls is not None and len(selected_urls) > 0:
                 album = _filter_album_by_selected_urls(album, selected_urls)
 
@@ -4090,6 +4114,8 @@ async def extract_yandex_preview_video(url: str) -> dict:
             logger.info(f"[YandexVideo] Resolving via yt-dlp target: {target_for_ytdlp}")
             try:
                 import yt_dlp
+                raw_hdrs = _get_video_download_headers(target_for_ytdlp, target_for_ytdlp)
+                existing_cookie = raw_hdrs.get("Cookie") or raw_hdrs.get("cookie")
                 ydl_opts = {
                     "quiet": True,
                     "no_warnings": True,
@@ -4103,6 +4129,8 @@ async def extract_yandex_preview_video(url: str) -> dict:
                 def _ytdl_resolve():
                     nonlocal captured_cookies
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        if existing_cookie:
+                            load_cookie_string_into_cookiejar(ydl.cookiejar, existing_cookie, target_for_ytdlp)
                         inf = ydl.extract_info(target_for_ytdlp, download=False)
                         captured_cookies = {c.name: c.value for c in ydl.cookiejar}
                         return inf
@@ -4603,6 +4631,8 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
             try:
                 import yt_dlp
                 anti_hdrs = resolve_anti_hotlink_headers(req.url, referer=req.url)
+                cookie_str = anti_hdrs.get("Cookie") or anti_hdrs.get("cookie")
+                clean_anti_hdrs = {k: v for k, v in anti_hdrs.items() if k.lower() != "cookie"}
                 cookie_domains = get_cookie_domains_for_url(req.url)
                 ydl_opts = {
                     "quiet": True,
@@ -4610,13 +4640,15 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
                     "skip_download": True,
                     "http_headers": {
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                        **anti_hdrs
+                        **clean_anti_hdrs
                     }
                 }
                 ph_cookies = {}
                 def _extract_ph():
                     nonlocal ph_cookies
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        if cookie_str:
+                            load_cookie_string_into_cookiejar(ydl.cookiejar, cookie_str, req.url)
                         inf = ydl.extract_info(req.url, download=False)
                         ph_cookies = {c.name: c.value for c in ydl.cookiejar}
                         return inf
@@ -5821,6 +5853,10 @@ async def probe_and_update_album_metadata(album: Album, session_id: str = None, 
         album.metadata["total_images"] = tot_imgs
 
     if save_to_disk and session_id:
+        now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        album.updated_at = now_ts
+        if isinstance(album.metadata, dict):
+            album.metadata["updated_at"] = now_ts
         try:
             _save_album_to_disk(session_id, album)
         except Exception as e:
@@ -6237,8 +6273,17 @@ async def delete_album(session_id: str):
     return {"session_id": session_id, "deleted": True, "trash_item": trash_item}
 
 
+class DeleteImageRef(BaseModel):
+    id: Optional[str] = None
+    candidate_id: Optional[str] = None
+    original_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    index: Optional[int] = None
+
+
 class DeleteImagesRequest(BaseModel):
     image_ids: List[str]
+    image_refs: Optional[List[DeleteImageRef]] = None
 
 
 @app.post("/api/albums/{session_id}/delete-images")
@@ -6249,16 +6294,43 @@ async def delete_album_images(session_id: str, req: DeleteImagesRequest):
     if session_id not in _completed_albums:
         raise HTTPException(status_code=404, detail="Album not found")
 
-    album = _completed_albums[session_id]
+    original_album = _completed_albums[session_id]
+    album = original_album.model_copy(deep=True)
     to_delete = set(req.image_ids)
     original_count = len(album.images)
+    exact_indexes = None
+    if req.image_refs is not None:
+        exact_indexes = set()
+        for ref in req.image_refs:
+            if ref.id:
+                matches = [index for index, image in enumerate(album.images) if image.id == ref.id]
+            elif ref.candidate_id:
+                matches = [index for index, image in enumerate(album.images) if image.candidate_id == ref.candidate_id]
+            elif ref.index is not None and 0 <= ref.index < len(album.images) and (ref.original_url or ref.thumbnail_url):
+                image = album.images[ref.index]
+                matches = [ref.index] if (
+                    image.original_url == ref.original_url and image.thumbnail_url == ref.thumbnail_url
+                ) else []
+            else:
+                matches = []
+            if len(matches) == 1:
+                image = album.images[matches[0]]
+                fields = ref.model_fields_set
+                if (
+                    ('original_url' in fields and image.original_url != ref.original_url)
+                    or ('thumbnail_url' in fields and image.thumbnail_url != ref.thumbnail_url)
+                ):
+                    matches = []
+            if len(matches) != 1 or matches[0] in exact_indexes:
+                raise HTTPException(status_code=409, detail="Album changed; refresh the images before removing them")
+            exact_indexes.add(matches[0])
 
     deleted_images_data = []
     retained_images = []
     for idx, img in enumerate(album.images):
         frontend_id = f"real-img-{session_id}-{idx}"
         cand_id = f"cand-{img.candidate_id}" if img.candidate_id else ""
-        if (
+        legacy_match = (
             frontend_id in to_delete
             or (img.id and img.id in to_delete)
             or (img.candidate_id and img.candidate_id in to_delete)
@@ -6267,7 +6339,9 @@ async def delete_album_images(session_id: str, req: DeleteImagesRequest):
             or str(img.position) in to_delete
             or (img.original_url and img.original_url in to_delete)
             or (img.thumbnail_url and img.thumbnail_url in to_delete)
-        ):
+        )
+        matches_selection = idx in exact_indexes if exact_indexes is not None else legacy_match
+        if matches_selection:
             deleted_images_data.append(img.model_dump() if hasattr(img, "model_dump") else img.dict())
             continue
         retained_images.append(img)
@@ -6279,13 +6353,23 @@ async def delete_album_images(session_id: str, req: DeleteImagesRequest):
     if album.cover_image_url and not any(img.original_url == album.cover_image_url for img in album.images):
         album.cover_image_url = album.images[0].original_url if album.images else ""
 
-    _save_album_to_disk(session_id, album)
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    album.updated_at = now_ts
+    if not isinstance(album.metadata, dict):
+        album.metadata = {}
+    album.metadata["updated_at"] = now_ts
 
-    # Move deleted images to trash
+    # Record recovery copies before committing the edited album.
     if deleted_images_data:
-        trash_service.move_photos_to_trash(
+        trash_items = trash_service.move_photos_to_trash(
             session_id, album.title or album.original_title or session_id, deleted_images_data
         )
+        if len(trash_items) != len(deleted_images_data):
+            raise HTTPException(status_code=500, detail="Could not save recovery copies in trash")
+
+    if _save_album_to_disk(session_id, album) is False:
+        raise HTTPException(status_code=500, detail="Could not save album changes")
+    _completed_albums[session_id] = album
 
     summary = AgentDebugger.get_ui_summary(album)
     summary["session_id"] = session_id
@@ -7212,17 +7296,21 @@ async def _resolve_best_video_stream_with_meta(vid_id: str, page_url: str) -> Di
         try:
             import yt_dlp
             anti_hdrs = resolve_anti_hotlink_headers(target_page, referer=target_page)
+            cookie_str = anti_hdrs.get("Cookie") or anti_hdrs.get("cookie")
+            clean_anti_hdrs = {k: v for k, v in anti_hdrs.items() if k.lower() != "cookie"}
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
                 "skip_download": True,
                 "http_headers": {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    **anti_hdrs
+                    **clean_anti_hdrs
                 }
             }
             def _ytdl_ph():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    if cookie_str:
+                        load_cookie_string_into_cookiejar(ydl.cookiejar, cookie_str, target_page)
                     return ydl.extract_info(target_page, download=False)
             info = await asyncio.to_thread(_ytdl_ph)
             formats = [f for f in info.get("formats", []) if f.get("ext") == "mp4" and f.get("url")]
@@ -7350,14 +7438,18 @@ async def _resolve_best_video_stream_with_meta(vid_id: str, page_url: str) -> Di
     if target_page and target_page.startswith("http"):
         try:
             import yt_dlp
+            raw_hdrs = _get_video_download_headers(target_page)
+            cookie_str = raw_hdrs.get("Cookie") or raw_hdrs.get("cookie")
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
                 "skip_download": True,
-                "http_headers": _get_video_download_headers(target_page)
+                "http_headers": {k: v for k, v in raw_hdrs.items() if k.lower() != "cookie"}
             }
             def _ytdl_generic():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    if cookie_str:
+                        load_cookie_string_into_cookiejar(ydl.cookiejar, cookie_str, target_page)
                     return ydl.extract_info(target_page, download=False)
             info = await asyncio.to_thread(_ytdl_generic)
             formats = [f for f in info.get("formats", []) if f.get("ext") == "mp4" and f.get("url")]
@@ -8326,6 +8418,70 @@ def get_videos_and_folders(request: Request, heal: bool = False):
     return Response(content=body, media_type="application/json", headers=headers)
 
 
+from .duplicate_video_scan import DuplicateVideoScanner
+from .duplicate_album_scan import DuplicateAlbumScanner
+from .video_service import SUPPORTED_EXTENSIONS
+_duplicate_video_scanner = DuplicateVideoScanner(video_service, SUPPORTED_EXTENSIONS)
+_duplicate_album_scanner = DuplicateAlbumScanner(ALBUMS_DIR)
+
+
+@app.post("/api/duplicates/album-scans")
+async def start_duplicate_album_scan():
+    return {"scanId": _duplicate_album_scanner.start()}
+
+
+@app.get("/api/duplicates/album-scans/{scan_id}")
+async def get_duplicate_album_scan(scan_id: str):
+    result = _duplicate_album_scanner.snapshot(scan_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return result
+
+
+@app.delete("/api/duplicates/album-scans/{scan_id}")
+async def cancel_duplicate_album_scan(scan_id: str):
+    if not _duplicate_album_scanner.cancel(scan_id):
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return {"cancelled": True}
+
+
+@app.delete("/api/duplicates/album-scans/{scan_id}/albums/{album_id}")
+async def trash_duplicate_album(scan_id: str, album_id: str):
+    if not _duplicate_album_scanner.validate(scan_id, album_id):
+        raise HTTPException(status_code=409, detail="Album or matching copy changed; scan again")
+    return await delete_album(album_id)
+
+
+@app.post("/api/duplicates/video-scans")
+async def start_duplicate_video_scan(mode: str = 'exact'):
+    if mode not in ('exact', 'similar'):
+        raise HTTPException(status_code=400, detail='Invalid scan mode')
+    return {"scanId": _duplicate_video_scanner.start(mode)}
+
+
+@app.get("/api/duplicates/video-scans/{scan_id}")
+async def get_duplicate_video_scan(scan_id: str):
+    result = _duplicate_video_scanner.snapshot(scan_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return result
+
+
+@app.delete("/api/duplicates/video-scans/{scan_id}")
+async def cancel_duplicate_video_scan(scan_id: str):
+    if not _duplicate_video_scanner.cancel(scan_id):
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return {"cancelled": True}
+
+
+@app.post("/api/duplicates/video-scans/{scan_id}/trash/{video_id}")
+async def trash_duplicate_video(scan_id: str, video_id: str):
+    video = await asyncio.to_thread(video_service.get_video_by_id, video_id)
+    if not video or not _duplicate_video_scanner.validate(scan_id, video_id, video.get("full_path")):
+        raise HTTPException(status_code=409, detail="Video or matching copy changed; scan again")
+    return await delete_video(video_id)
+
+
 @app.post("/api/videos/sync")
 async def sync_videos_endpoint():
     """Triggers disk scan, HF metadata sync, and asynchronous thumbnail healing for all videos missing thumbnails."""
@@ -8456,52 +8612,124 @@ async def add_video_by_url(req: AddVideoUrlRequest):
 # STORAGE ANALYTICS & PHOTO ALBUM UPLOAD API
 # =====================================================================
 
+_local_cache_stats = {"bytes": 0, "files": 0, "timestamp": 0.0}
+
+def _get_image_cache_stats():
+    now = time.time()
+    if now - _local_cache_stats["timestamp"] < 60.0 and _local_cache_stats["bytes"] > 0:
+        return _local_cache_stats["bytes"], _local_cache_stats["files"]
+    cache_img_dir = os.path.join(DATA_DIR, "cache", "images")
+    total_bytes = 0
+    total_files = 0
+    if os.path.exists(cache_img_dir):
+        try:
+            for root, dirs, files in os.walk(cache_img_dir):
+                for f in files:
+                    total_files += 1
+                    total_bytes += os.path.getsize(os.path.join(root, f))
+        except Exception:
+            pass
+    _local_cache_stats["bytes"] = total_bytes
+    _local_cache_stats["files"] = total_files
+    _local_cache_stats["timestamp"] = now
+    return total_bytes, total_files
+
+
 @app.get("/api/storage/analytics")
 async def get_storage_analytics():
     """
     Retorna métricas consolidadas em tempo real sobre a infraestrutura de armazenamento:
     - Nuvem Hugging Face (10GB)
-    - Render Local (Disco Temporário / Transbordo)
+    - Armazenamento Local no PC (Disco Rígido, Vídeos Locais e Cache SSD)
     - Streaming Remoto (URLs externas sem download)
     - Álbuns e Fotos
     """
+    import shutil
     from src.server.video_service import cloud_storage
 
     # 1. Hugging Face Cloud Stats
-    cloud_stats = cloud_storage.get_storage_stats()
+    try:
+        cloud_stats = dict(cloud_storage.get_storage_stats())
+        cloud_stats.pop("files", None)
+    except Exception as e:
+        cloud_stats = {
+            "is_connected": False,
+            "provider": "Hugging Face Hub (Dataset LFS)",
+            "repo_id": cloud_storage.repo_id or "album-data",
+            "total_bytes_used": 0,
+            "max_bytes_limit": cloud_storage.max_cloud_bytes,
+            "used_percentage": 0.0,
+            "files_count": 0,
+            "files": [],
+            "error": str(e)
+        }
 
-    # 2. Local Render Disk Stats
-    all_videos = video_service.list_all_videos()
-    local_render_bytes = 0
-    local_render_count = 0
+    # 2. Local PC Hard Drive & App Local Data Stats
+    try:
+        all_videos = video_service.list_all_videos()
+    except Exception:
+        all_videos = []
+
+    local_videos_bytes = 0
+    local_videos_count = 0
     stream_only_count = 0
     huggingface_count = 0
 
     for v in all_videos:
-        loc = v.get("storage_location", "render_local")
-        if loc == "render_local":
-            local_render_bytes += v.get("file_size_bytes", 0)
-            local_render_count += 1
+        loc = v.get("storage_location", "local")
+        sz = v.get("file_size_bytes") or 0
+        if loc in ("render_local", "local"):
+            local_videos_bytes += sz
+            local_videos_count += 1
         elif loc == "stream_url":
             stream_only_count += 1
         elif loc == "huggingface":
             huggingface_count += 1
 
+    # Local disk usage (drive C: / host drive)
+    try:
+        total_drive, used_drive, free_drive = shutil.disk_usage(DATA_DIR)
+        drive_letter = os.path.splitdrive(os.path.abspath(DATA_DIR))[0] or "C:"
+    except Exception:
+        total_drive, used_drive, free_drive = 0, 0, 0
+        drive_letter = "C:"
+
+    cache_bytes, cache_files = _get_image_cache_stats()
+    total_app_local_bytes = local_videos_bytes + cache_bytes
+
     # 3. Photo Albums Stats
-    _load_albums_from_disk()
-    total_albums = len(_completed_albums)
-    total_photos = sum(len(a.images) for a in _completed_albums.values())
-    total_photos_bytes = sum(sum(img.file_size for img in a.images) for a in _completed_albums.values())
+    try:
+        _load_albums_from_disk()
+        total_albums = len(_completed_albums)
+        total_photos = sum(len(a.images) for a in _completed_albums.values())
+        total_photos_bytes = sum(sum((img.file_size or 0) for img in a.images) for a in _completed_albums.values())
+    except Exception:
+        total_albums = 0
+        total_photos = 0
+        total_photos_bytes = 0
 
     return {
         "cloud_huggingface": {
             **cloud_stats,
             "app_recorded_videos": huggingface_count
         },
+        "local_storage": {
+            "total_app_bytes": total_app_local_bytes,
+            "videos_bytes": local_videos_bytes,
+            "videos_count": local_videos_count,
+            "cache_bytes": cache_bytes,
+            "cache_files_count": cache_files,
+            "drive_letter": drive_letter,
+            "drive_total_bytes": total_drive,
+            "drive_used_bytes": used_drive,
+            "drive_free_bytes": free_drive,
+            "drive_used_percentage": round((used_drive / total_drive * 100), 1) if total_drive > 0 else 0.0,
+            "is_low_space": (free_drive / (1024**3)) < 30.0 if total_drive > 0 else False
+        },
         "render_local": {
-            "total_bytes_used": local_render_bytes,
-            "videos_count": local_render_count,
-            "is_overflow_risk": local_render_bytes > 500 * 1024 * 1024  # Alerta se passar de 500MB no Render Free
+            "total_bytes_used": local_videos_bytes,
+            "videos_count": local_videos_count,
+            "is_overflow_risk": False
         },
         "stream_only": {
             "videos_count": stream_only_count
@@ -9996,7 +10224,9 @@ async def _refresh_single_image_stream(img, default_page: Optional[str] = None) 
     if not target_url:
         return False, "No valid video URL or ID found in image"
 
-    hdrs = {k: v for k, v in _get_video_download_headers(target_url, target_url).items() if k.lower() != "cookie"}
+    raw_hdrs = _get_video_download_headers(target_url, target_url)
+    cookie_str = raw_hdrs.get("Cookie") or raw_hdrs.get("cookie")
+    hdrs = {k: v for k, v in raw_hdrs.items() if k.lower() != "cookie"}
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -10007,6 +10237,8 @@ async def _refresh_single_image_stream(img, default_page: Optional[str] = None) 
     def _extract():
         nonlocal extracted_cookies
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            if cookie_str:
+                load_cookie_string_into_cookiejar(ydl.cookiejar, cookie_str, target_url)
             inf = ydl.extract_info(target_url, download=False)
             extracted_cookies = {c.name: c.value for c in ydl.cookiejar}
             return inf
@@ -10118,7 +10350,9 @@ async def _refresh_album_video_streams(album: Album) -> tuple[list, list]:
                 failed.append({"id": str(img.id), "error": "No target URL could be identified"})
             continue
 
-        hdrs = {k: v for k, v in _get_video_download_headers(target_url, target_url).items() if k.lower() != "cookie"}
+        raw_hdrs = _get_video_download_headers(target_url, target_url)
+        cookie_str = raw_hdrs.get("Cookie") or raw_hdrs.get("cookie")
+        hdrs = {k: v for k, v in raw_hdrs.items() if k.lower() != "cookie"}
         ydl_opts = {
             "quiet": True,
             "no_warnings": True,
@@ -10129,6 +10363,8 @@ async def _refresh_album_video_streams(album: Album) -> tuple[list, list]:
         def _extract():
             nonlocal extracted_cookies
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                if cookie_str:
+                    load_cookie_string_into_cookiejar(ydl.cookiejar, cookie_str, target_url)
                 inf = ydl.extract_info(target_url, download=False)
                 extracted_cookies = {c.name: c.value for c in ydl.cookiejar}
                 return inf
@@ -10213,6 +10449,10 @@ async def refresh_album_streams_endpoint(session_id: str):
     async with _stream_refresh_semaphore:
         refreshed, failed = await _refresh_album_video_streams(album)
         if refreshed:
+            now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            album.updated_at = now_ts
+            if isinstance(album.metadata, dict):
+                album.metadata["updated_at"] = now_ts
             _completed_albums[session_id] = album
             _save_album_to_disk(session_id, album)
             _sync_refreshed_album_to_video_gallery(album)
@@ -10272,6 +10512,7 @@ def _sync_refreshed_album_to_video_gallery(album: Album):
                         ventry["duration_seconds"] = img.duration_seconds
                     if getattr(img, "file_size", None):
                         ventry["file_size_bytes"] = img.file_size
+                    ventry["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                     updated = True
         if updated:
             video_service._save_metadata(v_meta)
@@ -10315,6 +10556,10 @@ async def refresh_single_stream_endpoint(session_id: str, candidate_id: str):
     async with _stream_refresh_semaphore:
         ok, err = await _refresh_single_image_stream(img, default_page=getattr(album, "source_page", None) or getattr(album, "url", None))
         if ok:
+            now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            album.updated_at = now_ts
+            if isinstance(album.metadata, dict):
+                album.metadata["updated_at"] = now_ts
             _completed_albums[session_id] = album
             _save_album_to_disk(session_id, album)
             _sync_refreshed_album_to_video_gallery(album)
@@ -10395,6 +10640,7 @@ async def renew_video_streams_endpoint(req: Optional[VideoRenewStreamsRequest] =
                     ventry["custom_stream_url"] = f"/api/proxy-video-stream?url={urllib.parse.quote(fresh_url)}{ref_param}"
                     ventry["stream_status"] = "ok"
                     ventry["stream_error"] = None
+                    ventry["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
                     if info:
                         dur = int(info.get("duration") or 0)
@@ -10431,6 +10677,13 @@ async def renew_video_streams_endpoint(req: Optional[VideoRenewStreamsRequest] =
                                     img.duration_seconds = int(ventry["duration_seconds"])
                                 if ventry.get("file_size_bytes"):
                                     img.file_size = ventry["file_size_bytes"]
+                                now_alb_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                                alb.updated_at = now_alb_ts
+                                if isinstance(alb.metadata, dict):
+                                    alb.metadata["updated_at"] = now_alb_ts
+                                alb_key = getattr(alb, "album_id", None) or getattr(alb, "session_id", None)
+                                if alb_key:
+                                    _save_album_to_disk(alb_key, alb)
                 else:
                     # Check if deleted on source website
                     is_deleted = False
@@ -10448,7 +10701,7 @@ async def renew_video_streams_endpoint(req: Optional[VideoRenewStreamsRequest] =
 
                     if is_deleted:
                         ventry["stream_status"] = "deleted_on_source"
-                        ventry["stream_error"] = "Deleted on source website (DMCA/Copyright)"
+                        ventry["stream_error"] = "Unavailable on source website (Expired or removed)"
                         failed.append({"id": vid, "error": "Deleted on source website", "status": "deleted_on_source"})
                     else:
                         ventry["stream_status"] = "expired"
@@ -10459,7 +10712,7 @@ async def renew_video_streams_endpoint(req: Optional[VideoRenewStreamsRequest] =
                 is_deleted = "Unable to extract hash" in exc_str or "deleted" in exc_str.lower()
                 if is_deleted:
                     ventry["stream_status"] = "deleted_on_source"
-                    ventry["stream_error"] = "Deleted on source website (DMCA/Copyright)"
+                    ventry["stream_error"] = "Unavailable on source website (Expired or removed)"
                     failed.append({"id": vid, "error": "Deleted on source website", "status": "deleted_on_source"})
                 else:
                     ventry["stream_status"] = "expired"

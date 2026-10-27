@@ -90,7 +90,7 @@ async def run_cli_investigation(
 
 def main():
     parser = argparse.ArgumentParser(description="AI-First Browser Agent for Album Discovery")
-    parser.add_argument("url", nargs="?", help="Target gallery or forum URL to investigate")
+    parser.add_argument("url", nargs="?", help="Target album or gallery URL to investigate")
     parser.add_argument("--server", action="store_true", help="Launch FastAPI Web UI server")
     parser.add_argument("--no-window", action="store_true", help="Runs web server only, without opening desktop window")
     import os

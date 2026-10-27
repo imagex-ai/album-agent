@@ -237,6 +237,43 @@ def resolve_anti_hotlink_headers(
     return headers
 
 
+def load_cookie_string_into_cookiejar(cookiejar, cookie_str: Optional[str], target: str) -> None:
+    """
+    Carrega cookies formatados em string diretamente no cookiejar nativo (yt-dlp ou http.cookiejar),
+    escopando-os estritamente para o domínio do recurso de forma segura (RFC 6265).
+    Evita o aviso de 'Deprecated Feature: Passing cookies as a header' e impede vazamento cross-domain.
+    """
+    if not cookie_str or cookiejar is None:
+        return
+    import http.cookiejar
+    netloc = urllib.parse.urlparse(target).netloc if "://" in target else target
+    apex = get_apex_domain(netloc) or netloc.lstrip(".")
+    dot_domain = f".{apex}"
+    for part in cookie_str.split(";"):
+        if "=" in part:
+            name, val = part.strip().split("=", 1)
+            c = http.cookiejar.Cookie(
+                version=0,
+                name=name.strip(),
+                value=val.strip(),
+                port=None,
+                port_specified=False,
+                domain=dot_domain,
+                domain_specified=True,
+                domain_initial_dot=True,
+                path="/",
+                path_specified=True,
+                secure=False,
+                expires=None,
+                discard=False,
+                comment=None,
+                comment_url=None,
+                rest={},
+                rfc2109=False,
+            )
+            cookiejar.set_cookie(c)
+
+
 def extract_canonical_target_page(src: str) -> Optional[str]:
     """Identifica padrões de vídeo e constrói a URL canônica da página principal preservando o domínio original."""
     if not src:

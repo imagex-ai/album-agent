@@ -7,10 +7,15 @@ Unit & Integration tests for Multi-Album Per-Album Image Inspection & Subset Sel
 """
 
 import urllib.parse
+from unittest.mock import AsyncMock, patch
+import pytest
 from fastapi.testclient import TestClient
 from src.core.models import Album, AlbumImage
 from src.server.server import (
     app,
+    AnalyzeRequest,
+    _run_gemini_surgical_task,
+    _completed_albums,
     _unwrap_image_url_for_match,
     _filter_album_by_selected_urls,
     _multi_album_preview_cache,
@@ -226,4 +231,101 @@ def test_subset_saved_album_in_completed_albums_does_not_poison_preview_album():
     finally:
         _multi_album_preview_cache.pop(test_url, None)
         _completed_albums.pop("subset-session-777", None)
+
+
+@pytest.mark.asyncio
+async def test_surgical_task_preview_cache_requires_selected_image_urls():
+    """
+    Regression test:
+    _run_gemini_surgical_task must only serve cached preview when selected_image_urls is specified.
+    If selected_image_urls is None or empty, it must re-extract fresh images.
+    """
+    test_url = "https://example.com/gallery/surgical-preview-cache-test"
+    cached_album = Album(
+        album_id="cached-scout-1",
+        title="Cached Scout Preview",
+        original_title="Cached Scout Preview",
+        source_page=test_url,
+        images=[
+            AlbumImage(
+                id="c-1",
+                position=1,
+                thumbnail_url="https://cdn.example.com/c1_thumb.jpg",
+                original_url="https://cdn.example.com/c1_full.jpg",
+                media_type="image",
+            ),
+            AlbumImage(
+                id="c-2",
+                position=2,
+                thumbnail_url="https://cdn.example.com/c2_thumb.jpg",
+                original_url="https://cdn.example.com/c2_full.jpg",
+                media_type="image",
+            ),
+        ],
+    )
+    fresh_album = Album(
+        album_id="fresh-scout-1",
+        title="Fresh Scout Extraction",
+        original_title="Fresh Scout Extraction",
+        source_page=test_url,
+        images=[
+            AlbumImage(
+                id="f-1",
+                position=1,
+                thumbnail_url="https://cdn.example.com/fresh1_thumb.jpg",
+                original_url="https://cdn.example.com/fresh1_full.jpg",
+                media_type="image",
+            )
+        ],
+    )
+
+    _multi_album_preview_cache[test_url] = cached_album.model_copy(deep=True)
+    try:
+        # Case 1: selected_image_urls is None -> Must call scout.extract_album (do NOT serve cached preview)
+        with patch("src.server.server.GeminiSurgicalScout") as MockScout:
+            scout_inst = MockScout.return_value
+            scout_inst.client = None
+            scout_inst.api_key = None
+            scout_inst.extract_album = AsyncMock(return_value=fresh_album.model_copy(deep=True))
+
+            req_without_selection = AnalyzeRequest(
+                url=test_url,
+                selected_image_urls=None,
+            )
+            await _run_gemini_surgical_task("session-no-selection", req_without_selection)
+
+            # scout.extract_album should be called
+            assert scout_inst.extract_album.called
+            saved = _completed_albums.get("session-no-selection")
+            assert saved is not None
+            assert len(saved.images) == 1
+            assert saved.images[0].original_url == "https://cdn.example.com/fresh1_full.jpg"
+
+        # Case 2: selected_image_urls is provided -> Must use cached preview and filter it
+        with patch("src.server.server.GeminiSurgicalScout") as MockScout:
+            scout_inst = MockScout.return_value
+            scout_inst.client = None
+            scout_inst.api_key = None
+            scout_inst.extract_album = AsyncMock()
+
+            # reset cache with 2 images
+            _multi_album_preview_cache[test_url] = cached_album.model_copy(deep=True)
+            req_with_selection = AnalyzeRequest(
+                url=test_url,
+                selected_image_urls=["https://cdn.example.com/c2_full.jpg"],
+            )
+            await _run_gemini_surgical_task("session-with-selection", req_with_selection)
+
+            # scout.extract_album should NOT be called
+            assert not scout_inst.extract_album.called
+            saved = _completed_albums.get("session-with-selection")
+            assert saved is not None
+            assert len(saved.images) == 1
+            assert saved.images[0].original_url == "https://cdn.example.com/c2_full.jpg"
+            assert saved.metadata.get("is_subset_selection") is True
+    finally:
+        _multi_album_preview_cache.pop(test_url, None)
+        _completed_albums.pop("session-no-selection", None)
+        _completed_albums.pop("session-with-selection", None)
+
 

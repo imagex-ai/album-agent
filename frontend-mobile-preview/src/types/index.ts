@@ -97,6 +97,13 @@ export interface ImageItem {
   posterUrl?: string;
   durationSeconds?: number;
   candidateId?: string; // Video candidate id for individual stream refresh
+  backendImageRef?: {
+    id?: string | null;
+    candidate_id?: string | null;
+    original_url?: string | null;
+    thumbnail_url?: string | null;
+    index: number;
+  };
   isFavorite?: boolean;
 }
 
@@ -391,6 +398,7 @@ export interface VideoItem {
   format: string;
   isFavorite: boolean;
   createdAt: string;
+  updatedAt?: string;
   relPath: string;
   streamUrl: string;
   downloadUrl: string;

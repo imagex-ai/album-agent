@@ -24,7 +24,6 @@ import {
   HelpCircle,
   CheckCircle2,
   Zap,
-  Compass,
   Bot,
   Languages,
   Key,
@@ -898,7 +897,7 @@ export const SettingsView: React.FC = () => {
           <span>{t.aiStrategySection}</span>
         </h3>
 
-        {/* Global Default Engine Selector (4 Engines) */}
+        {/* Global Default Engine Selector (2 Modes: Surgical Scout & AI ReAct) */}
         <AiEngineSelector variant="cards" />
 
         {/* Gemini Cloud Vision & Scout Model */}
@@ -972,32 +971,23 @@ export const SettingsView: React.FC = () => {
               <Sparkles size={13} className="text-amber-400" />
               <span>{isEn ? 'Recommended Modes:' : 'Modos Recomendados:'}</span>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px]">
               <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20">
                 <div className="font-bold text-amber-300 flex items-center gap-1">
                   <Zap size={12} className="text-amber-300" />
-                  <span>{isEn ? 'Maximum Speed:' : 'Velocidade Máxima:'}</span>
+                  <span>{isEn ? '1. Fast / Surgical Mode (Scout):' : '1. Modo Rápido / Cirúrgico (Scout):'}</span>
                 </div>
-                <div className="text-slate-200 text-[10px] mt-0.5 font-medium">Motor 2 (Surgical Scout)</div>
-                <div className="text-slate-400 text-[9px] mt-0.5">{isEn ? 'Extracts with physical binary X-ray without opening browser.' : 'Extrai com Raio-X físico sem abrir navegador.'}</div>
-              </div>
-
-              <div className="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/20">
-                <div className="font-bold text-cyan-300 flex items-center gap-1">
-                  <Compass size={12} className="text-cyan-300" />
-                  <span>{isEn ? 'Map New Site:' : 'Mapear Novo Site:'}</span>
-                </div>
-                <div className="text-slate-200 text-[10px] mt-0.5 font-medium">Motor 1 (Layout Explorer)</div>
-                <div className="text-slate-400 text-[9px] mt-0.5">{isEn ? 'Learns layout and saves reusable recipe.' : 'Aprende o layout e salva a receita reutilizável.'}</div>
+                <div className="text-slate-200 text-[10px] mt-0.5 font-medium">{isEn ? 'Recommended (90% of sites)' : 'Recomendado (90% dos sites)'}</div>
+                <div className="text-slate-400 text-[9px] mt-0.5">{isEn ? 'Direct HTTP requests with physical byte X-ray (1-3s), no browser overhead.' : 'Extração cirúrgica direta por HTTP com Raio-X físico de bytes (1 a 3s), sem abrir navegador.'}</div>
               </div>
 
               <div className="p-2.5 rounded-xl bg-brand-500/10 border border-brand-500/20">
                 <div className="font-bold text-brand-300 flex items-center gap-1">
                   <Bot size={12} className="text-brand-300" />
-                  <span>{isEn ? 'Complex / Dynamic Sites:' : 'Sites Dinâmicos / JS:'}</span>
+                  <span>{isEn ? '2. Real Browser (IA ReAct):' : '2. Navegador Real (IA ReAct):'}</span>
                 </div>
-                <div className="text-slate-200 text-[10px] mt-0.5 font-medium">Motor 3 (Playwright Visual)</div>
-                <div className="text-slate-400 text-[9px] mt-0.5">{isEn ? 'Uses full visual Playwright with Set-of-Marks.' : 'Usa Playwright visual completo com Set-of-Marks.'}</div>
+                <div className="text-slate-200 text-[10px] mt-0.5 font-medium">{isEn ? 'Complex / Dynamic Sites & JS' : 'Sites Complexos, JS & Cloudflare'}</div>
+                <div className="text-slate-400 text-[9px] mt-0.5">{isEn ? 'Headless Chromium browser with Set-of-Marks and multimodal vision.' : 'Navegador Chromium com Set-of-Marks, visão multimodal e reflexão adaptativa.'}</div>
               </div>
             </div>
           </div>

@@ -338,6 +338,16 @@ export const ShortsView: React.FC = () => {
   const containerHeightRef = useRef<number>(containerHeight);
   containerHeightRef.current = containerHeight;
 
+  // True Cinema Mode: Sync controls visibility with playback pause/resume & initial mount
+  useEffect(() => {
+    if (!isPaused) {
+      resetControlsTimer();
+    } else {
+      if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+      setAreControlsVisible(true);
+    }
+  }, [isPaused, resetControlsTimer]);
+
   // Clear all pending interaction, scroll, and animation timers on unmount
   useEffect(() => {
     return () => {
@@ -1253,10 +1263,11 @@ export const ShortsView: React.FC = () => {
       wasPlayingBeforeScrubRef.current = false;
     }
 
+    resetControlsTimer();
     setIsScrubbing(true);
     isScrubbingRef.current = true;
     updateScrubFromPointer(e.clientX, trackEl, targetItem);
-  }, [updateScrubFromPointer]);
+  }, [updateScrubFromPointer, resetControlsTimer]);
 
   const handleScrubberPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>, targetItem: ShortsItem) => {
     const trackEl = e.currentTarget;
@@ -1289,6 +1300,7 @@ export const ShortsView: React.FC = () => {
         e.currentTarget.releasePointerCapture(e.pointerId);
       }
     } catch (_) {}
+    resetControlsTimer();
     setIsScrubbing(false);
     isScrubbingRef.current = false;
     setHoverScrubTime(null);
@@ -1297,7 +1309,7 @@ export const ShortsView: React.FC = () => {
       vid.play().catch(() => {});
     }
     wasPlayingBeforeScrubRef.current = false;
-  }, []);
+  }, [resetControlsTimer]);
 
   const handleScrubberPointerLeave = useCallback(() => {
     if (!isScrubbingRef.current) {
@@ -1432,11 +1444,13 @@ export const ShortsView: React.FC = () => {
       clearTimeout(errorSkipTimerRef.current);
       errorSkipTimerRef.current = null;
     }
-    resetControlsTimer();
+    // True Cinema Mode: Do NOT force controls visible when slide changes via auto-advance.
+    // If controls were already hidden, they stay hidden until the user touches the screen,
+    // moves the mouse, scrolls with wheel/gestures, or presses a key.
     if (typeof setShortsActiveIndex === 'function') {
       setShortsActiveIndex(activeIndex);
     }
-  }, [activeIndex, setShortsActiveIndex, resetControlsTimer]);
+  }, [activeIndex, setShortsActiveIndex]);
 
   const hasActiveCustomFilters =
     orientationFilter !== 'all' || selectedFolder !== '' || sequenceMode !== 'random';
@@ -1446,6 +1460,7 @@ export const ShortsView: React.FC = () => {
       ref={rootRef}
       onMouseMove={resetControlsTimer}
       onTouchMove={resetControlsTimer}
+      onTouchStart={resetControlsTimer}
       className="relative w-full h-full bg-black overflow-hidden flex flex-col select-none"
     >
       {/* Ultra-Clean Social Media Top Overlay Bar (TikTok / Reels Style) */}

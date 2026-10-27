@@ -10,7 +10,7 @@ const frontend = path.join(root, 'frontend-mobile-preview/src');
 
 function evaluate(source, mocks = {}) {
   const code = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React }
+    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2020 }
   }).outputText;
   const container = { exports: {} };
   new Function('require', 'module', 'exports', code)(name => {
@@ -21,6 +21,11 @@ function evaluate(source, mocks = {}) {
 }
 const sourceIdentity = evaluate(fs.readFileSync(path.join(frontend, 'utils/duplicateSource.ts'), 'utf8'));
 const mediaClassification = evaluate(fs.readFileSync(path.join(frontend, 'utils/mediaClassification.ts'), 'utf8'));
+const albumCleanup = evaluate(fs.readFileSync(path.join(frontend, 'utils/albumCleanup.ts'), 'utf8'), {
+  './duplicateSource': sourceIdentity, './mediaClassification': mediaClassification
+});
+const duplicateAlbums = evaluate(fs.readFileSync(path.join(frontend, 'utils/duplicateAlbums.ts'), 'utf8'), { './duplicateSource': sourceIdentity });
+const duplicateVideoSources = evaluate(fs.readFileSync(path.join(frontend, 'utils/duplicateVideoSources.ts'), 'utf8'), { './duplicateSource': sourceIdentity });
 const { translations } = evaluate(fs.readFileSync(path.join(frontend, 'i18n/translations.ts'), 'utf8'));
 const storePath = path.join(frontend, 'store/useAppStore.ts');
 const storeSource = ts.createSourceFile(storePath, fs.readFileSync(storePath, 'utf8'), ts.ScriptTarget.Latest, true);
@@ -74,7 +79,8 @@ for (const language of ['pt-BR', 'en-US']) {
     }
     test(`${name} still updates intended state on success (${language})`, async () => {
       const fixture = fixtureState(language);
-      const { run, deletedScrollKeys } = storeAction(name, fixture.state, { deleteAlbum: async () => true, deleteAlbumImages: async () => true });
+      const serverAlbum = { ...fixture.state.albums[0], images: [{ id: 'photo-b', fileSizeBytes: 75 }], imageCount: 1, totalSizeBytes: 75 };
+      const { run, deletedScrollKeys } = storeAction(name, fixture.state, { deleteAlbum: async () => true, deleteAlbumImages: async () => ({ album: serverAlbum, deletedCount: 1 }) });
       assert.equal(await run('album-a', ['photo-a']), true);
       assert.equal(fixture.getTrashRefreshes(), 1);
       assert.equal(fixture.notifications[0].type, 'warning');
@@ -97,25 +103,55 @@ function image(url, id, width = 1000) {
   return { id, title: id, originalUrl: url, rawOriginalUrl: url, width, height: width, fileSizeBytes: 5000 };
 }
 function album(id, images) { return { id, title: id, images }; }
-function duplicates(albums, remove = async () => true) {
-  const memos = [], notifications = [], buttons = [];
+function duplicates(albums, remove = async () => true, options = {}) {
+  const memos = [], notifications = [], buttons = [], inputs = [];
+  const state = [], refs = [];
+  let stateIndex = 0, refIndex = 0;
   const react = {
     createElement: (type, props, ...children) => {
       const node = { type, props: props || {}, children };
       if (type === 'button') buttons.push(node);
+      if (type === 'input') inputs.push(node);
       return node;
     },
     useMemo: callback => { const value = callback(); memos.push(value); return value; },
-    useState: value => [value, () => {}], useEffect: () => {}
+    useState: value => {
+      const index = stateIndex++;
+      if (!(index in state)) state[index] = typeof value === 'function' ? value() : value;
+      return [state[index], update => { state[index] = typeof update === 'function' ? update(state[index]) : update; }];
+    },
+    useEffect: () => {},
+    useRef: value => { const index = refIndex++; return refs[index] ||= { current: value }; }
   };
+  const snapshot = { albums, videos: options.videos || [], settings: { language: 'en-US' }, removeImagesFromAlbum: remove,
+    deleteAlbum: options.deleteAlbum || (async () => true), deleteVideo: options.deleteVideo || (async () => true), syncVideos: options.syncVideos || (async () => {}),
+    fetchTrash: options.fetchTrash || (async () => {}), navigateToView: options.navigateToView || (() => {}),
+    setActivePlayingVideo: options.setActivePlayingVideo || (() => {}), addNotification: value => notifications.push(value) };
+  const useAppStore = Object.assign(() => snapshot, { getState: () => snapshot });
   const component = evaluate(fs.readFileSync(path.join(frontend, 'components/views/DuplicatesView.tsx'), 'utf8'), {
     react: { ...react, default: react }, 'lucide-react': {}, '../common/IconBadge': {},
     '../../utils/duplicateSource': sourceIdentity, '../../i18n/translations': { translations },
-    '../../store/useAppStore': { useAppStore: () => ({ albums, settings: { language: 'en-US' }, removeImagesFromAlbum: remove, addNotification: value => notifications.push(value) }) }
+    '../../utils/albumCleanup': albumCleanup, '../../utils/duplicateAlbums': duplicateAlbums, '../../utils/duplicateVideoSources': duplicateVideoSources,
+    '../../services/duplicateMediaApi': options.mediaApi || {}, '../../services/realApi': { backendApi: {} },
+    '../../store/useAppStore': { useAppStore }
   });
-  component.DuplicatesView();
   const text = node => typeof node === 'string' ? node : (node?.children || []).flat(Infinity).map(text).join('');
-  return { clusters: memos[0], notifications, buttons, text };
+  global.window = { confirm: () => true };
+  const result = { notifications, buttons, inputs, text };
+  result.render = () => {
+    stateIndex = 0; refIndex = 0; buttons.length = 0; inputs.length = 0; memos.length = 0;
+    result.tree = component.DuplicatesView();
+    result.clusters = memos.find(value => Array.isArray(value) && value.some(item => item && 'redundantItems' in item)) || [];
+    result.batchButton = buttons.find(button => text(button).includes(translations['en-US'].duplicates.keepOnlyOriginals.split('{count}')[0]));
+    return result;
+  };
+  result.expandFirst = () => {
+    const button = buttons.find(item => item.props['aria-expanded'] === false);
+    assert.ok(button, 'Expected a collapsed group');
+    button.props.onClick();
+    return result.render();
+  };
+  return result.render();
 }
 
 test('different hosts with the same path are not duplicates', () => {
@@ -149,6 +185,7 @@ const duplicateFixtures = [album('a', [image('https://cdn.test/same.jpg', 'a')])
 test('single duplicate removal awaits success before announcing it', async () => {
   let resolveRemoval;
   const result = duplicates(duplicateFixtures, () => new Promise(resolve => { resolveRemoval = resolve; }));
+  result.expandFirst();
   const button = result.buttons.find(button => result.text(button).includes(translations['en-US'].duplicates.discardSingle));
   assert.ok(button);
   const operation = button.props.onClick();
@@ -160,20 +197,134 @@ test('single duplicate removal awaits success before announcing it', async () =>
 for (const mode of ['single', 'batch']) {
   test(`${mode} duplicate cleanup does not announce success on failure`, async () => {
     const result = duplicates(duplicateFixtures, async () => false);
-    const button = mode === 'batch' ? result.buttons[0] : result.buttons.find(button => result.text(button).includes(translations['en-US'].duplicates.discardSingle));
+    if (mode === 'single') result.expandFirst();
+    const button = mode === 'batch' ? result.batchButton : result.buttons.find(button => result.text(button).includes(translations['en-US'].duplicates.discardSingle));
     await button.props.onClick();
-    assert.equal(result.notifications.length, 0);
+    assert.ok(result.notifications.every(notification => notification.type !== 'success'));
   });
 }
 test('batch cleanup does not announce all-clean on partial success', async () => {
   let calls = 0;
   const result = duplicates([...duplicateFixtures, album('c', [image('https://cdn.test/other.jpg', 'c')]), album('d', [image('https://cdn.test/other.jpg', 'd')])], async () => ++calls === 1);
-  await result.buttons[0].props.onClick();
+  await result.batchButton.props.onClick();
   assert.equal(calls, 2);
-  assert.equal(result.notifications.length, 0);
+  assert.ok(result.notifications.every(notification => notification.type !== 'success'));
 });
 test('batch duplicate cleanup still announces full success', async () => {
   const result = duplicates(duplicateFixtures);
-  await result.buttons[0].props.onClick();
+  await result.batchButton.props.onClick();
   assert.equal(result.notifications[0].type, 'success');
+});
+
+test('a large group starts collapsed and loads occurrences in bounded batches', () => {
+  const albums = Array.from({length: 87}, (_, i) => album('a' + i, [image('https://cdn.test/same.jpg', 'i' + i)]));
+  const result = duplicates(albums);
+  const discardButtons = () => result.buttons.filter(button => result.text(button).includes(translations['en-US'].duplicates.discardSingle));
+  assert.equal(discardButtons().length, 0);
+  result.expandFirst();
+  assert.equal(discardButtons().length, 5);
+  const loadMore = result.buttons.find(button => result.text(button) === translations['en-US'].duplicates.loadMoreOccurrences);
+  assert.ok(loadMore);
+  loadMore.props.onClick(); result.render();
+  assert.equal(discardButtons().length, 11);
+  result.buttons.find(button => button.props['aria-expanded'] === true).props.onClick(); result.render();
+  assert.equal(discardButtons().length, 0);
+});
+
+test('small group exposes its full contents without a load-more control', () => {
+  const result = duplicates(duplicateFixtures).expandFirst();
+  assert.equal(result.buttons.filter(button => result.text(button).includes(translations['en-US'].duplicates.discardSingle)).length, 1);
+  assert.ok(!result.buttons.some(button => result.text(button) === translations['en-US'].duplicates.loadMoreOccurrences));
+});
+
+test('group selection includes not-yet-rendered logo occurrences', async () => {
+  const albums = Array.from({length: 8}, (_, i) => album('a' + i, [image('https://cdn.test/logo.svg', 'i' + i)]));
+  const calls = [];
+  const result = duplicates(albums, async (id, ids) => { calls.push([id, ids]); return true; });
+  const cleanupTab = result.buttons.find(button => result.text(button).includes(translations['en-US'].duplicates.cleanupTab));
+  cleanupTab.props.onClick(); result.render();
+  const groupCheckbox = result.inputs.find(input => input.props['aria-label']?.includes('logo.svg'));
+  assert.ok(groupCheckbox);
+  groupCheckbox.props.onChange(); result.render();
+  const removeSelected = result.buttons.find(button => result.text(button).includes(translations['en-US'].duplicates.removeSelected.split('{count}')[0]));
+  assert.ok(result.text(removeSelected).includes('8'));
+  await removeSelected.props.onClick();
+  assert.equal(calls.length, 8);
+});
+
+test('expanded logo group loads occurrences in batches', () => {
+  const albums = Array.from({length: 8}, (_, i) => album('a' + i, [image('https://cdn.test/logo.svg', 'i' + i)]));
+  const result = duplicates(albums);
+  result.buttons.find(button => result.text(button).includes(translations['en-US'].duplicates.cleanupTab)).props.onClick();
+  result.render().expandFirst();
+  const removeButtons = () => result.buttons.filter(button => button.props['aria-label']?.startsWith(translations['en-US'].duplicates.removeOccurrenceFrom.split('{album}')[0]));
+  assert.equal(removeButtons().length, 6);
+  result.buttons.find(button => result.text(button) === translations['en-US'].duplicates.loadMoreOccurrences).props.onClick();
+  result.render();
+  assert.equal(removeButtons().length, 8);
+});
+
+test('bulk action includes filtered groups beyond the initially displayed page', async () => {
+  const albums = Array.from({length: 20}, (_, i) => album('a'+i, [image('https://cdn.test/photo'+i+'.jpg','one'+i), image('https://cdn.test/photo'+i+'.jpg','two'+i)]));
+  const calls = [];
+  const result = duplicates(albums, async (id, ids) => {calls.push([id, ids]); return true;});
+  assert.equal(result.buttons.filter(button => button.props['aria-expanded'] === false).length, 16);
+  await result.batchButton.props.onClick();
+  assert.equal(calls.length, 20);
+});
+
+test('album suggestions open their album and confirm before moving it to trash', async () => {
+  const moved = [], navigation = [];
+  const values = [album('a',[image('https://cdn.test/a.jpg','a')]), album('b',[image('https://cdn.test/b.jpg','b')])].map(a=>({...a, sourceUrl:'https://site.test/page', imageCount:1}));
+  const result = duplicates(values, undefined, {deleteAlbum: async id => {moved.push(id); return true;}, navigateToView:(...args)=>navigation.push(args)});
+  result.buttons.find(button=>result.text(button).includes(translations['en-US'].duplicates.albumsTab)).props.onClick();
+  result.render().expandFirst();
+  result.buttons.find(button=>result.text(button).includes(translations['en-US'].duplicates.openAlbum)).props.onClick();
+  assert.deepEqual(navigation[0],['album-detail','a']);
+  const remove = result.buttons.find(button=>result.text(button).includes(translations['en-US'].duplicates.moveToTrash));
+  window.confirm=()=>false; await remove.props.onClick(); assert.deepEqual(moved,[]);
+  window.confirm=()=>true; await remove.props.onClick(); assert.deepEqual(moved,['a']);
+});
+
+test('video scan shows matched files and confirms each guarded removal', async () => {
+  const calls=[], refreshed=[];
+  const videos=['a','b'].map(id=>({id,title:id,filename:id+'.mp4',folder:'folder',relPath:id+'.mp4',fileSizeBytes:10,updatedAt:'now',storageLocation:'local'}));
+  const result=duplicates([],undefined,{videos, mediaApi:{scanVideos:async progress=>{progress({loaded:2,total:2});return {scanId:'scan',groups:[{id:'hash',videoIds:['a','b']}],skipped:0};},trashScannedVideo:async(...args)=>{calls.push(args);return true;}},syncVideos:async()=>refreshed.push('videos'),fetchTrash:async()=>refreshed.push('trash')});
+  result.buttons.find(button=>result.text(button).includes(translations['en-US'].duplicates.videosTab)).props.onClick(); result.render();
+  await result.buttons.find(button=>result.text(button)===translations['en-US'].duplicates.scanVideos).props.onClick(); result.render().expandFirst();
+  const remove=result.buttons.find(button=>result.text(button).includes(translations['en-US'].duplicates.moveToTrash));
+  window.confirm=()=>false;await remove.props.onClick();assert.deepEqual(calls,[]);
+  window.confirm=()=>true;await remove.props.onClick();assert.deepEqual(calls,[['scan','a']]);assert.deepEqual(refreshed.sort(),['trash','videos']);
+});
+
+test('video scan with an incomplete inventory warns instead of showing no matches', async () => {
+  const videos=[{id:'a',title:'a',filename:'a.mp4',folder:'folder',relPath:'a.mp4',fileSizeBytes:10,updatedAt:'now',storageLocation:'local'}];
+  const result=duplicates([],undefined,{videos, mediaApi:{scanVideos:async()=>({scanId:'scan',groups:[{id:'hash',videoIds:['a','b']}],skipped:0})}});
+  result.buttons.find(button=>result.text(button).includes(translations['en-US'].duplicates.videosTab)).props.onClick(); result.render();
+  await result.buttons.find(button=>result.text(button)===translations['en-US'].duplicates.scanVideos).props.onClick(); result.render();
+  assert.ok(result.text(result.tree).includes(translations['en-US'].duplicates.videoInventoryStale));
+  assert.ok(!result.text(result.tree).includes(translations['en-US'].duplicates.noVideoGroups));
+  assert.ok(result.buttons.some(button=>result.text(button)===translations['en-US'].duplicates.refreshVideoList));
+});
+
+test('local album content scan requires confirmation and uses scan-bound trash', async () => {
+  const moved=[];
+  const albums=['a','b'].map(id=>({...album(id,[image('local://albums/'+id+'/photo.jpg',id)]),imageCount:1,tags:[]}));
+  const result=duplicates(albums,undefined,{deleteAlbum:async(...args)=>{moved.push(args);return true;},mediaApi:{scanLocalAlbums:async progress=>{progress({loaded:2,total:2});return {scanId:'local-scan',groups:[{id:'hash',albumIds:['a','b']}],skipped:0};}}});
+  result.buttons.find(button=>result.text(button).includes(translations['en-US'].duplicates.albumsTab)).props.onClick();result.render();
+  await result.buttons.find(button=>result.text(button)===translations['en-US'].duplicates.scanLocalAlbums).props.onClick();result.render().expandFirst();
+  const button=result.buttons.find(item=>result.text(item).includes(translations['en-US'].duplicates.moveToTrash));
+  window.confirm=()=>false;await button.props.onClick();assert.deepEqual(moved,[]);
+  window.confirm=()=>true;await button.props.onClick();assert.deepEqual(moved,[['a','local-scan']]);
+});
+
+test('similar video result asks for the similar scan and labels results as suggestions', async () => {
+  const modes=[];
+  const videos=['a','b'].map(id=>({id,title:id,filename:id+'.mp4',folder:'folder',relPath:id+'.mp4',fileSizeBytes:10,updatedAt:'now',storageLocation:'local'}));
+  const result=duplicates([],undefined,{videos,mediaApi:{scanVideos:async(_progress,_signal,mode)=>{modes.push(mode);return {scanId:'scan',groups:[{id:'hash',videoIds:['a','b'],reason:'similar'}],skipped:0};}}});
+  result.buttons.find(button=>result.text(button).includes(translations['en-US'].duplicates.videosTab)).props.onClick();result.render();
+  await result.buttons.find(button=>result.text(button)===translations['en-US'].duplicates.scanSimilarVideos).props.onClick();result.render();
+  assert.deepEqual(modes,['similar']);
+  assert.ok(result.text(result.tree).includes(translations['en-US'].duplicates.videoSimilar));
+  assert.ok(!result.text(result.tree).includes(translations['en-US'].duplicates.videoExact));
 });

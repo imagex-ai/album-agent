@@ -468,6 +468,8 @@ class CloudStorageManager:
         self.max_cloud_bytes = 10 * 1024 * 1024 * 1024  # 10 GB de referência
         self._api = None
         self._rate_limited_until = 0.0
+        self._stats_cache = None
+        self._stats_cache_time = 0.0
 
     def _get_api(self):
         if not self.token or not self.repo_id:
@@ -672,7 +674,11 @@ class CloudStorageManager:
         except Exception:
             return getattr(self, "_path_sizes_cache", {})
 
-    def get_storage_stats(self) -> Dict[str, Any]:
+    def get_storage_stats(self, force_refresh: bool = False) -> Dict[str, Any]:
+        now = time.time()
+        if not force_refresh and self._stats_cache and (now - getattr(self, "_stats_cache_time", 0.0) < 60.0):
+            return dict(self._stats_cache)
+
         api = self._get_api()
         default_stats = {
             "is_connected": False,
@@ -704,7 +710,7 @@ class CloudStorageManager:
                     })
 
             pct = (total_bytes / self.max_cloud_bytes * 100) if self.max_cloud_bytes > 0 else 0.0
-            return {
+            res = {
                 "is_connected": True,
                 "provider": "Hugging Face Hub (Dataset LFS)",
                 "repo_id": self.repo_id,
@@ -714,6 +720,9 @@ class CloudStorageManager:
                 "files_count": len(file_items),
                 "files": file_items
             }
+            self._stats_cache = res
+            self._stats_cache_time = now
+            return res
         except Exception as e:
             default_stats["error"] = str(e)
             return default_stats
@@ -845,6 +854,11 @@ class VideoService:
                     elif not cur_created:
                         entry["created_at"] = "2026-09-27 12:00:00"
                         modified = True
+
+                # 1.1 Ensure separate updated_at exists, defaulting to created_at
+                if not entry.get("updated_at"):
+                    entry["updated_at"] = entry.get("created_at") or "2026-09-27 12:00:00"
+                    modified = True
 
                 # 2. Fix source_origin ('web' vs 'pc')
                 curr = entry.get("source_origin")
@@ -1079,7 +1093,9 @@ class VideoService:
         highlight_end: Optional[float] = None,
         highlight_score: Optional[float] = None,
         highlights: Optional[List[Dict[str, Any]]] = None,
-        heatmap_data: Optional[List[Dict[str, Any]]] = None
+        heatmap_data: Optional[List[Dict[str, Any]]] = None,
+        updated_at: Optional[str] = None,
+        update_timestamp: bool = False
     ):
         with self._meta_lock:
             meta = self._load_metadata()
@@ -1166,10 +1182,17 @@ class VideoService:
                     entry["fps"] = p["fps"]
                     entry["duration_seconds"] = p["duration_seconds"]
 
+            now_ts = time.strftime("%Y-%m-%d %H:%M:%S")
             entry["id"] = vid_id
             entry["rel_path"] = rel_path
             if "created_at" not in entry or not entry["created_at"]:
-                entry["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                entry["created_at"] = now_ts
+            if updated_at is not None:
+                entry["updated_at"] = updated_at
+            elif update_timestamp:
+                entry["updated_at"] = now_ts
+            elif "updated_at" not in entry or not entry["updated_at"]:
+                entry["updated_at"] = entry["created_at"]
 
             meta[vid_id] = entry
             self._save_metadata(meta)
@@ -1279,6 +1302,9 @@ class VideoService:
                     created_at = entry_meta.get("created_at") or file_created
                     if not entry_meta.get("created_at"):
                         entry_meta["created_at"] = created_at
+                    updated_at = entry_meta.get("updated_at") or created_at
+                    if not entry_meta.get("updated_at"):
+                        entry_meta["updated_at"] = updated_at
 
                     clean_title = entry_meta.get("title") or os.path.splitext(f)[0].replace("_", " ")
                     storage_loc = entry_meta.get("storage_location", "local")
@@ -1300,6 +1326,7 @@ class VideoService:
                         "format": ext[1:].upper(),
                         "is_favorite": entry_meta.get("is_favorite", False),
                         "created_at": created_at,
+                        "updated_at": updated_at,
                         "rel_path": rel_path,
                         "storage_location": storage_loc,
                         "source_origin": entry_meta.get("source_origin") or ("web" if (entry_meta.get("source_url") or entry_meta.get("source_id") or entry_meta.get("custom_stream_url") or "".join(c for c in unicodedata.normalize("NFKD", folder_name) if not unicodedata.combining(c)).lower().startswith("extra")) else "pc"),
@@ -1355,6 +1382,9 @@ class VideoService:
                 created_at = entry_meta.get("created_at") or "2026-09-27 12:00:00"
                 if not entry_meta.get("created_at"):
                     entry_meta["created_at"] = created_at
+                updated_at = entry_meta.get("updated_at") or created_at
+                if not entry_meta.get("updated_at"):
+                    entry_meta["updated_at"] = updated_at
 
                 videos.append({
                     "id": vid_id,
@@ -1365,6 +1395,7 @@ class VideoService:
                     "format": "MP4",
                     "is_favorite": entry_meta.get("is_favorite", False),
                     "created_at": created_at,
+                    "updated_at": updated_at,
                     "rel_path": entry_meta.get("rel_path", ""),
                     "storage_location": storage_loc,
                     "source_origin": entry_meta.get("source_origin") or ("web" if (entry_meta.get("source_url") or entry_meta.get("source_id") or custom_stream or cloud_url or "".join(c for c in unicodedata.normalize("NFKD", entry_meta.get("folder", "")) if not unicodedata.combining(c)).lower().startswith("extra")) else "pc"),
@@ -1429,6 +1460,7 @@ class VideoService:
                 "format": entry.get("format") or (os.path.splitext(rel_path)[1][1:].upper() if rel_path else "MP4"),
                 "is_favorite": entry.get("is_favorite", False),
                 "created_at": entry.get("created_at") or "2026-09-27 12:00:00",
+                "updated_at": entry.get("updated_at") or entry.get("created_at") or "2026-09-27 12:00:00",
                 "rel_path": rel_path,
                 "storage_location": entry.get("storage_location", "local"),
                 "source_origin": entry.get("source_origin") or ("web" if (entry.get("source_url") or entry.get("source_id") or entry.get("custom_stream_url") or "".join(c for c in unicodedata.normalize("NFKD", entry.get("folder", "")) if not unicodedata.combining(c)).lower().startswith("extra")) else "pc"),
@@ -1559,6 +1591,7 @@ class VideoService:
 
         # Update metadata paths preserving IDs for both local and stream videos
         meta = self._load_metadata()
+        now_ts = time.strftime("%Y-%m-%d %H:%M:%S")
         for vid_id, v in meta.items():
             rp = v.get("rel_path", "")
             f_curr = v.get("folder", "")
@@ -1566,6 +1599,7 @@ class VideoService:
                 fname = os.path.basename(rp) if rp else f"{v.get('title', 'video')}.mp4"
                 v["rel_path"] = f"{clean_new}/{fname}"
                 v["folder"] = clean_new
+                v["updated_at"] = now_ts
         self._save_metadata(meta)
         return True
 
@@ -1611,6 +1645,7 @@ class VideoService:
                     old_rel = os.path.relpath(src_file, self.base_dir).replace("\\", "/")
                     relocated[old_rel] = os.path.relpath(dst_file, self.base_dir).replace("\\", "/")
 
+            now_ts = time.strftime("%Y-%m-%d %H:%M:%S")
             for value in updated_meta.values():
                 rel_path = value.get("rel_path", "").replace("\\", "/")
                 if rel_path.startswith(folder_name + "/") or value.get("folder") == folder_name:
@@ -1622,6 +1657,7 @@ class VideoService:
                         destination = available_destination(filename)
                         value["rel_path"] = os.path.relpath(destination, self.base_dir).replace("\\", "/")
                     value["folder"] = "Geral"
+                    value["updated_at"] = now_ts
 
             if os.path.exists(folder_path):
                 os.rmdir(folder_path)  # Fails safely if any file was left behind.
@@ -1686,6 +1722,9 @@ class VideoService:
         entry["id"] = video_id
         entry["rel_path"] = new_rel
         entry["folder"] = clean_folder
+        entry["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        if "created_at" not in entry or not entry["created_at"]:
+            entry["created_at"] = entry["updated_at"]
         meta[video_id] = entry
         self._save_metadata(meta)
         return self.get_video_by_id(video_id)
@@ -1704,6 +1743,9 @@ class VideoService:
         entry["title"] = clean_title
         entry["rel_path"] = video["rel_path"]
         entry["folder"] = video["folder"]
+        entry["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        if "created_at" not in entry or not entry["created_at"]:
+            entry["created_at"] = entry["updated_at"]
         meta[video_id] = entry
         self._save_metadata(meta)
         return True
@@ -1720,6 +1762,9 @@ class VideoService:
         entry["is_favorite"] = new_fav
         entry["rel_path"] = video["rel_path"]
         entry["folder"] = video["folder"]
+        entry["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        if "created_at" not in entry or not entry["created_at"]:
+            entry["created_at"] = entry["updated_at"]
         meta[video_id] = entry
         self._save_metadata(meta)
         return new_fav
@@ -1813,6 +1858,7 @@ class VideoService:
                     if vid_id in meta:
                         meta[vid_id]["storage_location"] = "huggingface"
                         meta[vid_id]["cloud_url"] = cloud_url
+                        meta[vid_id]["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                         self._save_metadata(meta)
                 else:
                     logger.warning(f"[VideoService] Upload para HF retornou vazio para {repo_path}")
@@ -1974,6 +2020,7 @@ class VideoService:
                 "format": ext[1:].upper(),
                 "is_favorite": False,
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "rel_path": rel_path,
                 "storage_location": "local",
                 "source_origin": "pc",

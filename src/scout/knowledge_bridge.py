@@ -2,7 +2,7 @@
 Knowledge Bridge between Gemini Scout Engines and Qwen / ReAct Architecture.
 Synchronizes data between:
 - data/recipes.json (Layout Recipes)
-- data/host_rules.json (External Image Host Resolvers)
+- data/host_rules.json (External Media Host Resolvers)
 - data/image_knowledge_base.json (Full Provenance Ledger)
 - data/knowledge/<encoded_domain>.b64 (SiteKnowledge for Qwen)
 - data/meta_knowledge_graph.json (Archetype Graph for ReAct)
@@ -37,7 +37,7 @@ KNOWLEDGE_BASE_FILE = os.path.join(DATA_DIR, "image_knowledge_base.json")
 
 
 def extract_base_domain(url: str) -> str:
-    """Extracts root domain (e.g. pixhost.to, example.com, domain.co.uk) from URL."""
+    """Extracts root domain (e.g. cdn.example.com, example.com, domain.co.uk) from URL."""
     try:
         netloc = urlparse(url).netloc.lower()
         if ":" in netloc:

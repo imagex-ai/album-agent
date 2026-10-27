@@ -1281,7 +1281,11 @@ export const GalleryView: React.FC = () => {
                 <span className={`absolute top-2.5 px-2 py-0.5 rounded-lg bg-slate-950/90 border border-white/15 font-mono text-[9px] sm:text-[10px] font-bold text-emerald-400 shadow-sm transition-all ${
                   isSelected || isSelectionMode || selectedAlbumIds.length > 0 ? 'left-11' : 'left-2.5 group-hover:left-11'
                 }`}>
-                  {mediaSummary.mediaType === 'video' ? (isEn ? 'Video' : 'Vídeo') : `${album.resolvedOriginalCount} / ${album.imageCount} ${isEn ? 'Originals' : 'Originais'}`}
+                  {mediaSummary.mediaType === 'video'
+                    ? (isEn ? 'Video' : 'Vídeo')
+                    : mediaSummary.photoCount === 0 && mediaSummary.gifCount > 0
+                    ? `${mediaSummary.gifCount} GIFs`
+                    : `${album.imageCount || album.images?.length || 0} ${isEn ? ((album.imageCount || album.images?.length || 0) === 1 ? 'photo' : 'photos') : ((album.imageCount || album.images?.length || 0) === 1 ? 'foto' : 'fotos')}`}
                 </span>
 
                 {/* Badge de Origem Local, Vídeo ou Duplicado no canto superior direito */}
@@ -1303,7 +1307,7 @@ export const GalleryView: React.FC = () => {
                       <VideoIcon size={10} />
                     </span>
                   )}
-                  {mediaSummary.hasGifs && (
+                  {mediaSummary.hasGifs && mediaSummary.photoCount > 0 && (
                     <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-600/95 text-white font-bold text-[9px] shadow-sm border border-amber-400/30" title={isEn ? `Album contains ${mediaSummary.gifCount} GIF animations` : `Álbum contém ${mediaSummary.gifCount} animações GIF`}>
                       <Clapperboard size={10} />
                       <span>{mediaSummary.gifCount} GIFs</span>

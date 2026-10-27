@@ -54,7 +54,9 @@ export const BatchQueueView: React.FC = () => {
   const [multiUrlsText, setMultiUrlsText] = useState('');
   const [priority, setPriority] = useState<'high' | 'medium' | 'low'>('medium');
   const [selectedFolder, setSelectedFolder] = useState<string>(settings.defaultAlbumFolder || 'Geral');
-  const [batchEngine, setBatchEngine] = useState<AiEngineType>(activeAiEngine || 'gemini_layout_explorer');
+  const [batchEngine, setBatchEngine] = useState<AiEngineType>(() => {
+    return activeAiEngine === 'ai_react' ? 'ai_react' : 'gemini_surgical_scout';
+  });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 

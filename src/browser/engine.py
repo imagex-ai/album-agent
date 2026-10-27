@@ -317,7 +317,7 @@ class BrowserEngine:
                 await asyncio.sleep(0.2)
                 await self.dismiss_age_gates_and_popups(page)
 
-                # Intermediate Landing & Host "Continue" Button Auto-Clicker (e.g. imx.to, imagevenue, pixhost)
+                # Intermediate Gateway & Landing Page "Continue" Button Auto-Clicker
                 try:
                     clicked = await page.evaluate("""() => {
                         const candidates = Array.from(document.querySelectorAll('input[type="submit"], button, a.btn, a.btn-continue, #btn_download, a'));

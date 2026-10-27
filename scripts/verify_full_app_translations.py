@@ -32,7 +32,7 @@ def load_translations():
     process.stdout.write(JSON.stringify(global.rawTranslations));
     """
     try:
-        res = subprocess.run(["node", "-e", node_script], capture_output=True, text=True)
+        res = subprocess.run(["node", "-e", node_script], capture_output=True, text=True, encoding="utf-8", errors="replace")
         if res.returncode == 0 and res.stdout:
             data = json.loads(res.stdout)
             return data.get('pt-BR', {}), data.get('en-US', {})

@@ -59,7 +59,7 @@ export const CoPilotModal: React.FC = () => {
           <div className="p-3.5 rounded-xl bg-brand-950/40 border border-brand-500/30 text-brand-200 flex items-start gap-2.5">
             <Sparkles size={16} className="text-brand-400 flex-shrink-0 mt-0.5" />
             <p className="leading-relaxed">
-              <strong>{settings.language === "en-US" ? "Agent Question:" : "Pergunta do Agente:"}</strong> {settings.language === "en-US" ? '"I identified 4 cards in this forum section. Which one represents the original album rather than avatars or ads?"' : '"Identifiquei 4 cards nesta seção do fórum. Qual deles representa o álbum original em vez de avatares ou anúncios?"'}
+              <strong>{settings.language === "en-US" ? "Agent Question:" : "Pergunta do Agente:"}</strong> {settings.language === "en-US" ? '"I identified 4 cards on this gallery page. Which one represents the primary album rather than banners or previews?"' : '"Identifiquei 4 cards nesta página da galeria. Qual deles representa o álbum principal em vez de banners ou prévias?"'}
             </p>
           </div>
 

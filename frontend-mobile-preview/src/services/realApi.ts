@@ -67,6 +67,47 @@ export class BackendApiClient {
   }
 
   /**
+   * Explicit, read-only review of full album metadata. Regular startup keeps its
+   * lightweight previews; this request is only made by the cleanup screen.
+   */
+  async fetchCleanupAlbums(
+    onProgress?: (progress: { loaded: number; total: number }) => void,
+    signal?: AbortSignal
+  ): Promise<Album[]> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const albums: Album[] = [];
+      let after: string | undefined;
+      let restart = false;
+      while (true) {
+        if (signal?.aborted) throw new DOMException('Review cancelled', 'AbortError');
+        const params = new URLSearchParams({ limit: '12' });
+        if (after) params.set('after', after);
+        const res = await fetch(`/api/albums?${params}`, { cache: 'no-store', signal });
+        if (res.status === 409 && attempt === 0) { restart = true; break; }
+        if (!res.ok) throw new Error(`Album review failed: ${res.status}`);
+        const page = await res.json();
+        if (!Array.isArray(page)) throw new Error('Invalid album review response');
+        for (const raw of page) {
+          if (signal?.aborted) throw new DOMException('Review cancelled', 'AbortError');
+          albums.push(this.mapBackendAlbumToFrontend(raw));
+        }
+        const total = Number(res.headers?.get('X-Total-Count')) || albums.length;
+        onProgress?.({ loaded: albums.length, total });
+        if (res.headers?.get('X-Library-Paging') !== 'cursor' || page.length < 12) break;
+        const cursor = page[page.length - 1]?.session_id || page[page.length - 1]?.album_id;
+        if (!cursor || cursor === after) throw new Error('Invalid review page cursor');
+        after = cursor;
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+      }
+      if (!restart) {
+        if (signal?.aborted) throw new DOMException('Review cancelled', 'AbortError');
+        return albums;
+      }
+    }
+    throw new Error('Library changed during review');
+  }
+
+  /**
    * Fetches full probed details for a specific album from the backend.
    */
   async fetchAlbumDetails(sessionId: string): Promise<Album | null> {
@@ -406,9 +447,12 @@ export class BackendApiClient {
   /**
    * Deletes an album from the Python backend and disk.
    */
-  async deleteAlbum(sessionId: string): Promise<boolean> {
+  async deleteAlbum(sessionId: string, duplicateScanId?: string): Promise<boolean> {
     try {
-      const res = await fetch(`/api/albums/${sessionId}`, { method: 'DELETE' });
+      const url = duplicateScanId
+        ? `/api/duplicates/album-scans/${encodeURIComponent(duplicateScanId)}/albums/${encodeURIComponent(sessionId)}`
+        : `/api/albums/${encodeURIComponent(sessionId)}`;
+      const res = await fetch(url, { method: 'DELETE' });
       return res.ok;
     } catch {
       return false;
@@ -418,16 +462,26 @@ export class BackendApiClient {
   /**
    * Deletes specific images from an album in backend memory and on disk.
    */
-  async deleteAlbumImages(sessionId: string, imageIds: string[]): Promise<boolean> {
+  async deleteAlbumImages(
+    sessionId: string,
+    imageIds: string[],
+    imageRefs?: NonNullable<ImageItem['backendImageRef']>[]
+  ): Promise<{ album: Album; deletedCount: number } | null> {
     try {
       const res = await fetch(`/api/albums/${sessionId}/delete-images`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_ids: imageIds })
+        body: JSON.stringify({ image_ids: imageIds, ...(imageRefs ? { image_refs: imageRefs } : {}) })
       });
-      return res.ok;
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data.album || !Number.isInteger(data.deleted_count) || data.deleted_count <= 0) return null;
+      return {
+        album: this.mapBackendAlbumToFrontend({ ...data.album, session_id: sessionId }),
+        deletedCount: data.deleted_count
+      };
     } catch {
-      return false;
+      return null;
     }
   }
 
@@ -697,6 +751,7 @@ export class BackendApiClient {
               format: v.format || 'MP4',
               isFavorite: v.is_favorite || false,
               createdAt: v.created_at || '',
+              updatedAt: v.updated_at || v.created_at || '',
               relPath: v.rel_path,
               storageLocation: (v.storage_location === 'render_local' ? 'local' : (v.storage_location || 'local')),
               sourceOrigin: resolvedOrigin,
@@ -769,6 +824,7 @@ export class BackendApiClient {
               format: v.format || 'MP4',
               isFavorite: v.is_favorite || false,
               createdAt: v.created_at || '',
+              updatedAt: v.updated_at || v.created_at || '',
               relPath: v.rel_path,
               storageLocation: v.storage_location || 'render_local',
               sourceOrigin: v.source_origin || 'pc',
@@ -816,6 +872,7 @@ export class BackendApiClient {
           format: v.format || 'MP4',
           isFavorite: v.is_favorite || false,
           createdAt: v.created_at || '',
+          updatedAt: v.updated_at || v.created_at || '',
           relPath: v.rel_path,
           storageLocation: v.storage_location || 'render_local',
           sourceOrigin: v.source_origin || 'pc',
@@ -1322,6 +1379,13 @@ export class BackendApiClient {
         posterUrl,
         durationSeconds: durationSecs,
         candidateId: img.candidate_id || undefined,
+        backendImageRef: {
+          id: img.id || null,
+          candidate_id: img.candidate_id || null,
+          original_url: img.original_url || null,
+          thumbnail_url: img.thumbnail_url || null,
+          index: idx
+        },
         sourcePage: (img as any).source_page || raw.source_page || (raw as any).url || undefined,
         videoStreamUrl: (img as any).video_stream_url || (mediaType === 'video' ? orig : undefined),
       };
@@ -1358,6 +1422,15 @@ export class BackendApiClient {
 
     const effectiveCoverUrl = (!isPlaceholder(raw.cover_image_url) ? raw.cover_image_url : fallbackCoverUrl) || '';
 
+    const totalCount = raw.total_images ?? raw.image_count ?? raw.totalImages ?? images.length;
+    const isTruncated = totalCount > images.length;
+    const resolvedHasGifs = isTruncated
+      ? Boolean(mediaSummary.hasGifs || raw.has_gifs || raw.hasGifs)
+      : mediaSummary.hasGifs;
+    const resolvedGifCount = isTruncated
+      ? Math.max(mediaSummary.gifCount || 0, raw.gif_count || raw.gifCount || 0)
+      : mediaSummary.gifCount;
+
     return {
       id: raw.session_id || raw.album_id || `album-${Date.now()}`,
       title: raw.title || raw.original_title || 'Extracted Album',
@@ -1371,21 +1444,21 @@ export class BackendApiClient {
         ? raw.cover_color_palette
         : (images[0]?.colorPalette?.length ? images[0].colorPalette : undefined),
       imageCount: raw.total_images || images.length || 0,
-      resolvedOriginalCount: images.length,
+      resolvedOriginalCount: isTruncated ? (raw.total_images || images.length) : images.length,
       totalSizeBytes: images.reduce((acc, i) => acc + i.fileSizeBytes, 0),
       aiModel: raw.metadata?.model_used || 'Qwen 2.5:32b',
       tags: Array.from(new Set([
         'Original',
         sourceDomain.split('.')[0] || 'Web',
         'Extraction',
-        ...normalizeAlbumMediaTags(raw.tags || [], mediaSummary.hasGifs)
+        ...normalizeAlbumMediaTags(raw.tags || [], resolvedHasGifs)
       ])),
       images: images,
       extractionMode: 'ai_react',
       durationSeconds: raw.metadata?.duration || 12.4,
-      mediaType: mediaSummary.mediaType,
-      hasGifs: mediaSummary.hasGifs,
-      gifCount: mediaSummary.gifCount,
+      mediaType: (mediaSummary.mediaType !== 'photo' ? mediaSummary.mediaType : (raw.media_type || raw.mediaType || mediaSummary.mediaType)),
+      hasGifs: resolvedHasGifs,
+      gifCount: resolvedGifCount,
       sourceOrigin: isLocalOrigin ? 'local' : 'remote',
       folder: raw.folder || raw.metadata?.folder || 'Geral',
       isFavorite: raw.is_favorite ?? raw.isFavorite ?? raw.metadata?.is_favorite ?? false,

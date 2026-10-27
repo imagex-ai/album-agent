@@ -424,7 +424,7 @@ class AutonomousReActAgent:
                     )
 
         # -------------------------------------------------------------
-        # Step 7b: Detail Page Landing Resolution (For Forum threads & Image Hosts)
+        # Step 7b: Detail Page Landing Resolution (For Multi-Media Collections & External CDNs)
         # -------------------------------------------------------------
         if (not resolved_images or all(img.validation_status != "PASS" for img in resolved_images)) and gallery_cands:
             candidates_with_links = [c for c in gallery_cands if c.parent_href and (c.parent_href.startswith("http") or c.parent_href.startswith("/"))]

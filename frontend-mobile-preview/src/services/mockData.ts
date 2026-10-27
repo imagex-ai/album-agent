@@ -197,9 +197,9 @@ export const INITIAL_ALBUMS: Album[] = [
   {
     id: 'album-cyberpunk-8k',
     title: 'Cyberpunk Metropolis 2099 & Neo-Tokyo Concept Art',
-    description: 'AI-generated concept art collection harvested from digital artist forums with reverse-engineered generation parameters.',
-    sourceUrl: 'https://artstation-forum.mock/threads/cyberpunk-megacity-showcase',
-    sourceDomain: 'artstation-forum.mock',
+    description: 'AI-generated concept art collection curated from digital art showcases with reverse-engineered generation parameters.',
+    sourceUrl: 'https://artstation-showcase.mock/galleries/cyberpunk-megacity-showcase',
+    sourceDomain: 'artstation-showcase.mock',
     createdAt: '2026-08-14T12:10:00.000Z',
     updatedAt: '2026-08-14T12:11:45.000Z',
     imageCount: 6,
@@ -287,7 +287,7 @@ export const INITIAL_ALBUMS: Album[] = [
   {
     id: 'album-nature-macro',
     title: 'Nordic Wildlife & Alpine Macro Photography Original',
-    description: 'Pristine landscape and wildlife macro shots discovered through autonomous forum thread traversal.',
+    description: 'Pristine landscape and wildlife macro shots discovered through autonomous web gallery exploration.',
     sourceUrl: 'https://nature-photographers.mock/thread-8491-nordic',
     sourceDomain: 'nature-photographers.mock',
     createdAt: '2026-08-13T09:20:00.000Z',
@@ -413,7 +413,7 @@ export const INITIAL_JOBS: ExtractionJob[] = [
   },
   {
     id: 'job-102',
-    url: 'https://artstation-forum.mock/threads/cyberpunk-megacity-showcase',
+    url: 'https://artstation-showcase.mock/galleries/cyberpunk-megacity-showcase',
     title: 'Cyberpunk Metropolis 2099 & Neo-Tokyo Concept Art',
     status: 'completed',
     progressPercent: 100,
@@ -451,7 +451,7 @@ export const INITIAL_PATTERNS: DomainPattern[] = [
   },
   {
     id: 'pat-2',
-    domain: 'artstation-forum.mock',
+    domain: 'artstation-showcase.mock',
     name: 'ArtStation Medium Preview to Resolução Original',
     regexTarget: '/medium/(.*)\\.jpg',
     replacementPattern: '/original/$1.png',

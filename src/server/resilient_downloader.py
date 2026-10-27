@@ -16,7 +16,11 @@ import shutil
 import asyncio
 import logging
 from typing import Optional, Callable, Dict, Any
-from src.core.network_profiles import extract_canonical_target_page, resolve_anti_hotlink_headers
+from src.core.network_profiles import (
+    extract_canonical_target_page,
+    resolve_anti_hotlink_headers,
+    load_cookie_string_into_cookiejar,
+)
 
 logger = logging.getLogger("resilient_downloader")
 
@@ -202,6 +206,7 @@ async def download_video_resilient(
     }
     anti_hdrs = resolve_anti_hotlink_headers(canonical_url, referer=referer)
     headers.update(anti_hdrs)
+    cookie_str = headers.pop("Cookie", None) or headers.pop("cookie", None)
 
     ydl_opts["http_headers"] = headers
 
@@ -209,6 +214,8 @@ async def download_video_resilient(
 
     def _execute():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            if cookie_str:
+                load_cookie_string_into_cookiejar(ydl.cookiejar, cookie_str, canonical_url)
             try:
                 info = ydl.extract_info(canonical_url, download=True)
                 if info and isinstance(info, dict):

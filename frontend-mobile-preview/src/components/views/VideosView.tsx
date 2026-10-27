@@ -191,7 +191,7 @@ export const VideosView: React.FC = () => {
   const foldersScrollRef = useRef<HTMLDivElement | null>(null);
   const [wrapFolders, setWrapFolders] = useState<boolean>(false);
 
-  const [sortBy, setSortBy] = useState<'date' | 'name' | 'size'>('date');
+  const [sortBy, setSortBy] = useState<'date' | 'modified' | 'name' | 'size'>('date');
   const [activeMenuVideoId, setActiveMenuVideoId] = useState<string | null>(null);
   const [activeFolderMenuName, setActiveFolderMenuName] = useState<string | null>(null);
   const [isUrlModalOpen, setIsUrlModalOpen] = useState<boolean>(false);
@@ -322,11 +322,28 @@ export const VideosView: React.FC = () => {
     return true;
   });
 
+  const parseTime = (dateStr?: string) => {
+    if (!dateStr) return 0;
+    const parsed = new Date(dateStr).getTime();
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+    const clean = dateStr.replace(' UTC', 'Z').replace(' ', 'T');
+    const fallback = new Date(clean).getTime();
+    return !isNaN(fallback) ? fallback : 0;
+  };
+
   // Sort videos
   filtered.sort((a, b) => {
     if (sortBy === 'name') return a.title.localeCompare(b.title);
     if (sortBy === 'size') return b.fileSizeBytes - a.fileSizeBytes;
-    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    if (sortBy === 'modified') {
+      const timeA = parseTime(a.updatedAt) || parseTime(a.createdAt);
+      const timeB = parseTime(b.updatedAt) || parseTime(b.createdAt);
+      return (timeB - timeA) || a.title.localeCompare(b.title) || (a.id || '').localeCompare(b.id || '');
+    }
+    // Default: 'date' (most recent created)
+    const timeA = parseTime(a.createdAt) || parseTime(a.updatedAt);
+    const timeB = parseTime(b.createdAt) || parseTime(b.updatedAt);
+    return (timeB - timeA) || a.title.localeCompare(b.title) || (a.id || '').localeCompare(b.id || '');
   });
 
   const totalBytes = videos.reduce((acc, v) => acc + v.fileSizeBytes, 0);
@@ -1025,6 +1042,14 @@ export const VideosView: React.FC = () => {
               {t.sortRecent}
             </button>
             <button
+              onClick={() => setSortBy('modified')}
+              className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                sortBy === 'modified' ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {t.sortModified}
+            </button>
+            <button
               onClick={() => setSortBy('name')}
               className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
                 sortBy === 'name' ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-slate-200'
@@ -1404,9 +1429,9 @@ export const VideosView: React.FC = () => {
                         );
                       })()}
                       {video.streamStatus === 'deleted_on_source' && (
-                        <span className="px-1.5 py-0.5 rounded bg-rose-950/90 border border-rose-500/80 text-rose-300 font-bold flex items-center gap-1 shadow-sm" title={isEn ? "Video deleted on source website (DMCA / Copyright removal)" : "Vídeo excluído no site de origem (Removido por DMCA / Direitos)"}>
+                        <span className="px-1.5 py-0.5 rounded bg-rose-950/90 border border-rose-500/80 text-rose-300 font-bold flex items-center gap-1 shadow-sm" title={isEn ? "Video unavailable on source website (Expired or removed by author)" : "Vídeo indisponível no site de origem (Expirado ou removido pelo autor)"}>
                           <AlertTriangle size={10} className="text-rose-400" />
-                          <span>{isEn ? "Deleted Source" : "Fonte Excluída"}</span>
+                          <span>{isEn ? "Unavailable" : "Indisponível"}</span>
                         </span>
                       )}
                       {video.streamStatus === 'expired' && (
@@ -1946,8 +1971,8 @@ export const VideosView: React.FC = () => {
                 <div className="mt-3 p-3.5 rounded-2xl bg-rose-950/40 border border-rose-500/30 text-[11px] text-slate-300 text-left space-y-2">
                   <p>
                     {isEn
-                      ? "The original hosting platform took down or deleted this video file (typically due to DMCA copyright requests or removal by the original uploader)."
-                      : "A plataforma original onde o vídeo estava hospedado removeu este arquivo (normalmente por reivindicação de direitos autorais/DMCA ou exclusão pelo autor original)."}
+                      ? "The source website took down or deleted this video file, or the streaming session has expired."
+                      : "O site de origem removeu este arquivo ou a sessão de streaming expirou."}
                   </p>
                   <p className="text-slate-400">
                     {isEn

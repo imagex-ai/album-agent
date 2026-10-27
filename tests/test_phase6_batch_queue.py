@@ -114,3 +114,43 @@ async def test_batch_analyze_endpoint_payload_validation():
             _job_controllers.pop(s_id, None)
         from src.server.server import _save_jobs_to_disk
         _save_jobs_to_disk()
+
+
+@pytest.mark.asyncio
+async def test_engine_selection_and_legacy_compatibility():
+    """
+    Validates that:
+    1. The 2 modern engines ('gemini_surgical_scout', 'ai_react') are accepted and queued.
+    2. Legacy aliases ('classic', 'gemini_layout_explorer') remain fully supported backwards-compatible.
+    3. Case and whitespace variations (' GEMINI_SURGICAL_SCOUT ', ' AI_REACT ') are properly handled.
+    """
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        test_engines = [
+            ("gemini_surgical_scout", "gemini_surgical_scout"),
+            ("ai_react", "ai_react"),
+            ("classic", "classic"),
+            ("gemini_layout_explorer", "gemini_layout_explorer"),
+            ("  GEMINI_SURGICAL_SCOUT  ", "gemini_surgical_scout"),
+            ("  AI_REACT  ", "ai_react"),
+        ]
+
+        for engine_input, expected_engine in test_engines:
+            res = await client.post(
+                "/api/batch-analyze",
+                json={
+                    "urls": ["https://example.com/test-engine"],
+                    "engine_type": engine_input,
+                    "folder": "TestEngines",
+                },
+            )
+            assert res.status_code == 200, f"Failed for engine: {engine_input}"
+            data = res.json()
+            assert data["status"] == "started"
+            assert len(data["jobs"]) == 1
+            s_id = data["jobs"][0]["session_id"]
+            assert s_id in _active_jobs
+            assert _active_jobs[s_id]["engine_type"] == expected_engine
+            _active_jobs.pop(s_id, None)
+            _job_controllers.pop(s_id, None)
+

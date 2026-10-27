@@ -952,7 +952,7 @@ export const AlbumDetailView: React.FC = () => {
   const album = albums.find(a => a.id === activeAlbumId) || albums[0];
 
   useEffect(() => {
-    if (album && album.id && (!album.images || album.images.length === 0)) {
+    if (album && album.id && (!album.images || album.images.length === 0 || album.images.length < (album.imageCount || 0))) {
       backendApi.fetchAlbumDetails(album.id).then(fresh => {
         if (fresh && fresh.images && fresh.images.length > 0) {
           useAppStore.setState(state => ({
@@ -961,7 +961,7 @@ export const AlbumDetailView: React.FC = () => {
         }
       }).catch(() => {});
     }
-  }, [album?.id]);
+  }, [album?.id, album?.images?.length, album?.imageCount]);
 
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [editedTitle, setEditedTitle] = useState(album?.title || '');

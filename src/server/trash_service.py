@@ -147,14 +147,19 @@ class TrashService:
         dst_path = os.path.join(self.trash_videos_dir, trash_filename)
 
         # Se existir arquivo físico local, move. Se for remoto (HF/cloud) ou stream_url, apenas registra na lixeira
-        if src_path and os.path.exists(src_path):
+        if src_path and os.path.isfile(src_path):
+            if os.path.exists(dst_path):
+                return None
             try:
                 shutil.move(src_path, dst_path)
             except Exception as e:
                 print(f"Error moving video file to trash: {e}")
-                dst_path = ""
+                return None
         else:
             dst_path = ""
+            trash_filename = None
+            if video_dict.get("storage_location") in ("local", "render_local") and not (video_dict.get("cloud_url") or video_dict.get("custom_stream_url")):
+                return None
 
         # Safe computation of file_size_bytes: avoid calling os.path.getsize when dst_path is empty or missing
         size_bytes = video_dict.get("file_size_bytes") or 0
@@ -210,13 +215,26 @@ class TrashService:
 
     def move_video_to_trash(self, video_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Moves a physical video file into data/trash/videos/ and registers it in trash metadata."""
+        meta = self._load_meta()
+        if f"trash_vid_{video_dict.get('id')}" in meta:
+            return None
         item = self._prepare_video_trash_item(video_dict)
         if not item:
             return None
 
-        meta = self._load_meta()
         meta[item["id"]] = item
-        self._save_meta(meta)
+        if self._save_meta(meta) is False:
+            trash_filename = item["metadata"].get("trash_filename")
+            if trash_filename:
+                source = os.path.join(self.trash_videos_dir, trash_filename)
+                original = video_dict.get("full_path") or os.path.join(self.videos_dir, video_dict.get("rel_path", "").replace("/", os.sep))
+                try:
+                    if os.path.exists(original):
+                        raise FileExistsError(original)
+                    shutil.move(source, original)
+                except Exception as e:
+                    print(f"Error rolling back video move; recoverable copy remains at {source}: {e}")
+            return None
         return item
 
     def move_videos_to_trash_batch(self, video_dicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -288,6 +306,8 @@ class TrashService:
         for idx, photo in enumerate(photos):
             photo_id = photo.get("candidate_id") or photo.get("id") or f"{session_id}_{int(time.time())}_{idx}"
             trash_id = f"trash_photo_{session_id}_{photo_id}"
+            if trash_id in meta:
+                trash_id = f"{trash_id}_{time.time_ns()}_{idx}"
 
             w = photo.get("width", 0)
             h = photo.get("height", 0)
@@ -315,7 +335,8 @@ class TrashService:
             meta[trash_id] = item
             created_items.append(item)
 
-        self._save_meta(meta)
+        if self._save_meta(meta) is False:
+            return []
         return created_items
 
     # -------------------------------------------------------------
@@ -368,6 +389,7 @@ class TrashService:
                 "folder": folder,
                 "is_favorite": item_meta.get("is_favorite", False),
                 "created_at": item_meta.get("created_at", datetime.now(timezone.utc).isoformat()),
+                "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "width": item_meta.get("width", 0),
                 "height": item_meta.get("height", 0),
                 "fps": item_meta.get("fps", 0),
@@ -439,6 +461,10 @@ class TrashService:
                             for new_p, img in enumerate(images):
                                 img["position"] = new_p + 1
                             alb["images"] = images
+                            now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                            alb["updated_at"] = now_ts
+                            if "metadata" in alb and isinstance(alb["metadata"], dict):
+                                alb["metadata"]["updated_at"] = now_ts
                             tmp_path = f"{album_path}.{os.getpid()}.{threading.get_ident()}.tmp"
                             try:
                                 with open(tmp_path, "w", encoding="utf-8") as f:

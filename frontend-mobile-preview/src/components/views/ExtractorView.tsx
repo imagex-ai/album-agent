@@ -74,9 +74,11 @@ export const ExtractorView: React.FC = () => {
   });
   const [mode, setMode] = useState<ExtractionMode>(() => {
     if (typeof window !== 'undefined') {
-      return (localStorage.getItem('imagex_extractor_mode') as ExtractionMode) || 'classic';
+      const saved = localStorage.getItem('imagex_extractor_mode');
+      if (saved === 'ai_react') return 'ai_react';
+      return 'gemini_surgical_scout';
     }
-    return 'classic';
+    return 'gemini_surgical_scout';
   });
   const [isExtracting, setIsExtracting] = useState(false);
   const [downloadVideosLocally, setDownloadVideosLocally] = useState(false);
@@ -160,8 +162,8 @@ export const ExtractorView: React.FC = () => {
     if (backendOnline && isRealUrl && !isMock) {
       addLog({
         level: 'info',
-        category: (activeAiEngine || 'gemini_layout_explorer').toUpperCase(),
-        message: isEn ? `Starting extraction [${(activeAiEngine || "gemini_layout_explorer").toUpperCase()}] with ${settings.aiModel} on ${targetUrl} (Folder: ${folder})...` : `Iniciando extração [${(activeAiEngine || "gemini_layout_explorer").toUpperCase()}] com ${settings.aiModel} em ${targetUrl} (Pasta: ${folder})...`
+        category: (activeAiEngine || 'gemini_surgical_scout').toUpperCase(),
+        message: isEn ? `Starting extraction [${(activeAiEngine || "gemini_surgical_scout").toUpperCase()}] with ${settings.aiModel} on ${targetUrl} (Folder: ${folder})...` : `Iniciando extração [${(activeAiEngine || "gemini_surgical_scout").toUpperCase()}] com ${settings.aiModel} em ${targetUrl} (Pasta: ${folder})...`
       });
 
       const effectiveMediaType = getEffectiveMediaType([targetUrl]);

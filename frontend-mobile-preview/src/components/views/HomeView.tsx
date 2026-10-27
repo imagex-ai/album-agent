@@ -38,7 +38,7 @@ const isGifAlbum = (album: Album): boolean => {
     album.hasGifs ||
     album.mediaType === 'gif' ||
     album.tags?.some(tag => tag.toLowerCase().includes('gif') || tag.toLowerCase().includes('animad')) ||
-    album.images?.some(img => img.mediaType === 'gif' || img.isAnimated || img.format === 'gif' || /\.(gif|webp)(\?|$)/i.test(img.originalUrl || img.previewUrl || '')) ||
+    album.images?.some(img => img.mediaType === 'gif' || img.isAnimated || img.format === 'gif' || /\.(gif)(\?|$)/i.test(img.originalUrl || img.previewUrl || '')) ||
     album.title?.toLowerCase().includes('gif')
   );
 };
@@ -79,20 +79,29 @@ export const HomeView: React.FC = () => {
   }, [albums]);
 
   // Combine and sort recent items (albums, videos, and gifs)
-  const recentItems = useMemo<UnifiedRecentItem[]>(() => {
+  const allRecentItems = useMemo<UnifiedRecentItem[]>(() => {
     const list: UnifiedRecentItem[] = [];
+
+    const parseTime = (dateStr?: string) => {
+      if (!dateStr) return 0;
+      const parsed = new Date(dateStr).getTime();
+      if (!isNaN(parsed) && parsed > 0) return parsed;
+      const clean = dateStr.replace(' UTC', 'Z').replace(' ', 'T');
+      const fallback = new Date(clean).getTime();
+      return !isNaN(fallback) ? fallback : 0;
+    };
 
     // Albums & GIFs
     albums.forEach(album => {
       const dateStr = album.updatedAt || album.createdAt;
-      const parsedTime = dateStr ? new Date(dateStr).getTime() : 0;
+      const parsedTime = parseTime(dateStr);
       const cover = album.coverImage || album.rawCoverImage || album.images?.[0]?.thumbnailUrl || '';
       const isGif = isGifAlbum(album);
       list.push({
         id: album.id,
         type: isGif ? 'gif' : 'album',
         title: album.title || (isEn ? 'Untitled Album' : (t.untitledAlbum || 'Álbum Sem Título')),
-        timestamp: isNaN(parsedTime) ? 0 : parsedTime,
+        timestamp: parsedTime,
         folder: album.folder || (isEn ? 'General' : 'Geral'),
         thumbnailUrl: cover,
         subLabel: isGif
@@ -104,13 +113,13 @@ export const HomeView: React.FC = () => {
 
     // Videos
     videos.forEach(video => {
-      const dateStr = video.createdAt;
-      const parsedTime = dateStr ? new Date(dateStr).getTime() : 0;
+      const dateStr = video.updatedAt || video.createdAt;
+      const parsedTime = parseTime(dateStr);
       list.push({
         id: video.id,
         type: 'video',
         title: video.title || video.filename || (isEn ? 'Untitled Video' : (t.untitledVideo || 'Vídeo Sem Título')),
-        timestamp: isNaN(parsedTime) ? 0 : parsedTime,
+        timestamp: parsedTime,
         folder: video.folder || (isEn ? 'Extracted' : 'Extraídos'),
         thumbnailUrl: video.thumbnailUrl || '',
         subLabel: video.format ? video.format.toUpperCase() : 'MP4',
@@ -118,14 +127,22 @@ export const HomeView: React.FC = () => {
       });
     });
 
-    // Sort descending by timestamp, fallback to 0
-    return list.sort((a, b) => b.timestamp - a.timestamp).slice(0, 18);
-  }, [albums, videos, isEn, t.statGifs]);
+    // Sort descending by timestamp with stable tie-breaker
+    return list.sort((a, b) => (b.timestamp - a.timestamp) || a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
+  }, [albums, videos, isEn, t.statGifs, t.untitledAlbum, t.untitledVideo]);
 
-  const filteredRecentItems = useMemo(() => {
-    if (activeMediaFilter === 'all') return recentItems;
-    return recentItems.filter(item => item.type === activeMediaFilter);
-  }, [recentItems, activeMediaFilter]);
+  const recentAll = useMemo(() => allRecentItems.slice(0, 18), [allRecentItems]);
+  const recentAlbums = useMemo(() => allRecentItems.filter(i => i.type === 'album').slice(0, 18), [allRecentItems]);
+  const recentVideos = useMemo(() => allRecentItems.filter(i => i.type === 'video').slice(0, 18), [allRecentItems]);
+  const recentGifs = useMemo(() => allRecentItems.filter(i => i.type === 'gif').slice(0, 18), [allRecentItems]);
+
+  const displayedRecentItems = useMemo(() => {
+    if (activeMediaFilter === 'album') return recentAlbums;
+    if (activeMediaFilter === 'video') return recentVideos;
+    if (activeMediaFilter === 'gif') return recentGifs;
+    return recentAll;
+  }, [activeMediaFilter, recentAll, recentAlbums, recentVideos, recentGifs]);
+
 
   const modules: Array<{
     id: ViewId;
@@ -360,7 +377,7 @@ export const HomeView: React.FC = () => {
             }`}
           >
             <span>{t.filterAll || (isEn ? 'All' : 'Todos')}</span>
-            <span className="text-[10px] opacity-70">({recentItems.length})</span>
+            <span className="text-[10px] opacity-70">({recentAll.length})</span>
           </button>
 
           <button
@@ -374,7 +391,7 @@ export const HomeView: React.FC = () => {
           >
             <Images size={13} className={activeMediaFilter === 'album' ? 'text-white' : 'text-cyan-400'} />
             <span>{t.filterAlbums || (isEn ? 'Photo Albums' : 'Álbuns de Fotos')}</span>
-            <span className="text-[10px] opacity-70">({recentItems.filter(i => i.type === 'album').length})</span>
+            <span className="text-[10px] opacity-70">({recentAlbums.length})</span>
           </button>
 
           <button
@@ -388,7 +405,7 @@ export const HomeView: React.FC = () => {
           >
             <Film size={13} className={activeMediaFilter === 'video' ? 'text-white' : 'text-violet-400'} />
             <span>{t.filterVideos || (isEn ? 'Videos' : 'Vídeos')}</span>
-            <span className="text-[10px] opacity-70">({recentItems.filter(i => i.type === 'video').length})</span>
+            <span className="text-[10px] opacity-70">({recentVideos.length})</span>
           </button>
 
           <button
@@ -402,18 +419,19 @@ export const HomeView: React.FC = () => {
           >
             <Zap size={13} className={activeMediaFilter === 'gif' ? 'text-white' : 'text-fuchsia-400'} />
             <span>{t.filterGifs || (isEn ? 'Animated GIFs' : 'GIFs Animados')}</span>
-            <span className="text-[10px] opacity-70">({recentItems.filter(i => i.type === 'gif').length})</span>
+            <span className="text-[10px] opacity-70">({recentGifs.length})</span>
           </button>
         </div>
 
-        {filteredRecentItems.length > 0 ? (
+        {displayedRecentItems.length > 0 ? (
           <div
             onWheel={(e) => {
               e.currentTarget.scrollLeft += e.deltaY;
             }}
             className="flex gap-4 overflow-x-auto no-scrollbar touch-scroll pb-3 pt-1 -mx-1 px-1"
           >
-            {filteredRecentItems.map(item => {
+            {displayedRecentItems.map(item => {
+
               const isVideo = item.type === 'video';
               const isGif = item.type === 'gif';
               return (

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Zap, Compass, Bot, ShieldCheck, Sparkles, CheckCircle2 } from 'lucide-react';
+import { Zap, Bot, Sparkles, CheckCircle2 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { AiEngineType } from '../../types';
 import { translations } from '../../i18n/translations';
@@ -35,18 +35,19 @@ export const AiEngineSelector: React.FC<AiEngineSelectorProps> = ({
   showHelp = true,
 }) => {
   const { activeAiEngine, setActiveAiEngine, settings } = useAppStore();
-  const currentEngine = selectedEngine || activeAiEngine || 'gemini_layout_explorer';
+  const rawEngine = selectedEngine || activeAiEngine;
+  const currentEngine: AiEngineType = rawEngine === 'ai_react' ? 'ai_react' : 'gemini_surgical_scout';
   const tAi: any = translations[settings.language]?.aiEngine || translations['pt-BR']?.aiEngine || translations['en-US']?.aiEngine || {};
 
   const engineOptions: AiEngineOption[] = [
     {
       id: 'gemini_surgical_scout',
-      title: tAi.engine2?.title || '2. Gemini Surgical Scout (v2)',
-      shortTitle: tAi.engine2?.shortTitle || '2. Surgical Scout',
-      badge: tAi.engine2?.badge || 'RECOMENDADO (90%)',
-      description: tAi.engine2?.desc || 'Extração cirúrgica direta por HTTP com Raio-X Físico de bytes.',
-      bestFor: tAi.engine2?.bestFor || '90% das galerias da web e image hosts.',
-      brainType: tAi.engine2?.brainType || 'Gemini Flash + Raio-X Físico',
+      title: tAi.engine1?.title || '1. Modo Rápido / Cirúrgico (Surgical Scout)',
+      shortTitle: tAi.engine1?.shortTitle || '1. Modo Cirúrgico (Rápido)',
+      badge: tAi.engine1?.badge || 'RECOMENDADO (90%)',
+      description: tAi.engine1?.desc || 'Extração cirúrgica direta por HTTP com Raio-X Físico de bytes. Ultra-rápido (1 a 3s), consumo leve de memória e sem peso de navegador gráfico.',
+      bestFor: tAi.engine1?.bestFor || '90% das galerias da web, portfólios fotográficos e páginas com links diretos de mídia.',
+      brainType: tAi.engine1?.brainType || 'Gemini Flash + Raio-X Físico de Bytes',
       icon: Zap,
       colorClass: 'text-amber-400',
       borderClass: 'border-amber-500/40 hover:border-amber-400',
@@ -54,46 +55,18 @@ export const AiEngineSelector: React.FC<AiEngineSelectorProps> = ({
       badgeColor: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
     },
     {
-      id: 'gemini_layout_explorer',
-      title: tAi.engine1?.title || '1. Gemini Layout Explorer (v1)',
-      shortTitle: tAi.engine1?.shortTitle || '1. Layout Explorer',
-      badge: tAi.engine1?.badge || 'Mapear Novo Site',
-      description: tAi.engine1?.desc || 'Usa Gemini Cloud para ler HTML e deduzir layout.',
-      bestFor: tAi.engine1?.bestFor || 'Aprender a estrutura de sites desconhecidos.',
-      brainType: tAi.engine1?.brainType || 'Gemini Cloud Vision',
-      icon: Compass,
-      colorClass: 'text-cyan-400',
-      borderClass: 'border-cyan-500/40 hover:border-cyan-400',
-      bgClass: 'bg-cyan-500/10',
-      badgeColor: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30',
-    },
-    {
       id: 'ai_react',
-      title: tAi.engine3?.title || '3. 7-Pillar ReAct Agent (Navegador)',
-      shortTitle: tAi.engine3?.shortTitle || '3. ReAct Visual',
-      badge: tAi.engine3?.badge || 'Navegador Completo',
-      description: tAi.engine3?.desc || 'Abre um navegador invisível real (Playwright).',
-      bestFor: tAi.engine3?.bestFor || 'Sites protegidos por JavaScript ou scroll infinito.',
-      brainType: tAi.engine3?.brainType || 'Qwen 2.5 / Playwright',
+      title: tAi.engine2?.title || '2. Modo Navegador Real / IA ReAct (Playwright)',
+      shortTitle: tAi.engine2?.shortTitle || '2. Navegador Real (ReAct)',
+      badge: tAi.engine2?.badge || 'Navegador Completo',
+      description: tAi.engine2?.desc || 'Navegador Chromium headless real com percepção visual multimodal, Set-of-Marks e reflexão adaptativa para interagir com a página.',
+      bestFor: tAi.engine2?.bestFor || 'Sites complexos com JavaScript pesado, Cloudflare, abas interativas, botões ocultos ou scroll infinito.',
+      brainType: tAi.engine2?.brainType || 'IA Multimodal / Qwen 2.5 + Chromium Headless',
       icon: Bot,
       colorClass: 'text-brand-400',
       borderClass: 'border-brand-500/40 hover:border-brand-400',
       bgClass: 'bg-brand-500/10',
       badgeColor: 'bg-brand-500/20 text-brand-300 border-brand-500/30',
-    },
-    {
-      id: 'classic',
-      title: tAi.engine4?.title || '4. Classic Semantic Brain (Sem IA)',
-      shortTitle: tAi.engine4?.shortTitle || '4. Semantic Clássico',
-      badge: tAi.engine4?.badge || '100% Determinístico',
-      description: tAi.engine4?.desc || 'Motor puramente matemático baseado em regras regex.',
-      bestFor: tAi.engine4?.bestFor || 'Uso sem internet ou sem chaves de IA.',
-      brainType: tAi.engine4?.brainType || '100% Heurística Local',
-      icon: ShieldCheck,
-      colorClass: 'text-emerald-400',
-      borderClass: 'border-emerald-500/40 hover:border-emerald-400',
-      bgClass: 'bg-emerald-500/10',
-      badgeColor: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
     },
   ];
 
@@ -104,6 +77,12 @@ export const AiEngineSelector: React.FC<AiEngineSelectorProps> = ({
       setActiveAiEngine(engine);
     }
   };
+
+  React.useEffect(() => {
+    if (onChange && selectedEngine && selectedEngine !== currentEngine) {
+      onChange(currentEngine);
+    }
+  }, [selectedEngine, currentEngine, onChange]);
 
   const activeOption = engineOptions.find(o => o.id === currentEngine) || engineOptions[0];
   const ActiveIcon = activeOption.icon;
@@ -162,7 +141,7 @@ export const AiEngineSelector: React.FC<AiEngineSelectorProps> = ({
         <span className="text-[10px] font-mono text-slate-500">{tAi.availableEngines}</span>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
         {engineOptions.map((opt) => {
           const isSelected = currentEngine === opt.id;
           const Icon = opt.icon;

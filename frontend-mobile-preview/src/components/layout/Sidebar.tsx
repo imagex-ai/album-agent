@@ -7,8 +7,6 @@ import {
   GraduationCap,
   FolderHeart,
   Copy,
-  Sliders,
-  BookOpen,
   ListTodo,
   Terminal,
   BarChart3,
@@ -73,13 +71,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
         { id: 'shorts' as ViewId, label: t.shortsFeed || 'Shorts & Reels', icon: Flame, badge: 'HOT', badgeColor: 'bg-rose-500/20 text-rose-300 border border-rose-500/30' },
         { id: 'duplicates' as ViewId, label: t.duplicatesFinder, icon: Copy, badge: null },
         { id: 'trash' as ViewId, label: t.trash || 'Trash', icon: Trash2, badge: trashItems.length > 0 ? trashItems.length.toString() : null, badgeColor: 'bg-rose-500/20 text-rose-300 border border-rose-500/30' },
-      ]
-    },
-    {
-      title: t.studioTools,
-      items: [
-        { id: 'album-detail' as ViewId, label: t.albumDetail, icon: Sliders, badge: null },
-        { id: 'domain-patterns' as ViewId, label: t.domainRules, icon: BookOpen, badge: null },
       ]
     },
     {

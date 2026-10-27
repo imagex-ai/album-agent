@@ -52,6 +52,7 @@ import { scrollRestorationManager, getViewScrollKey } from '../services/scrollRe
 import { matchesPaletteFuzzy, colorPaletteCache } from '../services/colorExtractor';
 
 const DEFAULT_SETTINGS: AppSettings = {
+  defaultAiEngine: 'gemini_surgical_scout',
   aiModel: 'qwen2.5:32b',
   geminiModel: 'gemini-3.6-flash',
   reasoningBudget: 3,
@@ -251,7 +252,7 @@ interface AppState {
   addAlbum: (album: Album) => void;
   updateAlbum: (id: string, updates: Partial<Album>) => void;
   setAlbumCover: (albumId: string, coverImageUrl: string) => Promise<boolean>;
-  deleteAlbum: (id: string) => Promise<boolean>;
+  deleteAlbum: (id: string, duplicateScanId?: string) => Promise<boolean>;
   refreshAlbumStreams: (albumId: string) => Promise<boolean>;
   isRenewingBatchStreams: boolean;
   batchRenewProgress: { current: number; total: number } | null;
@@ -725,7 +726,7 @@ export const useAppStore = create<AppState>((set, get) => {
     inspectingMarkId: null,
     notifications: savedNotifications,
     settings: savedSettings,
-    activeAiEngine: (savedSettings.defaultAiEngine as AiEngineType) || 'gemini_surgical_scout',
+    activeAiEngine: (savedSettings.defaultAiEngine === 'ai_react' ? 'ai_react' : 'gemini_surgical_scout') as AiEngineType,
 
     activeJob: savedActiveJob,
     activeJobs: savedActiveJob ? [savedActiveJob] : [],
@@ -1980,10 +1981,10 @@ export const useAppStore = create<AppState>((set, get) => {
       return false;
     },
 
-    deleteAlbum: async (id) => {
+    deleteAlbum: async (id, duplicateScanId) => {
       let deleted = false;
       try {
-        deleted = await backendApi.deleteAlbum(id);
+        deleted = await backendApi.deleteAlbum(id, duplicateScanId);
       } catch (err) {
         console.error('Failed to delete album:', err);
       }
@@ -2109,44 +2110,38 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     removeImagesFromAlbum: async (albumId, imageIds) => {
-      let deleted = false;
+      const requestedIds = Array.from(new Set(imageIds));
+      const snapshot = get().albums.find(album => album.id === albumId);
+      const selectedImages = (snapshot?.images || []).filter(image => requestedIds.includes(image.id));
+      const t = translations[get().settings.language].store;
+      if (!requestedIds.length || selectedImages.length !== requestedIds.length) {
+        get().addNotification({ title: t.photosDeleteErrorTitle, message: t.photosDeleteErrorMsg, type: 'error' });
+        return false;
+      }
+      let result: { album: Album; deletedCount: number } | null = null;
       try {
-        deleted = await backendApi.deleteAlbumImages(albumId, imageIds);
+        const refs = selectedImages.map(image => image.backendImageRef);
+        result = await backendApi.deleteAlbumImages(albumId, requestedIds,
+          refs.every((ref): ref is NonNullable<ImageItem['backendImageRef']> => !!ref) ? refs : undefined);
       } catch (err) {
         console.error('Failed to delete album images:', err);
       }
-      const t = translations[get().settings.language].store;
-      if (!deleted) {
+      if (!result) {
         get().addNotification({ title: t.photosDeleteErrorTitle, message: t.photosDeleteErrorMsg, type: 'error' });
         return false;
       }
       set(state => ({
-        albums: state.albums.map(a => {
-          if (a.id !== albumId) return a;
-          const updatedImages = (a.images || []).filter(img => !imageIds.includes(img.id));
-          const updatedBytes = updatedImages.reduce((sum, img) => sum + (img.fileSizeBytes || 0), 0);
-          const mediaSummary = getAlbumMediaSummary({ images: updatedImages });
-          return {
-            ...a,
-            images: updatedImages,
-            mediaType: mediaSummary.mediaType,
-            hasGifs: mediaSummary.hasGifs,
-            gifCount: mediaSummary.gifCount,
-            tags: normalizeAlbumMediaTags(a.tags, mediaSummary.hasGifs),
-            imageCount: updatedImages.length,
-            totalSizeBytes: updatedBytes,
-            coverImage: updatedImages[0]?.thumbnailUrl || a.coverImage,
-            updatedAt: new Date().toISOString()
-          };
-        })
+        // Server may renumber image IDs after a removal. Use its authoritative
+        // result so the next click cannot target a stale positional ID.
+        albums: state.albums.map(album => album.id === albumId ? result!.album : album)
       }));
       get().addNotification({
         title: t.photosMovedTitle,
-        message: t.photosMovedMsg.replace('{count}', String(imageIds.length)),
+        message: t.photosMovedMsg.replace('{count}', String(result.deletedCount)),
         type: 'warning'
       });
       await get().fetchTrash();
-      return true;
+      return result.deletedCount === requestedIds.length;
     },
 
     toggleFavoriteAlbum: (id) => {
@@ -2432,7 +2427,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const isVid = (job.mode as string) === 'video_save' || (job.mode as string) === 'video_downloader';
         const res = await backendApi.startExtraction(
           job.url,
-          (job.mode as any) || activeAiEngine || 'ai_react',
+          (job.mode as any) || activeAiEngine || 'gemini_surgical_scout',
           job.aiModel || settings.aiModel,
           settings.geminiModel || 'gemini-3.7-flash',
           settings.reasoningBudget || 3,
@@ -2808,9 +2803,10 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     setActiveAiEngine: (engine) => {
-      set({ activeAiEngine: engine });
-      const { settings, updateSettings } = get();
-      updateSettings({ defaultAiEngine: engine });
+      const normalized: AiEngineType = engine === 'ai_react' ? 'ai_react' : 'gemini_surgical_scout';
+      set({ activeAiEngine: normalized });
+      const { updateSettings } = get();
+      updateSettings({ defaultAiEngine: normalized });
     },
 
     toggleSelectImage: (id) => {
@@ -2996,8 +2992,8 @@ export const useAppStore = create<AppState>((set, get) => {
             get().addNotification({
               title: isEn ? 'Removed on Source Website' : 'Removido no Site de Origem',
               message: isEn
-                ? `${res.deletedOnSource} video(s) were permanently removed on the source website (DMCA/Copyright) and marked with a warning badge.`
-                : `${res.deletedOnSource} vídeo(s) foram excluídos permanentemente no site de origem (DMCA/Direitos Autorais) e marcados com selo de aviso.`,
+                ? `${res.deletedOnSource} video(s) are no longer available on the source website (link expired or removed) and marked with a warning badge.`
+                : `${res.deletedOnSource} vídeo(s) não estão mais disponíveis no site de origem (link expirado ou removido) e marcados com selo de aviso.`,
               type: 'warning'
             });
           }
@@ -3006,8 +3002,8 @@ export const useAppStore = create<AppState>((set, get) => {
             get().addNotification({
               title: isEn ? 'Removed on Source Website' : 'Removido no Site de Origem',
               message: isEn
-                ? `All ${res.deletedOnSource} selected video(s) were permanently deleted on the source website (DMCA/Copyright).`
-                : `Todos os ${res.deletedOnSource} vídeo(s) selecionados foram excluídos permanentemente no site de origem (DMCA/Direitos Autorais).`,
+                ? `All ${res.deletedOnSource} selected video(s) are no longer available on the source website (link expired or removed).`
+                : `Todos os ${res.deletedOnSource} vídeo(s) selecionados não estão mais disponíveis no site de origem (link expirado ou removido).`,
               type: 'warning'
             });
           } else {

@@ -68,7 +68,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
       items: [
         { id: 'gallery' as ViewId, label: t.albumLibrary, icon: FolderHeart, badge: albums.length.toString() },
         { id: 'videos' as ViewId, label: t.videoGallery, icon: Film, badge: videos.length > 0 ? videos.length.toString() : null },
-        { id: 'shorts' as ViewId, label: t.shortsFeed || 'Shorts & Reels', icon: Flame, badge: 'HOT', badgeColor: 'bg-rose-500/20 text-rose-300 border border-rose-500/30' },
+        { id: 'shorts' as ViewId, label: t.shortsFeed || 'Shorts & Reels', icon: Flame, badge: 'HOT', badgeColor: 'bg-purple-500/20 text-purple-300 border border-purple-500/30' },
         { id: 'duplicates' as ViewId, label: t.duplicatesFinder, icon: Copy, badge: null },
         { id: 'trash' as ViewId, label: t.trash || 'Trash', icon: Trash2, badge: trashItems.length > 0 ? trashItems.length.toString() : null },
       ]

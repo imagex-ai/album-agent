@@ -107,7 +107,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
               <div className="font-extrabold text-sm tracking-wider text-slate-100 flex items-center gap-1.5">
                 IMAGEX.AI
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-brand-500/20 text-brand-400 font-mono font-semibold">
-                  v5.0
+                  v5.5
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 font-medium">Enterprise Extraction</p>

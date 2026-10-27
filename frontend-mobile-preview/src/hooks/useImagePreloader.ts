@@ -79,7 +79,7 @@ export interface UseImagePreloaderOptions {
 }
 
 /**
- * useImagePreloader v5.1 (Active-Focus & Zero-Congestion Pipeline)
+ * useImagePreloader v5.5 (Active-Focus & Zero-Congestion Pipeline)
  *
  * Realiza o pré-carregamento preditivo e assíncrono em background
  * das fotos adjacentes (i+1, i+2, i-1) utilizando HTMLImageElement.decode()

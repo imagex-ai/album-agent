@@ -1203,7 +1203,7 @@ async def health_check():
     """System health check and version information."""
     return {
         "status": "ok",
-        "version": "5.4.0",
+        "version": "5.5.0",
         "timestamp": time.time()
     }
 

@@ -1,6 +1,38 @@
-# ⚡ IMAGEX.AI v5.4
+# ⚡ IMAGEX.AI v5.5
 
 Autonomous platform for intelligent extraction, organization, and inspection of web albums and videos in their original maximum resolution. 🚀✨
+
+---
+
+## 🌟 What's New in v5.5 (Release Notes)
+
+* ⚡ **High-Performance Library Streaming & Compression:**
+  * In-memory serialization cache (`LibraryResponseCache`) with fast gzip compression for `/api/albums`, `/api/videos`, and `/api/jobs`.
+  * Cursor-based pagination (`X-Library-Paging: cursor`) and HTTP ETag 304 caching for album and active task feeds.
+  * Optimized folder discovery by passing pre-collected video arrays, avoiding redundant filesystem traversals.
+* 📜 **Virtual Collections & Smooth Render Windowing:**
+  * Zero-lag virtualization (`VirtualCollection.tsx`) with row geometry caching (`measuredHeights`) and binary search range windowing.
+  * Preserved table column widths with `StableVirtualTable` across dynamic viewport transitions.
+  * Coalesced `localStorage` writes (`deferredStorage.ts`) with automatic flush on page unload.
+* 🎬 **Interactive Climax Shorts Experience:**
+  * Drag-and-hover timeline scrubber with floating timestamp tooltips, thumb indicator, and seek precision.
+  * Synchronized native desktop and browser fullscreen (`toggleAppFullscreen`).
+  * Auto-hiding controls timeout, trackpad wheel debouncing, and video error recovery with automatic skip/retry.
+  * Persistent `shortsActiveIndex` preserved across tab navigation in store.
+* 🔍 **Advanced Duplicate & Similarity Scanning:**
+  * Structural duplicate album scan (`duplicate_album_scan.py`) and exact video duplicate resolution (`duplicate_video_scan.py`).
+  * Local video similarity detection (`video_similarity.py`) identifying identical and alternative resolution variants.
+  * Guarded batch cleanup and atomic deletion with automatic state rollback on failure.
+* 🧬 **Binary-Verified Media Classification:**
+  * Container-level binary inspection (`media_classification.py` and `mediaClassification.ts`) checking `VP8X` flags for WebP and Pillow frame counts for GIF/PNG/WebP.
+  * Authoritative binary facts (`is_animated`, `animation_checked`) override misleading URL extensions.
+* 🛡️ **Copy Sanitization & Legitimate Media Framing:**
+  * Streamlined UI descriptions focusing on legitimate web galleries, creative photography portfolios, and direct media pages.
+  * Replaced ambiguous take-down notices with neutral unavailable/expired stream statuses.
+* ☁️ **Local Data Safety & Cloud Isolation:**
+  * Guarded all Hugging Face Cloud sync routines with explicit `is_auto_cloud_sync_enabled()` checks to prevent unexpected remote uploads when auto-sync is disabled.
+* 🌐 **Automation & Cloudflare Utilities:**
+  * Added `start_all.bat` and `start_cloudflare_tunnel.bat` for one-click orchestration on port 8100.
 
 ---
 

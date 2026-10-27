@@ -539,6 +539,29 @@ export class BackendApiClient {
   }
 
   /**
+   * Solicita renovação de URLs de stream expiradas para vídeos da Galeria de Vídeos.
+   */
+  async renewVideoStreams(videoIds?: string[], folder?: string): Promise<{ success: boolean; refreshed: number; failed: number; deletedOnSource?: number }> {
+    try {
+      const res = await fetch('/api/videos/renew-streams', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ video_ids: videoIds, folder })
+      });
+      if (!res.ok) return { success: false, refreshed: 0, failed: videoIds ? videoIds.length : 0, deletedOnSource: 0 };
+      const data = await res.json();
+      return {
+        success: data.success === true,
+        refreshed: data.refreshed || 0,
+        failed: data.failed || 0,
+        deletedOnSource: data.deleted_on_source || 0
+      };
+    } catch {
+      return { success: false, refreshed: 0, failed: videoIds ? videoIds.length : 0, deletedOnSource: 0 };
+    }
+  }
+
+  /**
    * Sincroniza metadados reais (tamanhos de arquivo e resoluções) das imagens e vídeos de um álbum.
    */
   async syncAlbumMetadata(sessionId: string): Promise<Album | null> {
@@ -649,7 +672,9 @@ export class BackendApiClient {
             highlightStart: v.highlight_start || 0,
             highlightEnd: v.highlight_end || 0,
             highlightScore: v.highlight_score || 0,
-            highlights: v.highlights || []
+            highlights: v.highlights || [],
+            streamStatus: v.stream_status,
+            streamError: v.stream_error
           };
         }),
         folders: (data.folders || []).map((f: any) => ({
@@ -967,6 +992,36 @@ export class BackendApiClient {
       return [];
     } catch {
       return [];
+    }
+  }
+
+  async uploadVideoToHf(videoId: string): Promise<{ success: boolean; message: string }> {
+    try {
+      const res = await fetch(`/api/videos/${encodeURIComponent(videoId)}/upload-hf`, {
+        method: 'POST'
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || data.message || 'Erro ao enviar para Hugging Face');
+      }
+      return data;
+    } catch (err: any) {
+      return { success: false, message: err?.message || 'Falha na conexão com o servidor' };
+    }
+  }
+
+  async syncAllVideosToHf(): Promise<{ success: boolean; message: string }> {
+    try {
+      const res = await fetch('/api/videos/sync-all-to-hf', {
+        method: 'POST'
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || data.message || 'Erro ao sincronizar com Hugging Face');
+      }
+      return data;
+    } catch (err: any) {
+      return { success: false, message: err?.message || 'Falha na conexão com o servidor' };
     }
   }
 
@@ -1312,20 +1367,138 @@ export class BackendApiClient {
   }
 
   /**
-   * Scans a web page to extract all listed video cards.
+   * Scans a web page to extract all listed video cards across current and subsequent pagination pages.
    */
-  async scanPageForVideos(url: string, maxItems: number = 100): Promise<ScanPageVideosResponse & { error?: string }> {
+  async scanPageForVideos(url: string, maxItems: number = 2000, maxPages?: number): Promise<ScanPageVideosResponse & { error?: string }> {
     try {
+      const payload: any = { url, max_items: maxItems };
+      if (typeof maxPages === 'number' && maxPages > 0) {
+        payload.max_pages = maxPages;
+      }
       const res = await fetch('/api/video-scraper/scan-page', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, max_items: maxItems })
+        body: JSON.stringify(payload)
       });
       const data = await res.json();
       if (!res.ok) return { success: false, error: data.detail || 'Error scanning page', page_title: '', suggested_folder: '', total_found: 0, album_id: '', videos: [] };
       return data;
     } catch (err: any) {
       return { success: false, error: err?.message || 'Failed to connect to server to scan page', page_title: '', suggested_folder: '', total_found: 0, album_id: '', videos: [] };
+    }
+  }
+
+  /**
+   * Scans a web page using real-time streaming (SSE) to deliver video batches dynamically as each page is crawled.
+   * If streaming encounters any connection issue, it automatically and safely falls back to standard HTTP scan.
+   */
+  async scanPageForVideosStream(
+    url: string,
+    maxItems: number = 5000,
+    maxPages?: number,
+    onPageDiscovered?: (pageData: {
+      page_number: number;
+      pages_scanned: number;
+      page_title: string;
+      suggested_folder: string;
+      new_videos: any[];
+      total_found: number;
+      main_count: number;
+      recommended_count: number;
+      already_saved_count: number;
+      new_videos_count: number;
+    }) => void,
+    onComplete?: (result: ScanPageVideosResponse) => void,
+    onError?: (error: string) => void,
+    abortSignal?: AbortSignal
+  ): Promise<ScanPageVideosResponse & { error?: string }> {
+    try {
+      const payload: any = { url, max_items: maxItems };
+      if (typeof maxPages === 'number' && maxPages > 0) {
+        payload.max_pages = maxPages;
+      }
+
+      const response = await fetch('/api/video-scraper/scan-page-stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: abortSignal
+      });
+
+      if (!response.ok || !response.body) {
+        // Fallback to standard endpoint
+        return this.scanPageForVideos(url, maxItems, maxPages);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      let accumulatedVideos: any[] = [];
+      let finalResult: ScanPageVideosResponse | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
+          const jsonStr = trimmed.slice(5).trim();
+          if (!jsonStr) continue;
+
+          try {
+            const data = JSON.parse(jsonStr);
+            if (data.type === 'page') {
+              if (data.new_videos && data.new_videos.length > 0) {
+                accumulatedVideos = [...accumulatedVideos, ...data.new_videos];
+              }
+              onPageDiscovered?.(data);
+            } else if (data.type === 'complete') {
+              finalResult = {
+                success: true,
+                page_title: data.page_title || '',
+                suggested_folder: data.suggested_folder || '',
+                total_found: data.total_found || accumulatedVideos.length,
+                main_count: data.main_count || 0,
+                recommended_count: data.recommended_count || 0,
+                already_saved_count: data.already_saved_count || 0,
+                new_videos_count: data.new_videos_count || 0,
+                album_id: '',
+                pages_scanned: data.pages_scanned || 1,
+                videos: data.videos || accumulatedVideos
+              };
+              onComplete?.(finalResult);
+            } else if (data.type === 'error') {
+              onError?.(data.error || 'Error during page scan');
+            }
+          } catch (e) {
+            console.warn('Error parsing stream event line:', jsonStr, e);
+          }
+        }
+      }
+
+      if (finalResult) return finalResult;
+      if (accumulatedVideos.length > 0) {
+        return {
+          success: true,
+          page_title: '',
+          suggested_folder: '',
+          total_found: accumulatedVideos.length,
+          album_id: '',
+          videos: accumulatedVideos
+        };
+      }
+      return this.scanPageForVideos(url, maxItems, maxPages);
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        throw err;
+      }
+      console.warn('Stream encountered issue, falling back to standard scan:', err);
+      return this.scanPageForVideos(url, maxItems, maxPages);
     }
   }
 

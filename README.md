@@ -1,33 +1,29 @@
-# ⚡ IMAGEX.AI v5.3
+# ⚡ IMAGEX.AI v5.4
 
 Autonomous platform for intelligent extraction, organization, and inspection of web albums and videos in their original maximum resolution. 🚀✨
 
 ---
 
-## 🌟 What's New in v5.3 (Release Notes)
+## 🌟 What's New in v5.4 (Release Notes)
 
-* 📌 **Interactive Mini Task Dock & Real-Time Progress Monitoring:**
-  * Persistent dock UI supporting multiple concurrent tasks with interactive tabs/pills navigation.
-  * Task wrapping toggle, horizontal mouse-wheel scrolling, and visual item highlighting on job completion.
-  * Live disk download and network throughput telemetry with instant status indicators.
-* ⚡ **Enhanced Web Video Scraper & Storage Options:**
-  * Dual-mode extraction: **Stream Web Full HD** (0 MB local disk usage) and Direct Local Download (`stream_only=False`).
-  * Contextual folder suggestions with automatic deduplication.
-  * Seamless scroll restoration across navigation tabs and view changes.
-* 🛡️ **Resilient Network Profiles & Safe Extraction:**
-  * Dynamic canonical target page resolution preserving origin hostnames.
-  * Generic embed sniffing (`/embed/`, `/video-`, `/watch/`) with domain-aware high-resolution poster generation.
-  * Safe, sanitized API enrichment templates with family-friendly abstractions.
-* 🔄 **In-Place Job Lifecycle & Queue Resumption:**
-  * Resumes and restarts paused or failed tasks in-place without losing task identifiers.
-  * Disk-state validation for partial downloads to prevent stale progress indicators.
-* 🌐 **Bilingual Internationalization (I18n):**
-  * Comprehensive English (`en-US`) and Portuguese (`pt-BR`) language support across task dock, scraper, and album detail views.
-* 🎬 **Full Immersive Shorts Experience & Persistent Audio:**
-  * Border-to-border video feed with smart climax moment detection (Gold #1, Silver #2, Bronze #3).
-  * Audio state persists seamlessly across video transitions with zero-bandwidth contention preloading.
-* 🌐 **Standard Port 8100:**
-  * Unified default port standard across backend services, desktop window, and tunneling.
+* 🚀 **Multi-Page Deep Crawling & Live Streaming Scanner:**
+  * Web Video Scraper now seeks up to 5,000 items and 50 subsequent pages with real-time SSE streaming (`/api/video-scraper/scan-page-stream`).
+  * Multi-Album Explorer crawls up to 50 pages dynamically with live telemetry and instant abort capability.
+* ⚡ **High-Performance Infinite Scroll & Virtualization:**
+  * Progressive lazy rendering (48-item batches) via Intersection Observers in Web Video Scraper and Multi-Album views, eliminating DOM lag.
+* 🔄 **Video Stream Renewal & Link Healing:**
+  * Auto-renew expired direct video stream URLs via `/api/videos/renew-streams` while preserving IDs, folders, and favorites.
+  * Album stream updates automatically propagate to the Video Gallery.
+* 🏷️ **Categorical Video Origin Filtering:**
+  * Filter video collections by origin: All, Local PC, Web Stream (0 MB local disk footprint), Hugging Face Cloud, and Broken links.
+* ☁️ **Direct Cloud Storage Backup:**
+  * Backup local videos directly to Hugging Face Cloud Storage with timestamp healing (`_migrate_origins`).
+* 🛡️ **Trash Service & Filesystem Hardening:**
+  * Full lifecycle support for stream-only videos in trash (move, restore, permanent delete) with complete climax highlight preservation.
+  * Windows filename and folder sanitization preventing reserved device name conflicts.
+* 📌 **Mini Task Dock & Enhanced Scraper:**
+  * Multi-task switcher with interactive pills, task wrapping, and horizontal scrolling.
+  * Unified standard port **8100** across all configurations and build scripts.
 
 ---
 
@@ -91,6 +87,10 @@ python -m playwright install chromium
 python -m src.main
 ```
 
+To develop the frontend, start the server on port 8100 in one terminal and run
+`npm install` followed by `npm run dev` inside `frontend-mobile-preview` in
+another. Vite forwards API requests to `http://127.0.0.1:8100`.
+
 ---
 
 ### ⚙️ How to Build the Executable (.exe) 🔨
@@ -100,7 +100,7 @@ To compile the frontend with Vite and package everything into `dist/main.exe`:
 1. Simply double-click the **`build_executable.bat`** script in the project root.
 2. The script will automatically:
    * Build the frontend (`npm run build`).
-   * Verify Playwright Chromium dependencies.
+   * Install the Python and PyInstaller dependencies from `requirements-build.txt` and verify Playwright Chromium.
    * Generate the standalone portable executable via PyInstaller in the `dist/` directory.
 
 ---
@@ -187,6 +187,10 @@ python -m playwright install chromium
 python -m src.main
 ```
 
+Para desenvolver o frontend, inicie o servidor na porta 8100 em um terminal e
+execute `npm install` e `npm run dev` dentro de `frontend-mobile-preview` em
+outro. O Vite encaminha as chamadas da API para `http://127.0.0.1:8100`.
+
 ---
 
 ### ⚙️ Como Compilar o Executável (.exe) 🔨
@@ -196,7 +200,7 @@ Para compilar o frontend com Vite e empacotar tudo no `dist/main.exe`:
 1. Basta dar dois cliques no script **`build_executable.bat`** na raiz do projeto.
 2. O script vai automaticamente:
    * Rodar o build do frontend (`npm run build`).
-   * Verificar o Chromium do Playwright.
+   * Instalar as dependências Python e o PyInstaller de `requirements-build.txt` e verificar o Chromium do Playwright.
    * Gerar o executável único portátil via PyInstaller na pasta `dist/`.
 
 ---

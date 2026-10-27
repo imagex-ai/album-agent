@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import {
   Film,
   Folder,
@@ -33,7 +33,9 @@ import {
   Flame,
   ChevronLeft,
   ChevronRight,
-  LayoutGrid
+  LayoutGrid,
+  AlertTriangle,
+  AlertCircle
 } from 'lucide-react';
 import { useAppStore, getCanonicalMediaFingerprint } from '../../store/useAppStore';
 import { backendApi } from '../../services/realApi';
@@ -109,6 +111,8 @@ export const VideosView: React.FC = () => {
     importLocalPath,
     openVideosFolder,
     syncVideos,
+    isRenewingVideoStreams,
+    renewVideoStreams,
     saveExtractedVideoToGallery,
     navigateToView,
     highlightedItemId,
@@ -178,7 +182,8 @@ export const VideosView: React.FC = () => {
   const [thumbRefreshKey, setThumbRefreshKey] = useState<number>(0);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [playingVideoIds, setPlayingVideoIds] = useState<string[]>([]);
-  const [videoOriginFilter, setVideoOriginFilter] = useState<'all' | 'pc' | 'web'>('all');
+  const [videoOriginFilter, setVideoOriginFilter] = useState<'all' | 'pc' | 'web' | 'hf' | 'broken'>('all');
+  const [deletedNoticeVideo, setDeletedNoticeVideo] = useState<VideoItem | null>(null);
 
   const toggleInlinePlay = (id: string) => {
     setPlayingVideoIds(prev =>
@@ -227,7 +232,7 @@ export const VideosView: React.FC = () => {
 
   const isVideoWebOrigin = (v: VideoItem): boolean => {
     if (v.sourceOrigin === 'web') return true;
-    if (v.sourceOrigin === 'pc') return false;
+    if (v.sourceOrigin === 'pc' && v.storageLocation === 'local') return false;
     // Fallback detection for older items or direct streams
     const hasWebUrl = Boolean(v.sourceUrl && (v.sourceUrl.startsWith('http://') || v.sourceUrl.startsWith('https://')));
     const hasSourceId = Boolean(v.sourceId);
@@ -235,6 +240,17 @@ export const VideosView: React.FC = () => {
     const isExtractedFolder = effFolder.startsWith('extra');
     const isStreamOnly = v.storageLocation === 'stream_url' || Boolean(v.cloudUrl);
     return hasWebUrl || hasSourceId || isExtractedFolder || isStreamOnly;
+  };
+
+  const isVideoHuggingFace = (v: VideoItem): boolean => {
+    if (v.storageLocation === 'huggingface') return true;
+    const cUrl = (v.cloudUrl || '').toLowerCase();
+    if (cUrl.includes('huggingface.co') || cUrl.includes('hf.co')) return true;
+    const sUrl = (v.streamUrl || '').toLowerCase();
+    if (sUrl.includes('huggingface.co') || sUrl.includes('hf.co')) return true;
+    const srcUrl = (v.sourceUrl || '').toLowerCase();
+    if (srcUrl.includes('huggingface.co') || srcUrl.includes('hf.co')) return true;
+    return false;
   };
 
   // Filter videos
@@ -246,11 +262,20 @@ export const VideosView: React.FC = () => {
       if (activeNorm !== vNorm) return false;
     }
 
-    // Filter by Origin (PC local vs Web)
+    // Filter by Origin (PC local vs Web vs Hugging Face vs Broken/Deleted)
     if (videoOriginFilter !== 'all') {
-      const isWeb = isVideoWebOrigin(v);
-      if (videoOriginFilter === 'pc' && isWeb) return false;
-      if (videoOriginFilter === 'web' && !isWeb) return false;
+      if (videoOriginFilter === 'hf') {
+        if (!isVideoHuggingFace(v)) return false;
+      } else if (videoOriginFilter === 'broken') {
+        if (v.streamStatus !== 'deleted_on_source' && v.streamStatus !== 'expired') return false;
+      } else if (videoOriginFilter === 'pc') {
+        const isWeb = isVideoWebOrigin(v);
+        const isHf = isVideoHuggingFace(v);
+        if (isWeb || (isHf && v.storageLocation !== 'local')) return false;
+      } else if (videoOriginFilter === 'web') {
+        const isWeb = isVideoWebOrigin(v);
+        if (!isWeb) return false;
+      }
     }
 
     if (videoSearchQuery.trim()) {
@@ -268,6 +293,33 @@ export const VideosView: React.FC = () => {
   });
 
   const totalBytes = videos.reduce((acc, v) => acc + v.fileSizeBytes, 0);
+
+  const streamVideosInList = useMemo(() => {
+    return filtered.filter(v => v.storageLocation === 'stream_url' || v.sourceOrigin === 'web' || Boolean(v.cloudUrl));
+  }, [filtered]);
+
+  const selectedStreamVideos = useMemo(() => {
+    return videos.filter(v => selectedVideoIds.includes(v.id) && (v.storageLocation === 'stream_url' || v.sourceOrigin === 'web' || Boolean(v.cloudUrl)));
+  }, [videos, selectedVideoIds]);
+
+  const selectedLocalPendingHfVideos = useMemo(() => {
+    return videos.filter(v => selectedVideoIds.includes(v.id) && !isVideoHuggingFace(v) && !isVideoWebOrigin(v));
+  }, [videos, selectedVideoIds]);
+
+  const brokenVideosCount = useMemo(() => {
+    return videos.filter(v => v.streamStatus === 'deleted_on_source' || v.streamStatus === 'expired').length;
+  }, [videos]);
+
+  const handleRenewFolderStreams = async (targetIds?: string[]) => {
+    const ids = targetIds && targetIds.length > 0 ? targetIds : streamVideosInList.map((v: any) => v.id);
+    if (!ids.length || isRenewingVideoStreams) return;
+    await renewVideoStreams(ids, activeVideoFolder || undefined);
+  };
+
+  const handleRenewSingleStream = async (videoId: string) => {
+    if (isRenewingVideoStreams) return;
+    await renewVideoStreams([videoId]);
+  };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -439,6 +491,37 @@ export const VideosView: React.FC = () => {
             <span className="hidden sm:inline">{t.sync}</span>
           </button>
 
+          {/* Renovar Streams da Pasta / Lista */}
+          {streamVideosInList.length > 0 && (
+            <button
+              onClick={() => handleRenewFolderStreams()}
+              disabled={isRenewingVideoStreams}
+              className="px-3 py-2 rounded-xl bg-violet-600/20 hover:bg-violet-600/30 border border-violet-500/40 text-violet-300 text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm disabled:opacity-50"
+              title={
+                activeVideoFolder
+                  ? (t.renewStreamsFolderTitle || (isEn
+                      ? `Renew video stream links for all ${streamVideosInList.length} stream videos in folder "{folder}"`
+                      : `Renovar links de stream dos ${streamVideosInList.length} vídeos da pasta "{folder}"`))
+                      .replace('{folder}', activeVideoFolder)
+                      .replace('{count}', String(streamVideosInList.length))
+                  : (t.renewStreamsTitle || (isEn
+                      ? `Renew video stream links for all ${streamVideosInList.length} stream videos in the list`
+                      : `Renovar links de stream dos ${streamVideosInList.length} vídeos da lista`))
+                      .replace('{count}', String(streamVideosInList.length))
+              }
+            >
+              <RefreshCw size={13} className={isRenewingVideoStreams ? 'animate-spin text-violet-400' : 'text-violet-400'} />
+              <span>
+                {isRenewingVideoStreams
+                  ? (isEn ? 'Renewing...' : 'Renovando...')
+                  : (t.renewStreams || (isEn ? 'Renew Streams' : 'Renovar Streams'))}
+              </span>
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-violet-950/60 text-violet-300 border border-violet-500/30">
+                {streamVideosInList.length}
+              </span>
+            </button>
+          )}
+
           {/* Abrir Pasta no Windows Explorer */}
           <button
             onClick={handleOpenFolder}
@@ -579,6 +662,62 @@ export const VideosView: React.FC = () => {
               <FolderInput size={14} />
               <span>{t.batchMove} ({selectedVideoIds.length})</span>
             </button>
+
+            {selectedStreamVideos.length > 0 && (
+              <button
+                type="button"
+                onClick={() => handleRenewFolderStreams(selectedStreamVideos.map((v: any) => v.id))}
+                disabled={isRenewingVideoStreams}
+                className="px-3 py-1.5 rounded-xl bg-violet-600/20 hover:bg-violet-600/30 text-violet-300 text-xs font-bold border border-violet-500/40 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                title={t.renewSelectedTitle || (isEn ? "Renew stream links for selected videos" : "Renovar links de stream dos vídeos selecionados")}
+              >
+                <RefreshCw size={13} className={isRenewingVideoStreams ? 'animate-spin text-violet-400' : 'text-violet-400'} />
+                <span>
+                  {isRenewingVideoStreams
+                    ? (isEn ? 'Renewing...' : 'Renovando...')
+                    : (t.renewStreams || (isEn ? 'Renew Streams' : 'Renovar Streams'))} ({selectedStreamVideos.length})
+                </span>
+              </button>
+            )}
+
+            {selectedLocalPendingHfVideos.length > 0 && (
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    addNotification({
+                      type: 'info',
+                      title: 'Hugging Face Backup',
+                      message: (t.backupBatchStarted || (isEn
+                        ? 'Starting backup of {count} videos to Hugging Face...'
+                        : 'Iniciando backup de {count} vídeos para o Hugging Face...'))
+                        .replace('{count}', String(selectedLocalPendingHfVideos.length))
+                    });
+                    for (const v of selectedLocalPendingHfVideos) {
+                      await backendApi.uploadVideoToHf(v.id);
+                    }
+                    addNotification({
+                      type: 'success',
+                      title: 'Hugging Face Backup',
+                      message: t.backupBatchQueued || (isEn
+                        ? 'Videos queued for upload in background to Hugging Face!'
+                        : 'Vídeos enfileirados para upload em segundo plano no Hugging Face!')
+                    });
+                  } catch (e: any) {
+                    addNotification({
+                      type: 'error',
+                      title: 'Hugging Face Backup',
+                      message: e?.message || (isEn ? 'Failed to upload videos.' : 'Falha ao enviar vídeos.')
+                    });
+                  }
+                }}
+                className="px-3 py-1.5 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 text-xs font-bold border border-purple-500/40 transition-colors flex items-center gap-1.5 cursor-pointer"
+                title={t.syncAllToHfTooltip || (isEn ? "Backup selected local videos to Hugging Face" : "Fazer backup dos vídeos locais selecionados para o Hugging Face")}
+              >
+                <Globe size={13} className="text-purple-400" />
+                <span>{t.syncAllToHf || (isEn ? "Backup to HF" : "Backup para HF")} ({selectedLocalPendingHfVideos.length})</span>
+              </button>
+            )}
 
             <button
               onClick={() => setIsConfirmingBatchDelete(true)}
@@ -868,7 +1007,7 @@ export const VideosView: React.FC = () => {
         </div>
       </div>
 
-      {/* Origin Filter Bar: Todos vs Do Meu PC vs Da Web */}
+      {/* Origin Filter Bar: Todos vs Do Meu PC vs Da Web vs Hugging Face */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-1">
         <div className="flex items-center p-1 rounded-xl bg-surface-elevated border border-border text-xs">
           <button
@@ -908,6 +1047,34 @@ export const VideosView: React.FC = () => {
             <ExternalLink size={13} />
             <span>{t.originWeb} ({videos.filter(v => isVideoWebOrigin(v)).length})</span>
           </button>
+          <button
+            type="button"
+            onClick={() => setVideoOriginFilter('hf')}
+            className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition-all ${
+              videoOriginFilter === 'hf'
+                ? 'bg-purple-600 text-white shadow-sm ring-1 ring-purple-400/40'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+            title={t.originHfTooltip || (isEn ? "Videos stored in Hugging Face Hub dataset" : "Vídeos armazenados no dataset do Hugging Face Hub")}
+          >
+            <Globe size={13} className={videoOriginFilter === 'hf' ? 'text-white' : 'text-purple-400'} />
+            <span>{t.originHf || (isEn ? "Hugging Face" : "Nuvem Hugging Face")} ({videos.filter(v => isVideoHuggingFace(v)).length})</span>
+          </button>
+          {brokenVideosCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setVideoOriginFilter('broken')}
+              className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition-all ${
+                videoOriginFilter === 'broken'
+                  ? 'bg-rose-600 text-white shadow-sm ring-1 ring-rose-400/40'
+                  : 'text-rose-400 hover:text-rose-300'
+              }`}
+              title={isEn ? "Videos deleted on source or with expired streams" : "Vídeos excluídos na origem ou com streams expirados"}
+            >
+              <AlertTriangle size={13} className={videoOriginFilter === 'broken' ? 'text-white' : 'text-rose-400'} />
+              <span>{isEn ? "Broken / Deleted" : "Com Problemas"} ({brokenVideosCount})</span>
+            </button>
+          )}
         </div>
 
         {videoOriginFilter !== 'all' && (
@@ -916,7 +1083,7 @@ export const VideosView: React.FC = () => {
             onClick={() => setVideoOriginFilter('all')}
             className="text-xs text-brand-400 hover:text-brand-300 font-medium px-2 py-1"
           >
-            Limpar Filtro de Origem
+            {t.clearOriginFilter || (isEn ? "Clear Origin Filter" : "Limpar Filtro de Origem")}
           </button>
         )}
       </div>
@@ -925,21 +1092,51 @@ export const VideosView: React.FC = () => {
       {filtered.length === 0 ? (
         <div className="py-16 text-center glass-panel rounded-3xl border border-border flex flex-col items-center justify-center space-y-3">
           <div className="p-4 rounded-full bg-surface-elevated text-slate-500 border border-border">
-            <FileVideo size={36} />
+            {videoOriginFilter === 'hf' ? (
+              <Globe size={36} className="text-purple-400" />
+            ) : (
+              <FileVideo size={36} />
+            )}
           </div>
-          <h3 className="text-base font-bold text-slate-200">{t.noVideosFound || "No videos found"}</h3>
+          <h3 className="text-base font-bold text-slate-200">
+            {videoOriginFilter === 'hf'
+              ? (t.noHfVideosFound || (isEn ? "No videos on Hugging Face" : "Nenhum vídeo no Hugging Face"))
+              : (t.noVideosFound || "No videos found")}
+          </h3>
           <p className="text-xs text-slate-400 max-w-sm">
             {videoFilterFavoritesOnly
               ? (t.noFavVideosDesc || (isEn ? 'You have not favorited any videos yet. Click the star on any video to add it here.' : 'Você ainda não favoritou nenhum vídeo. Clique na estrela de qualquer vídeo para adicioná-lo aqui.'))
-              : (t.noVideosDesc || (isEn ? 'Import videos from your computer or add via direct URL to start your gallery.' : 'Importe vídeos do seu computador ou adicione por URL direta para começar sua galeria.'))}
+              : videoOriginFilter === 'hf'
+                ? (t.noHfVideosDesc || (isEn ? 'No videos have been uploaded to your Hugging Face dataset yet. You can backup local videos using the video options menu or sync your cloud dataset in Settings.' : 'Nenhum vídeo foi enviado para o repositório do Hugging Face ainda. Você pode fazer backup de vídeos locais pelo menu de opções do vídeo ou sincronizar seu repositório nas Configurações.'))
+                : (t.noVideosDesc || (isEn ? 'Import videos from your computer or add via direct URL to start your gallery.' : 'Importe vídeos do seu computador ou adicione por URL direta para começar sua galeria.'))}
           </p>
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="mt-2 px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-glow-brand"
-          >
-            <Upload size={14} />
-            <span>{t.importFirstVideo || "Import First Video"}</span>
-          </button>
+          {videoOriginFilter === 'hf' ? (
+            <div className="flex items-center gap-2 mt-2">
+              <button
+                type="button"
+                onClick={() => setVideoOriginFilter('all')}
+                className="px-4 py-2 rounded-xl bg-surface-elevated hover:bg-surface-hover border border-border text-slate-200 text-xs font-bold transition-all"
+              >
+                <span>{t.viewAllVideosBtn || (isEn ? "View All Videos" : "Ver Todos os Vídeos")}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => navigateToView('settings')}
+                className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm"
+              >
+                <Globe size={13} />
+                <span>{t.hfSettingsBtn || (isEn ? "Hugging Face Settings" : "Configurações do Hugging Face")}</span>
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="mt-2 px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-glow-brand"
+            >
+              <Upload size={14} />
+              <span>{t.importFirstVideo || "Import First Video"}</span>
+            </button>
+          )}
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-5">
@@ -964,6 +1161,10 @@ export const VideosView: React.FC = () => {
                 } ${
                   isSelected
                     ? 'border-violet-500 ring-2 ring-violet-500/50 bg-violet-950/20 shadow-glow-brand'
+                    : video.streamStatus === 'deleted_on_source'
+                    ? 'border-rose-500/60 bg-rose-950/15 hover:border-rose-400'
+                    : video.streamStatus === 'expired'
+                    ? 'border-amber-500/50 bg-amber-950/15 hover:border-amber-400'
                     : 'border-border hover:border-brand-500/50 hover:shadow-card-elevated'
                 }`}
               >
@@ -1038,6 +1239,9 @@ export const VideosView: React.FC = () => {
                       if (isSelectionMode || selectedVideoIds.length > 0) {
                         e.stopPropagation();
                         toggleSelectVideo(video.id);
+                      } else if (video.streamStatus === 'deleted_on_source') {
+                        e.stopPropagation();
+                        setDeletedNoticeVideo(video);
                       } else {
                         toggleInlinePlay(video.id);
                       }
@@ -1069,9 +1273,15 @@ export const VideosView: React.FC = () => {
                     {/* Central Play Overlay (only when not in selection mode) */}
                     {selectedVideoIds.length === 0 && !isSelectionMode && (
                       <div className="absolute inset-0 bg-black/40 group-hover/thumb:bg-black/20 transition-colors flex items-center justify-center">
-                        <div className="p-3 sm:p-3.5 rounded-full bg-brand-600/90 text-white shadow-glow-brand group-hover/thumb:scale-110 transition-transform">
-                          <Play size={20} className="translate-x-0.5" />
-                        </div>
+                        {video.streamStatus === 'deleted_on_source' ? (
+                          <div className="p-3 sm:p-3.5 rounded-full bg-rose-600/90 text-white shadow-lg group-hover/thumb:scale-110 transition-transform" title={isEn ? "Video deleted on source website" : "Vídeo excluído no site de origem"}>
+                            <AlertTriangle size={20} />
+                          </div>
+                        ) : (
+                          <div className="p-3 sm:p-3.5 rounded-full bg-brand-600/90 text-white shadow-glow-brand group-hover/thumb:scale-110 transition-transform">
+                            <Play size={20} className="translate-x-0.5" />
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -1118,7 +1328,7 @@ export const VideosView: React.FC = () => {
                       title={isEn ? "Video with same resolution detected as duplicate in gallery" : "Vídeo com mesma resolução detectado como duplicado na galeria"}
                     >
                       <Copy size={10} />
-                      <span>Duplicado</span>
+                      <span>{t.duplicateBadge || (isEn ? "Duplicate" : "Duplicado")}</span>
                     </span>
                   )}
 
@@ -1154,33 +1364,47 @@ export const VideosView: React.FC = () => {
                           </span>
                         );
                       })()}
-                      {video.storageLocation === 'huggingface' && (
-                        <span className="px-1.5 py-0.5 rounded bg-purple-950/80 border border-purple-500/40 text-purple-300 flex items-center gap-1" title="Armazenado na Nuvem Gratuita do Hugging Face">
+                      {video.streamStatus === 'deleted_on_source' && (
+                        <span className="px-1.5 py-0.5 rounded bg-rose-950/90 border border-rose-500/80 text-rose-300 font-bold flex items-center gap-1 shadow-sm" title={isEn ? "Video deleted on source website (DMCA / Copyright removal)" : "Vídeo excluído no site de origem (Removido por DMCA / Direitos)"}>
+                          <AlertTriangle size={10} className="text-rose-400" />
+                          <span>{isEn ? "Deleted Source" : "Fonte Excluída"}</span>
+                        </span>
+                      )}
+                      {video.streamStatus === 'expired' && (
+                        <span className="px-1.5 py-0.5 rounded bg-amber-950/90 border border-amber-500/80 text-amber-300 font-bold flex items-center gap-1 shadow-sm" title={isEn ? "Stream URL expired. Try renewing stream." : "Link de stream expirado. Tente renovar stream."}>
+                          <AlertCircle size={10} className="text-amber-400" />
+                          <span>{isEn ? "Expired Stream" : "Stream Expirado"}</span>
+                        </span>
+                      )}
+                      {isVideoHuggingFace(video) && (
+                        <span className="px-1.5 py-0.5 rounded bg-purple-950/80 border border-purple-500/40 text-purple-300 flex items-center gap-1" title={t.hfBadgeTooltip || (isEn ? "Stored in Hugging Face Hub cloud" : "Armazenado na Nuvem Gratuita do Hugging Face")}>
                           <Globe size={10} />
-                          <span>Nuvem HF</span>
+                          <span>{t.hfBadgeLabel || (isEn ? "HF Cloud" : "Nuvem HF")}</span>
                         </span>
                       )}
                       {isVideoWebOrigin(video) ? (
                         video.storageLocation === 'stream_url' ? (
-                          <span className="px-1.5 py-0.5 rounded bg-cyan-950/80 border border-cyan-500/40 text-cyan-300 flex items-center gap-1" title="Stream direto da web (Zero disco consumido)">
+                          <span className="px-1.5 py-0.5 rounded bg-cyan-950/80 border border-cyan-500/40 text-cyan-300 flex items-center gap-1" title={isEn ? "Direct web stream (Zero disk consumed)" : "Stream direto da web (Zero disco consumido)"}>
                             <Link2 size={10} />
                             <span>Web Stream</span>
                           </span>
                         ) : (
-                          <span className="px-1.5 py-0.5 rounded bg-sky-950/80 border border-sky-500/40 text-sky-300 flex items-center gap-1" title="Baixado da Web / Scraper">
+                          <span className="px-1.5 py-0.5 rounded bg-sky-950/80 border border-sky-500/40 text-sky-300 flex items-center gap-1" title={isEn ? "Downloaded from Web / Scraper" : "Baixado da Web / Scraper"}>
                             <Globe size={10} />
                             <span>Web / Scraper</span>
                           </span>
                         )
                       ) : (
-                        <span className="px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-500/40 text-amber-300 flex items-center gap-1" title="Importado do seu Computador (Upload / PC Local)">
-                          <HardDrive size={10} />
-                          <span>PC Local</span>
-                        </span>
+                        (video.storageLocation === 'local' || !isVideoHuggingFace(video)) && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-500/40 text-amber-300 flex items-center gap-1" title={isEn ? "Imported from your PC (Upload / Local PC)" : "Importado do seu Computador (Upload / PC Local)"}>
+                            <HardDrive size={10} />
+                            <span>{t.localPcBadge || (isEn ? "Local PC" : "PC Local")}</span>
+                          </span>
+                        )
                       )}
                     </div>
                     <span className="px-1.5 py-0.5 rounded bg-black/70 border border-white/10 text-slate-300 whitespace-nowrap ml-1">
-                      {video.storageLocation === 'stream_url' ? 'Web Stream' : (video.fileSizeBytes > 0 ? formatFileSize(video.fileSizeBytes) : 'Tam. N/D')}
+                      {video.storageLocation === 'stream_url' ? 'Web Stream' : (video.fileSizeBytes > 0 ? formatFileSize(video.fileSizeBytes) : (isEn ? 'Size N/A' : 'Tam. N/D'))}
                     </span>
                   </div>
                 </div>
@@ -1194,6 +1418,9 @@ export const VideosView: React.FC = () => {
                         if (isSelectionMode || selectedVideoIds.length > 0) {
                           e.stopPropagation();
                           toggleSelectVideo(video.id);
+                        } else if (video.streamStatus === 'deleted_on_source') {
+                          e.stopPropagation();
+                          setDeletedNoticeVideo(video);
                         } else {
                           toggleInlinePlay(video.id);
                         }
@@ -1262,7 +1489,7 @@ export const VideosView: React.FC = () => {
                       className="w-full px-3 py-1.5 rounded-xl hover:bg-white/10 text-left text-xs text-slate-200 flex items-center gap-2"
                     >
                       <Play size={13} className="text-violet-400" />
-                      <span>Player Completo</span>
+                      <span>{isEn ? "Full Player" : "Player Completo"}</span>
                     </button>
 
                     <button
@@ -1273,7 +1500,7 @@ export const VideosView: React.FC = () => {
                       className="w-full px-3 py-1.5 rounded-xl hover:bg-white/10 text-left text-xs text-slate-200 flex items-center gap-2"
                     >
                       <Play size={13} className="text-emerald-400" />
-                      <span>Reproduzir no Card</span>
+                      <span>{isEn ? "Play on Card" : "Reproduzir no Card"}</span>
                     </button>
 
                     <a
@@ -1321,8 +1548,23 @@ export const VideosView: React.FC = () => {
                       className="w-full px-3 py-1.5 rounded-xl hover:bg-white/10 text-left text-xs text-slate-200 flex items-center gap-2"
                     >
                       <Edit2 size={13} className="text-amber-400" />
-                      <span>Renomear</span>
+                      <span>{t.rename || (isEn ? "Rename" : "Renomear")}</span>
                     </button>
+
+                    {(video.storageLocation === 'stream_url' || video.sourceOrigin === 'web' || Boolean(video.cloudUrl)) && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setActiveMenuVideoId(null);
+                          await handleRenewSingleStream(video.id);
+                        }}
+                        className="w-full px-3 py-1.5 rounded-xl hover:bg-white/10 text-left text-xs text-violet-300 flex items-center gap-2 cursor-pointer"
+                        title={t.renewStreamTooltip || (isEn ? "Renew stream link if expired" : "Renovar link do stream se estiver expirado")}
+                      >
+                        <RefreshCw size={13} className="text-violet-400" />
+                        <span>{t.renewBtn || (isEn ? "Renew Stream" : "Renovar Stream")}</span>
+                      </button>
+                    )}
 
                     {video.storageLocation === 'stream_url' && (
                       <button
@@ -1394,6 +1636,64 @@ export const VideosView: React.FC = () => {
                         </button>
                       );
                     })()}
+
+                    {!isVideoHuggingFace(video) && !isVideoWebOrigin(video) && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setActiveMenuVideoId(null);
+                          try {
+                            addNotification({
+                              type: 'info',
+                              title: 'Hugging Face Backup',
+                              message: (t.backupSingleStarted || (isEn
+                                ? 'Starting backup of "{title}" to Hugging Face...'
+                                : 'Iniciando backup de "{title}" para o Hugging Face...'))
+                                .replace('{title}', video.title || video.filename)
+                            });
+                            const res = await backendApi.uploadVideoToHf(video.id);
+                            if (res && res.success) {
+                              addNotification({
+                                type: 'success',
+                                title: 'Hugging Face Backup',
+                                message: res.message || (t.backupBatchQueued || (isEn ? 'Upload started in background.' : 'Upload iniciado em segundo plano.'))
+                              });
+                            } else {
+                              addNotification({
+                                type: 'error',
+                                title: 'Hugging Face Backup',
+                                message: res?.message || (isEn ? 'Failed to upload to Hugging Face.' : 'Falha ao enviar para o Hugging Face.')
+                              });
+                            }
+                          } catch (err: any) {
+                            addNotification({
+                              type: 'error',
+                              title: 'Hugging Face Backup',
+                              message: err?.message || (isEn ? 'Failed to upload to Hugging Face.' : 'Falha ao enviar para o Hugging Face.')
+                            });
+                          }
+                        }}
+                        className="w-full px-3 py-1.5 rounded-xl hover:bg-white/10 text-left text-xs text-purple-300 flex items-center gap-2 cursor-pointer"
+                        title={t.backupToHf || (isEn ? "Backup to Hugging Face" : "Fazer Backup no Hugging Face")}
+                      >
+                        <Globe size={13} className="text-purple-400" />
+                        <span>{t.backupToHf || (isEn ? "Backup to Hugging Face" : "Fazer Backup no Hugging Face")}</span>
+                      </button>
+                    )}
+
+                    {video.cloudUrl && (
+                      <a
+                        href={video.cloudUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={() => setActiveMenuVideoId(null)}
+                        className="w-full px-3 py-1.5 rounded-xl hover:bg-white/10 text-left text-xs text-purple-300 flex items-center gap-2 cursor-pointer"
+                        title={t.openInHf || (isEn ? "Open in Hugging Face Hub" : "Abrir no Hugging Face")}
+                      >
+                        <ExternalLink size={13} className="text-purple-400" />
+                        <span>{t.openInHf || (isEn ? "Open in Hugging Face" : "Abrir no Hugging Face")}</span>
+                      </a>
+                    )}
 
                     <div className="h-px bg-border my-0.5" />
 
@@ -1572,6 +1872,72 @@ export const VideosView: React.FC = () => {
                   className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-lg shadow-rose-600/30 transition-colors"
                 >
                   {t.delete}
+                </button>
+              </div>
+            </div>
+          </div>
+        </ModalPortal>
+      )}
+
+      {/* Deleted on Source Platform Notice & Action Modal */}
+      {deletedNoticeVideo && (
+        <ModalPortal>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="deleted-video-dialog-title"
+            className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in select-none"
+            onClick={() => setDeletedNoticeVideo(null)}
+          >
+            <div
+              className="bg-slate-900 border border-rose-500/50 rounded-3xl p-6 max-w-md w-full text-center space-y-4 shadow-2xl animate-scale-up"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="mx-auto flex justify-center">
+                <IconBadge variant="rose" size="lg">
+                  <AlertTriangle size={24} className="text-rose-400" />
+                </IconBadge>
+              </div>
+              <div>
+                <h4 id="deleted-video-dialog-title" className="font-bold text-base text-white">
+                  {isEn ? "Video Removed on Source Platform" : "Vídeo Removido no Site de Origem"}
+                </h4>
+                <p className="text-xs text-rose-300/90 font-medium mt-1 truncate max-w-xs mx-auto" title={deletedNoticeVideo.title}>
+                  {deletedNoticeVideo.title}
+                </p>
+                <div className="mt-3 p-3.5 rounded-2xl bg-rose-950/40 border border-rose-500/30 text-[11px] text-slate-300 text-left space-y-2">
+                  <p>
+                    {isEn
+                      ? "The original hosting platform took down or deleted this video file (typically due to DMCA copyright requests or removal by the original uploader)."
+                      : "A plataforma original onde o vídeo estava hospedado removeu este arquivo (normalmente por reivindicação de direitos autorais/DMCA ou exclusão pelo autor original)."}
+                  </p>
+                  <p className="text-slate-400">
+                    {isEn
+                      ? "Since the source file no longer exists on the web, it cannot be streamed or downloaded anymore. You can safely send it to Trash."
+                      : "Como o arquivo original não existe mais na web, não é possível reproduzi-lo nem baixá-lo. Você pode movê-lo com segurança para a Lixeira."}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2.5 pt-2">
+                <button
+                  type="button"
+                  autoFocus
+                  onClick={() => setDeletedNoticeVideo(null)}
+                  className="flex-1 py-2.5 rounded-xl bg-surface hover:bg-surface-elevated text-slate-300 text-xs font-semibold border border-border transition-colors"
+                >
+                  {t.cancel || (isEn ? "Close" : "Fechar")}
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const videoToTrash = deletedNoticeVideo;
+                    setDeletedNoticeVideo(null);
+                    await deleteVideo(videoToTrash.id);
+                  }}
+                  className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-lg shadow-rose-600/30 transition-all flex items-center justify-center gap-1.5"
+                >
+                  <Trash2 size={14} />
+                  <span>{isEn ? "Move to Trash" : "Mover para Lixeira"}</span>
                 </button>
               </div>
             </div>
@@ -1925,7 +2291,11 @@ export const VideosView: React.FC = () => {
                 <span>{t.importPc || (isEn ? 'Instant Import from PC' : 'Importação Instantânea do PC')}</span>
               </h3>
               <p className="text-xs text-slate-400 mb-4">
-                Cole o caminho de um arquivo de vídeo (ex: <code className="bg-surface px-1 text-slate-300">C:\Users\...\video.mp4</code>) ou de uma pasta inteira. O arquivo será importado em milissegundos sem demora de rede.
+                {isEn ? (
+                  <>Paste the path to a video file (e.g. <code className="bg-surface px-1 text-slate-300">C:\Users\...\video.mp4</code>) or an entire folder. It will be imported in milliseconds without network transfer delay.</>
+                ) : (
+                  <>Cole o caminho de um arquivo de vídeo (ex: <code className="bg-surface px-1 text-slate-300">C:\Users\...\video.mp4</code>) ou de uma pasta inteira. O arquivo será importado em milissegundos sem demora de rede.</>
+                )}
               </p>
 
               <form onSubmit={handleImportLocalSubmit} className="space-y-4">
@@ -1936,7 +2306,7 @@ export const VideosView: React.FC = () => {
                   <input
                     type="text"
                     required
-                    placeholder="Ex: C:\Users\jardi\Videos\meuvideo.mp4 ou D:\Filmes"
+                    placeholder={isEn ? "Ex: C:\\Users\\user\\Videos\\myvideo.mp4 or D:\\Movies" : "Ex: C:\\Users\\jardi\\Videos\\meuvideo.mp4 ou D:\\Filmes"}
                     value={localPathInput}
                     onChange={(e) => setLocalPathInput(e.target.value)}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-surface border border-border text-slate-100 text-xs focus:border-emerald-500 focus:outline-none"
@@ -1978,7 +2348,7 @@ export const VideosView: React.FC = () => {
                 <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-[11px] text-emerald-300 flex items-start gap-2">
                   <HardDrive size={14} className="shrink-0 mt-0.5" />
                   <span>
-                    <strong>Super Rápido:</strong> Ao importar direto do disco, o sistema não precisa transferir os dados pelo navegador, economizando 100% do tempo de envio.
+                    <strong>{isEn ? "Ultra Fast:" : "Super Rápido:"}</strong> {isEn ? "Importing directly from disk bypasses browser uploads, saving 100% of network transfer time." : "Ao importar direto do disco, o sistema não precisa transferir os dados pelo navegador, economizando 100% do tempo de envio."}
                   </span>
                 </div>
 
@@ -1989,7 +2359,7 @@ export const VideosView: React.FC = () => {
                     onClick={() => setIsLocalImportModalOpen(false)}
                     className="px-4 py-2 rounded-xl bg-surface hover:bg-surface-hover text-slate-300 text-xs font-semibold transition-colors"
                   >
-                    Cancelar
+                    {t.cancel || (isEn ? "Cancel" : "Cancelar")}
                   </button>
                   <button
                     type="submit"
@@ -1999,12 +2369,12 @@ export const VideosView: React.FC = () => {
                     {isImportingLocal ? (
                       <>
                         <RefreshCw size={14} className="animate-spin" />
-                        <span>Processando...</span>
+                        <span>{isEn ? "Processing..." : "Processando..."}</span>
                       </>
                     ) : (
                       <>
                         <Zap size={14} />
-                        <span>Importar Imediatamente</span>
+                        <span>{isEn ? "Import Immediately" : "Importar Imediatamente"}</span>
                       </>
                     )}
                   </button>

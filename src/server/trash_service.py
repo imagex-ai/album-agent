@@ -5,19 +5,28 @@ across photos, albums, and videos.
 """
 
 import os
+import sys
 import shutil
 import json
 import time
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
+# Determina a pasta raiz garantindo funcionamento dentro do executável (.exe) ou script Python
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+    if os.path.basename(BASE_DIR).lower() == "dist":
+        BASE_DIR = os.path.dirname(BASE_DIR)
+else:
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
+
 
 class TrashService:
     def __init__(self, data_dir: Optional[str] = None):
         if data_dir is None:
-            data_dir = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data"
-            )
+            data_dir = DEFAULT_DATA_DIR
         self.data_dir = os.path.abspath(data_dir)
         self.trash_dir = os.path.join(self.data_dir, "trash")
         self.trash_videos_dir = os.path.join(self.trash_dir, "videos")
@@ -29,6 +38,7 @@ class TrashService:
 
         os.makedirs(self.trash_videos_dir, exist_ok=True)
         os.makedirs(self.trash_albums_dir, exist_ok=True)
+        self._last_hf_sync = 0.0
 
         # Restaura metadados da lixeira do Hugging Face se o disco do Render tiver resetado
         self._ensure_trash_restored()
@@ -68,13 +78,16 @@ class TrashService:
         except Exception as e:
             print(f"Error saving trash metadata: {e}")
 
-        # Espelha metadados da lixeira no Hugging Face em thread desacoplada
+        # Espelha metadados da lixeira no Hugging Face em thread desacoplada (com throttling)
         try:
             import threading
             from .video_service import cloud_storage
-            if cloud_storage.is_connected():
+            now = time.time()
+            if cloud_storage.is_connected() and (now - getattr(self, "_last_hf_sync", 0.0) >= 5.0):
+                self._last_hf_sync = now
+                snapshot = dict(data)
                 def _sync_trash():
-                    cloud_storage.upload_json(data, "metadata/trash_metadata.json")
+                    cloud_storage.upload_json(snapshot, "metadata/trash_metadata.json")
                 t = threading.Thread(target=_sync_trash, daemon=True)
                 t.start()
         except Exception as e:
@@ -107,8 +120,8 @@ class TrashService:
     # MOVE TO TRASH
     # -------------------------------------------------------------
 
-    def move_video_to_trash(self, video_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Moves a physical video file into data/trash/videos/ and registers it in trash metadata."""
+    def _prepare_video_trash_item(self, video_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Prepares a video trash dictionary and moves local file if present, without persisting metadata."""
         video_id = video_dict.get("id")
         if not video_id:
             return None
@@ -123,7 +136,7 @@ class TrashService:
         trash_filename = f"{video_id}_{filename}"
         dst_path = os.path.join(self.trash_videos_dir, trash_filename)
 
-        # Se existir arquivo físico local, move. Se for remoto (HF/cloud), apenas registra na lixeira
+        # Se existir arquivo físico local, move. Se for remoto (HF/cloud) ou stream_url, apenas registra na lixeira
         if src_path and os.path.exists(src_path):
             try:
                 shutil.move(src_path, dst_path)
@@ -133,14 +146,26 @@ class TrashService:
         else:
             dst_path = ""
 
+        # Safe computation of file_size_bytes: avoid calling os.path.getsize when dst_path is empty or missing
+        size_bytes = video_dict.get("file_size_bytes") or 0
+        if not size_bytes and dst_path and os.path.exists(dst_path):
+            try:
+                size_bytes = os.path.getsize(dst_path)
+            except Exception:
+                size_bytes = 0
+
+        storage_loc = video_dict.get("storage_location") or (
+            "local" if dst_path and os.path.exists(dst_path) else "stream_url" if video_dict.get("custom_stream_url") or video_dict.get("stream_url") else "huggingface"
+        )
+
         trash_id = f"trash_vid_{video_id}"
         item: Dict[str, Any] = {
             "id": trash_id,
             "type": "video",
             "title": video_dict.get("title", filename),
             "original_location": f"Folder: {video_dict.get('folder', 'General')}",
-            "file_size_bytes": video_dict.get("file_size_bytes") or os.path.getsize(dst_path),
-            "thumbnail_url": f"/api/videos/{video_id}/thumbnail",
+            "file_size_bytes": size_bytes,
+            "thumbnail_url": video_dict.get("thumbnail_url") or f"/api/videos/{video_id}/thumbnail",
             "stream_url": f"/api/trash/videos/{trash_id}/stream",
             "deleted_at": datetime.now(timezone.utc).isoformat(),
             "metadata": {
@@ -152,17 +177,50 @@ class TrashService:
                 "created_at": video_dict.get("created_at", ""),
                 "width": video_dict.get("width", 0),
                 "height": video_dict.get("height", 0),
-                "duration": video_dict.get("duration", 0),
-                "storage_location": video_dict.get("storage_location", "huggingface"),
+                "fps": video_dict.get("fps", 0),
+                "duration": video_dict.get("duration") or video_dict.get("duration_seconds", 0),
+                "duration_seconds": video_dict.get("duration_seconds") or video_dict.get("duration", 0),
+                "intro_end": video_dict.get("intro_end", 0.0),
+                "highlight_start": video_dict.get("highlight_start", 0.0),
+                "highlight_end": video_dict.get("highlight_end", 0.0),
+                "highlight_score": video_dict.get("highlight_score", 0.0),
+                "highlights": video_dict.get("highlights", []),
+                "heatmap_data": video_dict.get("heatmap_data"),
+                "storage_location": storage_loc,
                 "cloud_url": video_dict.get("cloud_url"),
+                "custom_stream_url": video_dict.get("custom_stream_url") or video_dict.get("stream_url"),
+                "source_url": video_dict.get("source_url"),
+                "source_id": video_dict.get("source_id"),
+                "source_thumbnail_url": video_dict.get("source_thumbnail_url"),
+                "source_origin": video_dict.get("source_origin") or ("web" if storage_loc == "stream_url" else "pc"),
                 "rel_path": video_dict.get("rel_path", f"{video_dict.get('folder', 'Geral')}/{filename}"),
             },
         }
+        return item
+
+    def move_video_to_trash(self, video_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Moves a physical video file into data/trash/videos/ and registers it in trash metadata."""
+        item = self._prepare_video_trash_item(video_dict)
+        if not item:
+            return None
 
         meta = self._load_meta()
-        meta[trash_id] = item
+        meta[item["id"]] = item
         self._save_meta(meta)
         return item
+
+    def move_videos_to_trash_batch(self, video_dicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Moves multiple videos to trash atomically in a single metadata save."""
+        meta = self._load_meta()
+        created_items = []
+        for v in video_dicts:
+            item = self._prepare_video_trash_item(v)
+            if item:
+                meta[item["id"]] = item
+                created_items.append(item)
+        if created_items:
+            self._save_meta(meta)
+        return created_items
 
     def move_album_to_trash(self, session_id: str, album_summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Moves an entire album JSON into data/trash/albums/ and registers it in trash metadata."""
@@ -264,12 +322,12 @@ class TrashService:
             folder = item_meta.get("folder", "Geral")
             orig_id = item_meta.get("original_video_id")
 
-            src_path = os.path.join(self.trash_videos_dir, trash_filename)
+            src_path = os.path.join(self.trash_videos_dir, trash_filename) if trash_filename else ""
             dst_folder = os.path.join(self.videos_dir, folder)
             os.makedirs(dst_folder, exist_ok=True)
-            dst_path = os.path.join(dst_folder, orig_filename)
+            dst_path = os.path.join(dst_folder, orig_filename) if orig_filename else ""
 
-            if os.path.exists(src_path):
+            if src_path and os.path.exists(src_path) and dst_path:
                 try:
                     shutil.move(src_path, dst_path)
                 except Exception as e:
@@ -281,6 +339,10 @@ class TrashService:
 
             v_meta = video_service._load_metadata()
             rel_path = item_meta.get("rel_path") or f"{folder}/{orig_filename}"
+            storage_loc = item_meta.get("storage_location") or (
+                "local" if dst_path and os.path.exists(dst_path) else "stream_url" if item_meta.get("custom_stream_url") else "huggingface"
+            )
+
             v_meta[orig_id] = {
                 "id": orig_id,
                 "title": item.get("title", orig_filename),
@@ -290,10 +352,23 @@ class TrashService:
                 "created_at": item_meta.get("created_at", datetime.now(timezone.utc).isoformat()),
                 "width": item_meta.get("width", 0),
                 "height": item_meta.get("height", 0),
+                "fps": item_meta.get("fps", 0),
                 "duration": item_meta.get("duration", 0),
-                "storage_location": item_meta.get("storage_location", "huggingface"),
+                "duration_seconds": item_meta.get("duration_seconds") or item_meta.get("duration", 0),
+                "intro_end": item_meta.get("intro_end", 0.0),
+                "highlight_start": item_meta.get("highlight_start", 0.0),
+                "highlight_end": item_meta.get("highlight_end", 0.0),
+                "highlight_score": item_meta.get("highlight_score", 0.0),
+                "highlights": item_meta.get("highlights", []),
+                "heatmap_data": item_meta.get("heatmap_data"),
+                "storage_location": storage_loc,
                 "cloud_url": item_meta.get("cloud_url"),
                 "file_size_bytes": item.get("file_size_bytes", 0),
+                "custom_stream_url": item_meta.get("custom_stream_url"),
+                "source_url": item_meta.get("source_url"),
+                "source_id": item_meta.get("source_id"),
+                "source_thumbnail_url": item_meta.get("source_thumbnail_url"),
+                "source_origin": item_meta.get("source_origin") or ("web" if storage_loc == "stream_url" else "pc"),
             }
             video_service._save_metadata(v_meta)
 
@@ -377,28 +452,30 @@ class TrashService:
                     except Exception as e:
                         print(f"Error permanently deleting local video file: {e}")
 
-            # 2. Apaga fisicamente do Hugging Face para liberar espaço na nuvem
-            try:
-                from .video_service import cloud_storage
-                if cloud_storage.is_connected():
-                    rel_path = item_meta.get("rel_path")
-                    if rel_path:
-                        hf_repo_path = f"videos/{rel_path}"
-                        deleted_hf = cloud_storage.delete_file(hf_repo_path)
-                        if deleted_hf:
-                            print(f"[TrashService] Arquivo deletado permanentemente do HF: {hf_repo_path}")
-            except Exception as e:
-                print(f"[TrashService] Error deleting file from Hugging Face: {e}")
+            # 2. Apaga fisicamente do Hugging Face para liberar espaço na nuvem (se aplicável, ignorando stream_url puro)
+            if item_meta.get("storage_location") != "stream_url":
+                try:
+                    from .video_service import cloud_storage
+                    if cloud_storage.is_connected():
+                        rel_path = item_meta.get("rel_path")
+                        if rel_path:
+                            hf_repo_path = f"videos/{rel_path}"
+                            deleted_hf = cloud_storage.delete_file(hf_repo_path)
+                            if deleted_hf:
+                                print(f"[TrashService] Arquivo deletado permanentemente do HF: {hf_repo_path}")
+                except Exception as e:
+                    print(f"[TrashService] Error deleting file from Hugging Face: {e}")
 
-            # 3. Deleta thumbnail em cache se houver
+            # 3. Deleta thumbnail em cache se houver (.jpg e .webp)
             orig_id = item_meta.get("original_video_id")
             if orig_id:
-                thumb_path = os.path.join(self.videos_dir, ".thumbnails", f"{orig_id}.jpg")
-                if os.path.exists(thumb_path):
-                    try:
-                        os.remove(thumb_path)
-                    except Exception:
-                        pass
+                for ext in [".jpg", ".webp"]:
+                    thumb_path = os.path.join(self.videos_dir, ".thumbnails", f"{orig_id}{ext}")
+                    if os.path.exists(thumb_path):
+                        try:
+                            os.remove(thumb_path)
+                        except Exception:
+                            pass
 
         elif item_type == "album":
             session_id = item_meta.get("session_id")

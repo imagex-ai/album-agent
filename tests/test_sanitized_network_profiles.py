@@ -215,6 +215,7 @@ def test_dynamic_origin_preservation_for_any_domain():
 async def test_relaunch_job_in_place_sanitizes_and_queues(monkeypatch, tmp_path):
     from src.server import server
 
+    monkeypatch.setattr(server.video_service, "base_dir", str(tmp_path / "videos"))
     fake_jid = "save_vid_test_999"
     fake_target = str(tmp_path / "Save Video Save Video Sample Clip.mp4")
 
@@ -280,6 +281,7 @@ async def test_relaunch_job_in_place_sanitizes_and_queues(monkeypatch, tmp_path)
 async def test_relaunch_job_resets_stale_99_when_file_missing(monkeypatch, tmp_path):
     from src.server import server
 
+    monkeypatch.setattr(server.video_service, "base_dir", str(tmp_path / "videos"))
     fake_jid = "save_vid_stale_99"
     missing_target = str(tmp_path / "Missing_File_After_Error.mp4")
 
@@ -335,6 +337,88 @@ async def test_relaunch_job_resets_stale_99_when_file_missing(monkeypatch, tmp_p
 
     server._active_jobs.pop(fake_jid, None)
     server._job_controllers.pop(fake_jid, None)
+
+
+def test_trash_service_stream_url_video_lifecycle(tmp_path, monkeypatch):
+    from src.server.trash_service import TrashService
+    from src.server.video_service import VideoService
+
+    monkeypatch.setattr(TrashService, "_ensure_trash_restored", lambda self: None)
+    monkeypatch.setattr(VideoService, "_ensure_restored_from_hf", lambda self: None, raising=False)
+
+    test_data_dir = tmp_path / "data"
+    test_trash = TrashService(data_dir=str(test_data_dir))
+    test_video_service = VideoService(base_dir=str(test_data_dir / "videos"))
+
+    # Mock video_service inside trash_service restore_item
+    monkeypatch.setattr("src.server.video_service.video_service", test_video_service)
+
+    fake_stream_vid = {
+        "id": "stream_test_vid_123",
+        "title": "Documentary Video Stream",
+        "filename": "remote_stream_test_vid_123.mp4",
+        "folder": "Online Streams",
+        "file_size_bytes": 0,
+        "storage_location": "stream_url",
+        "stream_url": "https://example.com/media/stream_sample.mp4",
+        "custom_stream_url": "/api/proxy-video-stream?url=https%3A//example.com/media/stream_sample.mp4",
+        "source_url": "https://example.com/watch/video-123",
+        "source_id": "video-123",
+        "source_thumbnail_url": "https://example.com/thumbs/sample.jpg",
+        "source_origin": "web",
+        "full_path": None,
+        "rel_path": "Online Streams/remote_stream_test_vid_123.mp4",
+        "highlight_start": 42.0,
+        "highlight_end": 77.0,
+        "highlight_score": 88.0,
+        "highlights": [{"id": "hl_gold", "start": 42.0, "end": 77.0}],
+    }
+
+    # 1. Move to trash should succeed without FileNotFoundError on dst_path = ""
+    item = test_trash.move_video_to_trash(fake_stream_vid)
+    assert item is not None
+    assert item["id"] == "trash_vid_stream_test_vid_123"
+    assert item["type"] == "video"
+    assert item["file_size_bytes"] == 0
+    assert item["metadata"]["storage_location"] == "stream_url"
+    assert item["metadata"]["custom_stream_url"] == "/api/proxy-video-stream?url=https%3A//example.com/media/stream_sample.mp4"
+    assert item["metadata"]["source_url"] == "https://example.com/watch/video-123"
+    assert item["metadata"]["highlight_start"] == 42.0
+    assert item["metadata"]["highlights"] == [{"id": "hl_gold", "start": 42.0, "end": 77.0}]
+
+    # 2. Stats should reflect 1 video
+    stats = test_trash.get_stats()
+    assert stats["videos_count"] == 1
+    assert stats["total_items"] == 1
+
+    # 3. Restore item and verify smart highlights are restored
+    restored = test_trash.restore_item("trash_vid_stream_test_vid_123")
+    assert restored is not None
+    meta = test_video_service._load_metadata()
+    assert "stream_test_vid_123" in meta
+    restored_entry = meta["stream_test_vid_123"]
+    assert restored_entry["storage_location"] == "stream_url"
+    assert restored_entry["custom_stream_url"] == "/api/proxy-video-stream?url=https%3A//example.com/media/stream_sample.mp4"
+    assert restored_entry["source_url"] == "https://example.com/watch/video-123"
+    assert restored_entry["highlight_start"] == 42.0
+    assert restored_entry["highlights"] == [{"id": "hl_gold", "start": 42.0, "end": 77.0}]
+
+    # 4. Test move_video on stream video without local file
+    moved = test_video_service.move_video("stream_test_vid_123", "NewCategory")
+    assert moved is not None
+    assert moved["folder"] == "NewCategory"
+    assert moved["rel_path"] == "NewCategory/remote_stream_test_vid_123.mp4"
+
+    # 5. Test move_videos_to_trash_batch
+    batch_items = test_trash.move_videos_to_trash_batch([moved])
+    assert len(batch_items) == 1
+    assert batch_items[0]["id"] == "trash_vid_stream_test_vid_123"
+
+    # 6. Permanently delete
+    deleted_ok = test_trash.permanent_delete_item("trash_vid_stream_test_vid_123")
+    assert deleted_ok is True
+    assert test_trash.get_stats()["total_items"] == 0
+
 
 
 

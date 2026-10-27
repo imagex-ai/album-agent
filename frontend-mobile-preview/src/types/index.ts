@@ -407,6 +407,8 @@ export interface VideoItem {
   highlightEnd?: number;
   highlightScore?: number;
   highlights?: VideoHighlight[];
+  streamStatus?: 'ok' | 'expired' | 'deleted_on_source';
+  streamError?: string;
 }
 
 export interface StorageAnalytics {
@@ -486,6 +488,7 @@ export interface ScannedVideoItem {
   height?: number;
   width?: number;
   resolution?: string;
+  page_found?: number;
 }
 
 export interface ScanPageVideosResponse {
@@ -498,6 +501,7 @@ export interface ScanPageVideosResponse {
   already_saved_count?: number;
   new_videos_count?: number;
   album_id: string;
+  pages_scanned?: number;
   videos: ScannedVideoItem[];
 }
 

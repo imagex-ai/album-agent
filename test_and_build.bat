@@ -58,13 +58,19 @@ if exist "frontend-mobile-preview" (
 )
 echo.
 
-echo [4/5] Verifying Playwright and browser dependencies...
-python -c "import playwright" >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Installing Playwright dependencies...
-    python -m pip install -r requirements.txt
+echo [4/5] Installing Python and build dependencies...
+python -m pip install -r requirements-build.txt
+if errorlevel 1 (
+    echo [ERROR] Python dependency installation failed!
+    pause
+    exit /b 1
 )
-python -m playwright install chromium >nul 2>&1
+python -m playwright install chromium
+if errorlevel 1 (
+    echo [ERROR] Chromium installation failed!
+    pause
+    exit /b 1
+)
 echo [OK] Playwright / Chromium engine ready!
 echo.
 
@@ -87,7 +93,7 @@ if "%CHOICE%"=="2" (
 
 echo.
 echo [5/5] Building standalone executable with PyInstaller...
-python -m PyInstaller --clean --onefile --noconsole --paths . --collect-all src --collect-all webview --collect-all playwright --add-data "frontend-mobile-preview/dist;frontend-mobile-preview/dist" --hidden-import=uvicorn.logging --hidden-import=uvicorn.loops.auto --hidden-import=uvicorn.protocols.http.auto --hidden-import=uvicorn.lifespan.on src/main.py
+python -m PyInstaller main.spec --noconfirm
 
 if %errorlevel% neq 0 (
     echo.
@@ -98,6 +104,6 @@ if %errorlevel% neq 0 (
 
 echo.
 echo ==============================================================
-echo  SUCCESS! Executable built and available at: dist\main.exe
+echo  SUCCESS! Executable built and available at: dist\IMAGEX_AI.exe
 echo ==============================================================
 pause

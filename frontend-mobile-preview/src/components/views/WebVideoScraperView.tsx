@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   Film,
   Search,
@@ -66,9 +66,20 @@ export const WebVideoScraperView: React.FC = () => {
   const selectedAlbumIds: string[] = webScraperState.selectedAlbumIds || [];
 
   const [isScanning, setIsScanning] = useState(false);
+  const [scanProgressInfo, setScanProgressInfo] = useState<string | null>(null);
+  const scanAbortControllerRef = useRef<AbortController | null>(null);
   const [scanningSubAlbumUrl, setScanningSubAlbumUrl] = useState<string | null>(null);
   const [isBatchSaving, setIsBatchSaving] = useState(false);
   const [limit, setLimit] = useState<number | ''>('');
+  const [maxPages, setMaxPages] = useState<number | ''>('');
+
+  useEffect(() => {
+    return () => {
+      if (scanAbortControllerRef.current) {
+        scanAbortControllerRef.current.abort();
+      }
+    };
+  }, []);
   const [playingVideoId, setPlayingVideoId] = useState<string | null>(null);
   const [savingSingleId, setSavingSingleId] = useState<string | null>(null);
   const [showDuplicateModal, setShowDuplicateModal] = useState(false);
@@ -96,19 +107,34 @@ export const WebVideoScraperView: React.FC = () => {
     setWebScraperState({ url: val });
   };
 
+  // High-performance gallery lookup index (O(1) lookups instead of O(N*M) per frame)
+  const existingGalleryLookup = useMemo(() => {
+    const idSet = new Set<string>();
+    const urlSet = new Set<string>();
+    const titleSet = new Set<string>();
+
+    for (const v of videos) {
+      if (v.id) idSet.add(v.id);
+      if ((v as any).source_id) idSet.add((v as any).source_id);
+      if (v.filename) idSet.add(v.filename);
+      if ((v as any).source_url) urlSet.add((v as any).source_url.toLowerCase().trim());
+      if ((v as any).url) urlSet.add((v as any).url.toLowerCase().trim());
+      if (v.title) titleSet.add(v.title.toLowerCase().trim());
+    }
+    return { idSet, urlSet, titleSet };
+  }, [videos]);
+
   const isVideoSavedInGallery = (item: ScannedVideoItem) => {
     if (item.already_saved) return true;
+    if (item.id && existingGalleryLookup.idSet.has(item.id)) return true;
+    if (item.url && existingGalleryLookup.urlSet.has(item.url.toLowerCase().trim())) return true;
+    if (item.title && existingGalleryLookup.titleSet.has(item.title.toLowerCase().trim())) return true;
     const status = checkItemSavedStatus({
       url: item.url || item.stream_url,
       title: item.title,
       mediaType: 'video'
     });
-    if (status.isSaved) return true;
-    return videos.some(v =>
-      (item.id && ((v as any).source_id === item.id || v.id === item.id || (v.filename && v.filename.includes(item.id)))) ||
-      (item.url && (v as any).source_url === item.url) ||
-      (v.title && item.title && v.title.toLowerCase().trim() === item.title.toLowerCase().trim())
-    );
+    return Boolean(status && status.isSaved);
   };
 
   // In-page duplicate detection map (canonical fingerprint)
@@ -124,22 +150,112 @@ export const WebVideoScraperView: React.FC = () => {
     return counts;
   }, [scanResult]);
 
-  const mainVideos = scanResult ? scanResult.videos.filter(v => v.is_primary !== false && v.section !== 'recommended') : [];
-  const recommendedVideos = scanResult ? scanResult.videos.filter(v => v.is_primary === false || v.section === 'recommended') : [];
-  const allVideos = scanResult ? scanResult.videos : [];
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
 
-  const displayedVideos = activeTab === 'main'
-    ? mainVideos
-    : activeTab === 'recommended'
-    ? recommendedVideos
-    : allVideos;
+  const mainVideos = useMemo(() => {
+    return scanResult ? scanResult.videos.filter(v => v.is_primary !== false && v.section !== 'recommended') : [];
+  }, [scanResult]);
 
-  const displayedIds = displayedVideos.map(v => v.id);
-  const isAllDisplayedSelected = displayedIds.length > 0 && displayedIds.every(id => selectedIds.includes(id));
-  const newDisplayedVideos = displayedVideos.filter(v => !isVideoSavedInGallery(v));
+  const recommendedVideos = useMemo(() => {
+    return scanResult ? scanResult.videos.filter(v => v.is_primary === false || v.section === 'recommended') : [];
+  }, [scanResult]);
 
-  const totalSavedCount = scanResult ? scanResult.videos.filter(v => isVideoSavedInGallery(v)).length : 0;
-  const totalNewCount = scanResult ? (scanResult.videos.length - totalSavedCount) : 0;
+  const allVideos = useMemo(() => {
+    return scanResult ? scanResult.videos : [];
+  }, [scanResult]);
+
+  const displayedVideos = useMemo(() => {
+    return activeTab === 'main'
+      ? mainVideos
+      : activeTab === 'recommended'
+      ? recommendedVideos
+      : allVideos;
+  }, [activeTab, mainVideos, recommendedVideos, allVideos]);
+
+  // Progressive infinite scroll windowing (48 items per slice to eliminate DOM freezing)
+  const [visibleCount, setVisibleCount] = useState(48);
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setVisibleCount(48);
+  }, [activeTab, url, viewLayout]);
+
+  const visibleVideos = useMemo(() => {
+    return displayedVideos.slice(0, visibleCount);
+  }, [displayedVideos, visibleCount]);
+
+  useEffect(() => {
+    if (!loadMoreSentinelRef.current) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting && displayedVideos.length > visibleCount) {
+        setVisibleCount(prev => prev + 48);
+      }
+    }, { rootMargin: '400px' });
+
+    observer.observe(loadMoreSentinelRef.current);
+    return () => observer.disconnect();
+  }, [displayedVideos.length, visibleCount]);
+
+  const displayedIds = useMemo(() => displayedVideos.map(v => v.id), [displayedVideos]);
+  const isAllDisplayedSelected = useMemo(() => {
+    return displayedIds.length > 0 && displayedIds.every(id => selectedSet.has(id));
+  }, [displayedIds, selectedSet]);
+
+  const newDisplayedVideos = useMemo(() => {
+    return displayedVideos.filter(v => !isVideoSavedInGallery(v));
+  }, [displayedVideos, existingGalleryLookup]);
+
+  const totalSavedCount = useMemo(() => {
+    if (!scanResult || !scanResult.videos) return 0;
+    return scanResult.videos.filter(v => isVideoSavedInGallery(v)).length;
+  }, [scanResult, existingGalleryLookup]);
+
+  const totalNewCount = useMemo(() => {
+    if (!scanResult || !scanResult.videos) return 0;
+    return scanResult.videos.length - totalSavedCount;
+  }, [scanResult, totalSavedCount]);
+
+  // Progressive infinite scroll for Album Inspector Modal
+  const [inspectorVisibleCount, setInspectorVisibleCount] = useState(48);
+  const inspectorLoadMoreRef = useRef<HTMLDivElement | null>(null);
+
+  const filteredInspectorVideos = useMemo(() => {
+    if (!inspectingAlbum) return [];
+    return inspectingAlbum.videos.filter((vItem) => {
+      if (inspectorSearchQuery.trim()) {
+        const q = inspectorSearchQuery.trim().toLowerCase();
+        if (!(vItem.title || '').toLowerCase().includes(q)) return false;
+      }
+      if (inspectorSectionFilter === 'new') {
+        return !isVideoSavedInGallery(vItem);
+      }
+      if (inspectorSectionFilter === 'hd') {
+        const qHint = (vItem.quality_hint || vItem.resolution || '').toLowerCase();
+        return (vItem.height || 0) >= 720 || qHint.includes('hd') || qHint.includes('1080') || qHint.includes('720') || qHint.includes('4k') || !vItem.height;
+      }
+      return true;
+    });
+  }, [inspectingAlbum, inspectorSearchQuery, inspectorSectionFilter, existingGalleryLookup]);
+
+  useEffect(() => {
+    setInspectorVisibleCount(48);
+  }, [inspectingAlbumId, inspectorSearchQuery, inspectorSectionFilter]);
+
+  const visibleInspectorVideos = useMemo(() => {
+    return filteredInspectorVideos.slice(0, inspectorVisibleCount);
+  }, [filteredInspectorVideos, inspectorVisibleCount]);
+
+  useEffect(() => {
+    if (!inspectorLoadMoreRef.current) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting && filteredInspectorVideos.length > inspectorVisibleCount) {
+        setInspectorVisibleCount(prev => prev + 48);
+      }
+    }, { rootMargin: '400px' });
+
+    observer.observe(inspectorLoadMoreRef.current);
+    return () => observer.disconnect();
+  }, [filteredInspectorVideos.length, inspectorVisibleCount]);
 
   // Build VideoAlbums from a scan response and merge with existing albums
   const buildAlbumsFromScan = (
@@ -222,24 +338,102 @@ export const WebVideoScraperView: React.FC = () => {
     if (!cleanUrl) return;
     setWebScraperState({ errorMsg: null });
     setIsScanning(true);
+    setScanProgressInfo(isEn ? 'Connecting...' : 'Conectando...');
     soundEffects.click(settings.soundEnabled);
 
+    if (scanAbortControllerRef.current) {
+      scanAbortControllerRef.current.abort();
+    }
+    const abortCtrl = new AbortController();
+    scanAbortControllerRef.current = abortCtrl;
+
     try {
-      const maxToScan = typeof limit === 'number' && limit > 0 ? limit : 2000;
-      const res = await backendApi.scanPageForVideos(cleanUrl, maxToScan);
-      if (res.success && res.videos && res.videos.length > 0) {
-        const folder = res.suggested_folder || 'Extraídos';
+      const maxToScan = typeof limit === 'number' && limit > 0 ? limit : 5000;
+      const maxPagesNum = typeof maxPages === 'number' && maxPages > 0 ? maxPages : undefined;
+
+      let currentVideos: ScannedVideoItem[] = [];
+      let pageTitle = cleanUrl;
+      let targetFolder = 'Extraídos';
+
+      const res = await backendApi.scanPageForVideosStream(
+        cleanUrl,
+        maxToScan,
+        maxPagesNum,
+        // onPageDiscovered callback -> updates UI in real-time as each page loads!
+        (pageData) => {
+          if (pageData.page_title) pageTitle = pageData.page_title;
+          if (pageData.suggested_folder) targetFolder = pageData.suggested_folder;
+
+          if (pageData.new_videos && pageData.new_videos.length > 0) {
+            currentVideos = [...currentVideos, ...pageData.new_videos];
+
+            const primaryVids = currentVideos.filter(v => v.is_primary !== false && v.section !== 'recommended');
+            const targetVids = primaryVids.length > 0 ? primaryVids : currentVideos;
+            const unsavedTargetIds = targetVids
+              .filter((v: ScannedVideoItem) => !v.already_saved && !isVideoSavedInGallery(v))
+              .map(v => v.id);
+
+            const { nextAlbums, nextSelectedAlbumIds } = buildAlbumsFromScan(
+              cleanUrl,
+              pageTitle,
+              targetFolder,
+              currentVideos,
+              appendAsNewAlbum
+            );
+
+            setWebScraperState({
+              scanResult: {
+                success: true,
+                page_title: pageTitle,
+                suggested_folder: targetFolder,
+                total_found: currentVideos.length,
+                main_count: primaryVids.length,
+                recommended_count: currentVideos.length - primaryVids.length,
+                already_saved_count: currentVideos.filter(v => v.already_saved).length,
+                new_videos_count: currentVideos.filter(v => !v.already_saved).length,
+                album_id: '',
+                pages_scanned: pageData.pages_scanned,
+                videos: currentVideos
+              },
+              targetFolder: targetFolder,
+              activeTab: 'main',
+              selectedIds: unsavedTargetIds,
+              videoAlbums: nextAlbums,
+              selectedAlbumIds: nextSelectedAlbumIds,
+              errorMsg: null
+            });
+          }
+
+          setScanProgressInfo(
+            isEn
+              ? `Page ${pageData.page_number} (${currentVideos.length} videos)`
+              : `Pág. ${pageData.page_number} (${currentVideos.length} vídeos)`
+          );
+        },
+        // onComplete
+        () => {
+          soundEffects.success(settings.soundEnabled);
+        },
+        // onError
+        (error) => {
+          setWebScraperState({ errorMsg: error });
+          soundEffects.trash(settings.soundEnabled);
+        },
+        abortCtrl.signal
+      );
+
+      // Final synchronization
+      if (res && res.videos && res.videos.length > 0) {
+        const folder = res.suggested_folder || targetFolder || 'Extraídos';
         const primaryVids = res.videos.filter((v: ScannedVideoItem) => v.is_primary !== false && v.section !== 'recommended');
         const targetVids = primaryVids.length > 0 ? primaryVids : res.videos;
-
-        // Smart selection: select ONLY videos that are NOT yet saved!
         const unsavedTargetIds = targetVids
           .filter((v: ScannedVideoItem) => !v.already_saved && !isVideoSavedInGallery(v))
           .map((v: ScannedVideoItem) => v.id);
 
         const { nextAlbums, nextSelectedAlbumIds } = buildAlbumsFromScan(
           cleanUrl,
-          res.page_title || cleanUrl,
+          res.page_title || pageTitle,
           folder,
           res.videos,
           appendAsNewAlbum
@@ -247,16 +441,9 @@ export const WebVideoScraperView: React.FC = () => {
 
         setWebScraperState({
           scanResult: {
-            success: true,
-            page_title: res.page_title || cleanUrl,
-            suggested_folder: folder,
-            total_found: res.total_found || res.videos.length,
-            main_count: res.main_count || primaryVids.length,
-            recommended_count: res.recommended_count || (res.videos.length - primaryVids.length),
-            already_saved_count: res.already_saved_count || 0,
-            new_videos_count: res.new_videos_count || (res.videos.length - (res.already_saved_count || 0)),
-            album_id: res.album_id || '',
-            videos: res.videos
+            ...res,
+            page_title: res.page_title || pageTitle,
+            suggested_folder: folder
           },
           targetFolder: folder,
           activeTab: 'main',
@@ -266,15 +453,18 @@ export const WebVideoScraperView: React.FC = () => {
           errorMsg: null
         });
         soundEffects.success(settings.soundEnabled);
-      } else {
-        setWebScraperState({ errorMsg: res.error || (isEn ? "No videos found on this page." : "Nenhum vídeo encontrado nesta página.") });
+      } else if (currentVideos.length === 0) {
+        setWebScraperState({ errorMsg: res?.error || (isEn ? "No videos found on this page." : "Nenhum vídeo encontrado nesta página.") });
         soundEffects.trash(settings.soundEnabled);
       }
     } catch (err: any) {
-      setWebScraperState({ errorMsg: err.message || (isEn ? "Failed to scan page." : "Falha ao escanear página.") });
-      soundEffects.trash(settings.soundEnabled);
+      if (err.name !== 'AbortError') {
+        setWebScraperState({ errorMsg: err.message || (isEn ? "Failed to scan page." : "Falha ao escanear página.") });
+        soundEffects.trash(settings.soundEnabled);
+      }
     } finally {
       setIsScanning(false);
+      setScanProgressInfo(null);
     }
   };
 
@@ -294,7 +484,7 @@ export const WebVideoScraperView: React.FC = () => {
     setScanningSubAlbumUrl(pageUrl);
     soundEffects.click(settings.soundEnabled);
     try {
-      const res = await backendApi.scanPageForVideos(pageUrl, 200);
+      const res = await backendApi.scanPageForVideos(pageUrl, 200, 1);
       if (res.success && res.videos && res.videos.length > 0) {
         const unsavedIds = res.videos
           .filter((v: ScannedVideoItem) => !v.already_saved && !isVideoSavedInGallery(v))
@@ -758,7 +948,7 @@ export const WebVideoScraperView: React.FC = () => {
       {/* Input URL Section */}
       <div className="glass-panel p-4 sm:p-6 rounded-3xl border border-border space-y-4">
         <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
-          <div className="sm:col-span-6 md:col-span-6 lg:col-span-6 space-y-1.5">
+          <div className="sm:col-span-5 md:col-span-5 lg:col-span-5 space-y-1.5">
             <div className="h-5 flex items-center">
               <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider truncate">
                 {t.urlLabel}
@@ -785,12 +975,29 @@ export const WebVideoScraperView: React.FC = () => {
               max="5000"
               value={limit === '' ? '' : limit}
               onChange={e => setLimit(e.target.value === '' ? '' : Number(e.target.value))}
-              placeholder={t.limitPlaceholder || 'Todos (sem limite)'}
-              title={t.limitTitle || (isEn ? "Leave empty to fetch all videos from page" : "Deixe vazio para buscar todos os vídeos da página")}
+              placeholder={t.limitPlaceholder || (isEn ? 'All (unlimited)' : 'Todos (sem limite)')}
+              title={t.limitTitle || (isEn ? "Leave empty to fetch all videos from page and next pages" : "Deixe vazio para buscar todos os vídeos da página e das próximas")}
               className="w-full h-12 bg-surface-elevated border border-border focus:border-violet-500 text-slate-100 text-xs sm:text-sm rounded-2xl px-3 outline-none transition-colors shadow-inner text-center font-medium"
             />
           </div>
-          <div className="sm:col-span-4 md:col-span-4 lg:col-span-4 flex items-center gap-2">
+          <div className="sm:col-span-2 md:col-span-2 lg:col-span-2 space-y-1.5">
+            <div className="h-5 flex items-center">
+              <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider truncate whitespace-nowrap" title={t.maxPagesTitle || (isEn ? "Max pages to seek (leave empty to scan all next pages)" : "Máximo de páginas para carregar (deixe vazio para todas)")}>
+                {t.maxPagesLabel || (isEn ? "Max Pages:" : "Máx. Páginas:")}
+              </label>
+            </div>
+            <input
+              type="number"
+              min="1"
+              max="100"
+              value={maxPages === '' ? '' : maxPages}
+              onChange={e => setMaxPages(e.target.value === '' ? '' : Number(e.target.value))}
+              placeholder={t.maxPagesPlaceholder || (isEn ? 'All (auto)' : 'Todas (auto)')}
+              title={t.maxPagesTitle || (isEn ? "Scan all next pages of playlist/category (or enter a page limit e.g. 5)" : "Carregar todas as páginas da playlist/categoria (ou defina um limite, ex: 5)")}
+              className="w-full h-12 bg-surface-elevated border border-border focus:border-violet-500 text-slate-100 text-xs sm:text-sm rounded-2xl px-3 outline-none transition-colors shadow-inner text-center font-medium"
+            />
+          </div>
+          <div className="sm:col-span-3 md:col-span-3 lg:col-span-3 flex items-center gap-2">
             <button
               onClick={() => handleScanPage(false)}
               disabled={isScanning || !url.trim()}
@@ -799,7 +1006,7 @@ export const WebVideoScraperView: React.FC = () => {
               {isScanning ? (
                 <>
                   <Loader2 size={16} className="animate-spin shrink-0" />
-                  <span className="truncate">{t.scanningBtn}</span>
+                  <span className="truncate">{scanProgressInfo ? `${t.scanningBtn.replace('...', '')} (${scanProgressInfo})` : t.scanningBtn}</span>
                 </>
               ) : (
                 <>
@@ -808,6 +1015,24 @@ export const WebVideoScraperView: React.FC = () => {
                 </>
               )}
             </button>
+
+            {isScanning && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (scanAbortControllerRef.current) {
+                    scanAbortControllerRef.current.abort();
+                  }
+                  setIsScanning(false);
+                  setScanProgressInfo(null);
+                }}
+                className="h-12 px-3 rounded-2xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 font-bold text-xs flex items-center justify-center gap-1 transition-all cursor-pointer"
+                title={isEn ? "Stop scanning and keep discovered videos" : "Parar busca e manter vídeos carregados"}
+              >
+                <X size={15} />
+                <span className="hidden xl:inline">{isEn ? 'Stop' : 'Parar'}</span>
+              </button>
+            )}
 
             {videoAlbums.length > 0 && (
               <button
@@ -1091,6 +1316,12 @@ export const WebVideoScraperView: React.FC = () => {
               </div>
 
               <div className="flex flex-wrap items-center gap-2.5 text-[11px] text-slate-400 font-medium">
+                {scanResult.pages_scanned && scanResult.pages_scanned > 1 && (
+                  <span className="px-2 py-0.5 rounded-full bg-indigo-950/80 border border-indigo-500/50 text-indigo-300 font-bold flex items-center gap-1 shadow-sm">
+                    <Layers size={11} className="text-indigo-400" />
+                    <span>{t.pagesScannedBadge ? t.pagesScannedBadge.replace('{count}', String(scanResult.pages_scanned)) : `${scanResult.pages_scanned} ${isEn ? 'pages scanned' : 'páginas escaneadas'}`}</span>
+                  </span>
+                )}
                 {totalSavedCount > 0 && (
                   <span className="px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 font-bold flex items-center gap-1 shadow-sm">
                     <Check size={11} className="text-emerald-400" />
@@ -1307,15 +1538,15 @@ export const WebVideoScraperView: React.FC = () => {
       {/* VIEW MODE 2: FLAT VIDEOS GRID */}
       {(viewLayout === 'videos' || videoAlbums.length === 0) && scanResult && (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-          {displayedVideos.map((item, idx) => {
-            const isSelected = selectedIds.includes(item.id);
-            const savedStatus = checkItemSavedStatus({
+          {visibleVideos.map((item, idx) => {
+            const isSelected = selectedSet.has(item.id);
+            const isSaved = isVideoSavedInGallery(item);
+            const savedStatus = isSaved ? checkItemSavedStatus({
               url: item.url || item.stream_url,
               title: item.title,
               mediaType: 'video',
               height: item.height || (item.resolution && parseInt(item.resolution)) || undefined
-            });
-            const isSaved = savedStatus.isSaved;
+            }) : { isSaved: false };
             const isSaving = isVideoSaving(item);
             const isPlaying = playingVideoId === item.id;
             const itemFingerprint = getCanonicalMediaFingerprint(item.title, item.url || item.stream_url, item.height);
@@ -1325,6 +1556,10 @@ export const WebVideoScraperView: React.FC = () => {
               <div
                 key={item.id}
                 onClick={() => handleToggleSelect(item.id)}
+                style={{
+                  contentVisibility: 'auto',
+                  containIntrinsicSize: 'auto 320px',
+                }}
                 className={`group relative glass-panel rounded-2xl border overflow-hidden cursor-pointer transition-all duration-200 flex flex-col justify-between ${
                   isSelected
                     ? 'border-violet-500 ring-2 ring-violet-500/40 shadow-glow-brand bg-surface-elevated'
@@ -1413,6 +1648,13 @@ export const WebVideoScraperView: React.FC = () => {
                   <span className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded-full bg-violet-950/80 backdrop-blur-md border border-violet-500/40 text-[9px] font-mono font-bold text-violet-200">
                     {item.quality_hint || '1080p HD'}
                   </span>
+
+                  {/* Page Found Badge */}
+                  {item.page_found && item.page_found > 1 && (
+                    <span className="absolute bottom-2 left-2 px-1.5 py-0.5 rounded bg-indigo-950/90 backdrop-blur-md text-[9px] font-mono font-bold text-indigo-300 border border-indigo-500/40">
+                      P.{item.page_found}
+                    </span>
+                  )}
                 </div>
 
                 {/* Card Info and Buttons */}
@@ -1459,7 +1701,7 @@ export const WebVideoScraperView: React.FC = () => {
                           isSaving
                             ? t.savingInBackground
                             : isSaved
-                            ? t.savedInFolderTooltip.replace('{folder}', savedStatus.folder || '')
+                            ? t.savedInFolderTooltip.replace('{folder}', (savedStatus as any).folder || '')
                             : t.saveToGalleryTooltip.replace('{folder}', targetFolder)
                         }
                       >
@@ -1507,6 +1749,32 @@ export const WebVideoScraperView: React.FC = () => {
               </div>
             );
           })}
+
+          {/* Progressive Scroll Sentinel and Load More for Flat Video Grid */}
+          {displayedVideos.length > visibleCount && (
+            <div
+              ref={loadMoreSentinelRef}
+              className="col-span-full py-8 flex flex-col items-center justify-center gap-3 border border-dashed border-border/60 rounded-2xl bg-surface/30 mt-2"
+            >
+              <div className="flex items-center gap-2 text-xs font-semibold text-violet-400">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>
+                  {isEn
+                    ? `Showing ${visibleVideos.length} of ${displayedVideos.length} videos...`
+                    : `Exibindo ${visibleVideos.length} de ${displayedVideos.length} vídeos...`}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setVisibleCount(prev => prev + 48)}
+                className="px-4 py-2 rounded-xl bg-surface-elevated hover:bg-surface-hover text-slate-200 border border-border text-xs font-bold transition-all cursor-pointer shadow-sm hover:border-violet-500/40"
+              >
+                {isEn
+                  ? `Load Next 48 (${displayedVideos.length - visibleVideos.length} remaining)`
+                  : `Carregar Mais 48 (${displayedVideos.length - visibleVideos.length} restantes)`}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -1653,41 +1921,31 @@ export const WebVideoScraperView: React.FC = () => {
               {/* Videos Grid inside Album Inspector */}
               <div className="flex-1 overflow-y-auto p-4 sm:p-6">
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                  {inspectingAlbum.videos
-                    .filter((vItem) => {
-                      if (inspectorSearchQuery.trim()) {
-                        const q = inspectorSearchQuery.trim().toLowerCase();
-                        if (!(vItem.title || '').toLowerCase().includes(q)) return false;
-                      }
-                      if (inspectorSectionFilter === 'new') {
-                        return !isVideoSavedInGallery(vItem);
-                      }
-                      if (inspectorSectionFilter === 'hd') {
-                        const qHint = (vItem.quality_hint || vItem.resolution || '').toLowerCase();
-                        return (vItem.height || 0) >= 720 || qHint.includes('hd') || qHint.includes('1080') || qHint.includes('720') || qHint.includes('4k') || !vItem.height;
-                      }
-                      return true;
-                    })
-                    .map((vItem, idx) => {
-                      const isVidSelected = draftAlbumSelectedIds.has(vItem.id);
-                      const isPlaying = playingVideoId === vItem.id;
-                      const isSaving = isVideoSaving(vItem);
-                      const savedStatus = checkItemSavedStatus({
-                        url: vItem.url || vItem.stream_url,
-                        title: vItem.title,
-                        mediaType: 'video'
-                      });
+                  {visibleInspectorVideos.map((vItem, idx) => {
+                    const isVidSelected = draftAlbumSelectedIds.has(vItem.id);
+                    const isPlaying = playingVideoId === vItem.id;
+                    const isSaving = isVideoSaving(vItem);
+                    const isSaved = isVideoSavedInGallery(vItem);
+                    const savedStatus = isSaved ? checkItemSavedStatus({
+                      url: vItem.url || vItem.stream_url,
+                      title: vItem.title,
+                      mediaType: 'video'
+                    }) : { isSaved: false };
 
-                      return (
-                        <div
-                          key={vItem.id}
-                          onClick={() => {
-                            const next = new Set(draftAlbumSelectedIds);
-                            if (next.has(vItem.id)) next.delete(vItem.id);
-                            else next.add(vItem.id);
-                            setDraftAlbumSelectedIds(next);
-                          }}
-                          className={`group relative rounded-2xl border-2 overflow-hidden cursor-pointer transition-all flex flex-col justify-between bg-slate-950 ${
+                    return (
+                      <div
+                        key={vItem.id}
+                        onClick={() => {
+                          const next = new Set(draftAlbumSelectedIds);
+                          if (next.has(vItem.id)) next.delete(vItem.id);
+                          else next.add(vItem.id);
+                          setDraftAlbumSelectedIds(next);
+                        }}
+                        style={{
+                          contentVisibility: 'auto',
+                          containIntrinsicSize: 'auto 320px',
+                        }}
+                        className={`group relative rounded-2xl border-2 overflow-hidden cursor-pointer transition-all flex flex-col justify-between bg-slate-950 ${
                             isVidSelected
                               ? 'border-violet-500 ring-2 ring-violet-500/30 shadow-lg'
                               : 'border-slate-800/80 opacity-65 hover:opacity-95 hover:border-slate-600'
@@ -1735,6 +1993,13 @@ export const WebVideoScraperView: React.FC = () => {
                             <span className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded-full bg-violet-950/80 backdrop-blur-md border border-violet-500/40 text-[9px] font-mono font-bold text-violet-200">
                               {vItem.quality_hint || '1080p HD'}
                             </span>
+
+                            {/* Page Found Badge */}
+                            {vItem.page_found && vItem.page_found > 1 && (
+                              <span className="absolute bottom-2 left-2 px-1.5 py-0.5 rounded bg-indigo-950/90 backdrop-blur-md text-[9px] font-mono font-bold text-indigo-300 border border-indigo-500/40">
+                                P.{vItem.page_found}
+                              </span>
+                            )}
 
                             {/* Play Preview Toggle Button */}
                             {vItem.stream_url && (
@@ -1792,6 +2057,32 @@ export const WebVideoScraperView: React.FC = () => {
                         </div>
                       );
                     })}
+
+                  {/* Progressive Scroll Sentinel and Load More for Inspector Modal */}
+                  {filteredInspectorVideos.length > inspectorVisibleCount && (
+                    <div
+                      ref={inspectorLoadMoreRef}
+                      className="col-span-full py-8 flex flex-col items-center justify-center gap-3 border border-dashed border-border/60 rounded-2xl bg-surface/30 mt-2"
+                    >
+                      <div className="flex items-center gap-2 text-xs font-semibold text-violet-400">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>
+                          {isEn
+                            ? `Showing ${visibleInspectorVideos.length} of ${filteredInspectorVideos.length} videos in album...`
+                            : `Exibindo ${visibleInspectorVideos.length} de ${filteredInspectorVideos.length} vídeos no álbum...`}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setInspectorVisibleCount(prev => prev + 48)}
+                        className="px-4 py-2 rounded-xl bg-surface-elevated hover:bg-surface-hover text-slate-200 border border-border text-xs font-bold transition-all cursor-pointer shadow-sm hover:border-violet-500/40"
+                      >
+                        {isEn
+                          ? `Load Next 48 (${filteredInspectorVideos.length - visibleInspectorVideos.length} remaining)`
+                          : `Carregar Mais 48 (${filteredInspectorVideos.length - visibleInspectorVideos.length} restantes)`}
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
 

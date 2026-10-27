@@ -55,20 +55,23 @@ SEARCH_QUERY_ROUTES = [
 class DiscoveryRequest(BaseModel):
     url: str
     performer_name: Optional[str] = None
-    max_related: Optional[int] = 3
+    max_related: Optional[int] = 0
+    max_pages: Optional[int] = 50
 
 class DiscoveredAlbumItem(BaseModel):
     title: str
     url: str
     thumbnail_url: Optional[str] = None
-    source_type: str  # 'related', 'performer_page', 'search'
+    source_type: str  # 'related', 'performer_page', 'search', 'primary'
     total_images_hint: Optional[int] = None
+    page_found: Optional[int] = None
 
 class DiscoveryResponse(BaseModel):
     source_url: str
     target_performer: Optional[str] = None
     discovered_albums: List[DiscoveredAlbumItem]
     total_found: int
+    pages_scanned: Optional[int] = 1
 
 
 class MultiAlbumService:
@@ -379,21 +382,46 @@ class MultiAlbumService:
             await asyncio.sleep(0.01)
 
         # -----------------------------------------------------------------
-        # PASSO 0-B: Extração Rápida de Listagem / Performer (via HTTPX)
-        # Se for uma página de listagem/categoria/performer, extrai os álbuns
-        # existentes no HTML imediatamente de forma ultrarrápida (sem Playwright).
+        # PASSO 0-B: Extração Multi-Página de Listagem / Performer (via HTTPX)
+        # Se for uma página de listagem/categoria/performer, busca ativamente os
+        # álbuns de todas as páginas subsequentes (rel="next", paginação, botões).
         # -----------------------------------------------------------------
+        max_pages = req.max_pages if (req.max_pages is not None and req.max_pages > 0) else 50
+        pages_scanned = 0
+
         if not is_single_gallery:
+            current_page_url = req.url
+            visited_page_urls = set()
+
             try:
                 async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=headers) as lclient:
-                    l_resp = await lclient.get(req.url)
-                    if l_resp.status_code == 200:
+                    while current_page_url and pages_scanned < max_pages:
+                        if req.max_related and req.max_related > 0 and len(results) >= req.max_related:
+                            break
+
+                        if current_page_url in visited_page_urls:
+                            break
+                        visited_page_urls.add(current_page_url)
+                        pages_scanned += 1
+
+                        yield f"data: {json.dumps({'type': 'page', 'page': pages_scanned, 'message': f'Escaneando página {pages_scanned}... ({len(results)} álbuns)', 'count': len(results)})}\n\n"
+
+                        try:
+                            l_resp = await lclient.get(current_page_url)
+                        except Exception:
+                            break
+
+                        if l_resp.status_code != 200:
+                            break
+
                         soup_list = BeautifulSoup(l_resp.text, "html.parser")
+                        new_albums_this_page = 0
+
                         for tag_a in soup_list.find_all("a", href=True):
                             if req.max_related and req.max_related > 0 and len(results) >= req.max_related:
                                 break
                             raw_href = tag_a["href"].strip()
-                            full_sub = MultiAlbumService.unpack_redirect_url(raw_href, req.url)
+                            full_sub = MultiAlbumService.unpack_redirect_url(raw_href, current_page_url)
                             if not full_sub:
                                 continue
                             clean_sub = urllib.parse.urldefrag(full_sub)[0].rstrip("/")
@@ -414,7 +442,7 @@ class MultiAlbumService:
                                 title = MultiAlbumService.extract_title_from_tag(tag_a, clean_sub, len(results) + 1)
                                 if not title or title.lower() in BAD_TITLES or any(title.lower().startswith(b) for b in ["google", "login", "sign in", "entrar"]):
                                     continue
-                                thumb = MultiAlbumService.extract_thumbnail(tag_a, req.url)
+                                thumb = MultiAlbumService.extract_thumbnail(tag_a, current_page_url)
                                 if thumb and any(ign in thumb.lower() for ign in [".svg", ".ico", "google-icon", "google", "logo", "favicon"]):
                                     thumb = None
                                 is_rel = MultiAlbumService.is_related_container(tag_a)
@@ -422,12 +450,75 @@ class MultiAlbumService:
                                     title=title,
                                     url=clean_sub,
                                     thumbnail_url=thumb,
-                                    source_type="related" if is_rel else "primary"
+                                    source_type="related" if is_rel else "primary",
+                                    page_found=pages_scanned
                                 )
                                 results.append(album_obj)
                                 seen_urls.add(clean_sub)
+                                new_albums_this_page += 1
                                 yield f"data: {json.dumps({'type': 'album', 'album': album_obj.dict(), 'count': len(results)})}\n\n"
-                                await asyncio.sleep(0.01)
+                                await asyncio.sleep(0.005)
+
+                        # Detect next page
+                        next_page_url = None
+
+                        # Strategy 1: link rel="next" or a rel="next"
+                        link_next = soup_list.find(["link", "a"], attrs={"rel": lambda r: r and "next" in r.lower() if isinstance(r, str) else (isinstance(r, list) and any("next" in str(x).lower() for x in r))})
+                        if link_next and link_next.get("href"):
+                            cand = link_next["href"].strip()
+                            if cand and not cand.startswith(('#', 'javascript:')):
+                                next_page_url = urllib.parse.urljoin(current_page_url, cand)
+
+                        # Strategy 2: Common CSS pagination selectors
+                        if not next_page_url:
+                            next_sel = soup_list.select_one('.pagination .next a, .pagination a.next, a.next_page, a.next-page, a.pagination-next, .pagination-next a, .page-next a, li.page_next a, .page_next a, a#next_page, a.nextPage, [aria-label*="Next" i], [title*="Next page" i], [title*="Próxima" i]')
+                            if next_sel and next_sel.get("href"):
+                                cand = next_sel["href"].strip()
+                                if cand and not cand.startswith(('#', 'javascript:')):
+                                    next_page_url = urllib.parse.urljoin(current_page_url, cand)
+
+                        # Strategy 3: Text content inspection of anchors
+                        if not next_page_url:
+                            for a_tag in soup_list.find_all("a", href=True):
+                                txt = a_tag.get_text(strip=True).lower()
+                                title_a = (a_tag.get("title") or "").strip().lower()
+                                aria_a = (a_tag.get("aria-label") or "").strip().lower()
+                                cls_a = " ".join(a_tag.get("class", [])).lower() if isinstance(a_tag.get("class"), list) else str(a_tag.get("class", "")).lower()
+
+                                is_next_match = (
+                                    txt in ['next', 'next »', 'next >', 'next ›', '»', '›', 'próxima', 'proxima', 'seguinte', 'suivante', 'weiter'] or
+                                    'next page' in title_a or 'próxima' in title_a or 'next page' in aria_a or
+                                    'pagination-next' in cls_a or 'next-page' in cls_a
+                                )
+                                if is_next_match:
+                                    cand = a_tag["href"].strip()
+                                    if cand and not cand.startswith(('#', 'javascript:')):
+                                        next_page_url = urllib.parse.urljoin(current_page_url, cand)
+                                        break
+
+                        # Strategy 4: Numbered pagination (pages_scanned + 1)
+                        if not next_page_url:
+                            target_num_str = str(pages_scanned + 1)
+                            for a_tag in soup_list.find_all("a", href=True):
+                                txt = a_tag.get_text(strip=True)
+                                if txt == target_num_str:
+                                    parent_cls = " ".join([str(p.get("class", "")) for p in a_tag.parents if hasattr(p, "get")]).lower()
+                                    if any(p_kw in parent_cls for p_kw in ['pag', 'page', 'paging', 'nav']):
+                                        cand = a_tag["href"].strip()
+                                        if cand and not cand.startswith(('#', 'javascript:')):
+                                            next_page_url = urllib.parse.urljoin(current_page_url, cand)
+                                            break
+
+                        # Strategy 5 Fallback: URL pattern increment if on page 1 and no explicit next link was found
+                        if not next_page_url and pages_scanned == 1:
+                            m_pat = re.match(r"^(https?://[^/]+(?:/[^/]+)+?)(?:/)?$", current_page_url)
+                            if m_pat and not re.search(r"\.(?:html|php|aspx?)$", current_page_url):
+                                next_page_url = m_pat.group(1).rstrip("/") + "/2/"
+
+                        if not next_page_url or next_page_url in visited_page_urls or new_albums_this_page == 0:
+                            break
+
+                        current_page_url = next_page_url
             except Exception:
                 pass
 
@@ -521,7 +612,10 @@ class MultiAlbumService:
         # PASSO C: NAVEGADOR COM HARDWARE SCROLL STREAMING (Playwright)
         # Só ativa rolagem pesada se Fast-Track ou passos anteriores não trouxeram dados suficientes
         # -----------------------------------------------------------------
-        needs_deep_scroll = (len(results) < (req.max_related or 20)) if not is_unlimited else (len(results) < 30)
+        if not is_single_gallery and len(results) > 0:
+            needs_deep_scroll = False
+        else:
+            needs_deep_scroll = (len(results) < (req.max_related or 20)) if not is_unlimited else (len(results) < 30)
         if needs_deep_scroll:
             try:
                 try:
@@ -708,24 +802,28 @@ class MultiAlbumService:
             except Exception:
                 pass
 
-        yield f"data: {json.dumps({'type': 'done', 'total': len(results)})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'total': len(results), 'pages_scanned': max(pages_scanned, 1)})}\n\n"
 
     @staticmethod
     async def discover_albums(req: DiscoveryRequest) -> DiscoveryResponse:
         results: List[DiscoveredAlbumItem] = []
+        pages_scanned = 1
         async for chunk in MultiAlbumService.stream_discover_albums(req):
             if chunk.startswith("data: "):
                 try:
                     payload = json.loads(chunk[6:].strip())
                     if payload.get("type") == "album":
                         results.append(DiscoveredAlbumItem(**payload["album"]))
+                    elif payload.get("type") == "done" and payload.get("pages_scanned"):
+                        pages_scanned = payload.get("pages_scanned", 1)
                 except Exception:
                     pass
         return DiscoveryResponse(
             source_url=req.url,
             target_performer=req.performer_name,
             discovered_albums=results,
-            total_found=len(results)
+            total_found=len(results),
+            pages_scanned=pages_scanned
         )
 
 multi_album_service = MultiAlbumService()

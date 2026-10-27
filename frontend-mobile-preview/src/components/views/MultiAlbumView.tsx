@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Compass,
   Search,
@@ -40,8 +40,9 @@ interface DiscoveredItem {
   title: string;
   url: string;
   thumbnail_url?: string | null;
-  source_type: 'related' | 'performer_page' | 'search';
+  source_type: 'related' | 'performer_page' | 'search' | 'primary';
   total_images_hint?: number;
+  page_found?: number;
 }
 
 const normalizeUrl = (u?: string | null): string => {
@@ -103,6 +104,8 @@ export const MultiAlbumView: React.FC = () => {
   const url = multiAlbumState.url || '';
   const performerName = multiAlbumState.performerName || '';
   const maxRelated = multiAlbumState.maxRelated || 0;
+  const maxPages = multiAlbumState.maxPages ?? 50;
+  const pagesScanned = multiAlbumState.pagesScanned ?? 0;
   const results: DiscoveredItem[] = multiAlbumState.results || [];
   const streamingStatus = multiAlbumState.streamingStatus || '';
   const lastSearchedPerformer = multiAlbumState.lastSearchedPerformer || null;
@@ -134,6 +137,7 @@ export const MultiAlbumView: React.FC = () => {
     setMultiAlbumState({
       results: [],
       selectedUrls: [],
+      pagesScanned: 0,
       streamingStatus: t.connectingStream,
       lastSearchedPerformer: performerName.trim() || null
     });
@@ -147,6 +151,7 @@ export const MultiAlbumView: React.FC = () => {
           url: url.trim(),
           performer_name: performerName.trim() || null,
           max_related: maxRelated,
+          max_pages: maxPages,
         }),
       });
 
@@ -197,11 +202,19 @@ export const MultiAlbumView: React.FC = () => {
                     lastFlush = Date.now();
                   }
                 }
+              } else if (payload.type === 'page') {
+                setMultiAlbumState({
+                  streamingStatus: payload.message || '',
+                  pagesScanned: payload.page || 1
+                });
               } else if (payload.type === 'status') {
                 setMultiAlbumState({ streamingStatus: payload.message || '' });
               } else if (payload.type === 'done') {
                 flushBatch();
-                setMultiAlbumState({ streamingStatus: t.streamDone.replace('{total}', String(payload.total)) });
+                setMultiAlbumState({
+                  streamingStatus: t.streamDone.replace('{total}', String(payload.total)),
+                  ...(payload.pages_scanned ? { pagesScanned: payload.pages_scanned } : {})
+                });
               }
             } catch (_) {}
           }
@@ -234,27 +247,28 @@ export const MultiAlbumView: React.FC = () => {
     setMultiAlbumState({ selectedUrls: Array.from(next) });
   };
 
-  const savedAlbumUrls = useMemo(() => {
-    const set = new Set<string>();
+  const savedAlbumUrlMap = useMemo(() => {
+    const map = new Map<string, typeof albums[0]>();
     for (const a of albums) {
-      if (a.sourceUrl) set.add(normalizeUrl(a.sourceUrl));
+      if (a.sourceUrl) map.set(normalizeUrl(a.sourceUrl), a);
+      if (a.title) map.set(a.title.trim().toLowerCase(), a);
     }
-    return set;
+    return map;
   }, [albums]);
 
-  const savedAlbumTitles = useMemo(() => {
-    const set = new Set<string>();
-    for (const a of albums) {
-      if (a.title) set.add(a.title.trim().toLowerCase());
+  const jobsUrlMap = useMemo(() => {
+    const map = new Map<string, typeof jobs[0]>();
+    for (const j of jobs) {
+      if (j.url) map.set(normalizeUrl(j.url), j);
     }
-    return set;
-  }, [albums]);
+    return map;
+  }, [jobs]);
 
   const isAlbumSavedInGallery = (album: DiscoveredItem) => {
     const normAlbumUrl = normalizeUrl(album.url);
-    if (normAlbumUrl && savedAlbumUrls.has(normAlbumUrl)) return true;
+    if (normAlbumUrl && savedAlbumUrlMap.has(normAlbumUrl)) return true;
     const normTitle = album.title ? album.title.trim().toLowerCase() : '';
-    if (normTitle && savedAlbumTitles.has(normTitle)) return true;
+    if (normTitle && savedAlbumUrlMap.has(normTitle)) return true;
     return false;
   };
 
@@ -280,14 +294,27 @@ export const MultiAlbumView: React.FC = () => {
     : allAlbums;
 
   const [visibleCount, setVisibleCount] = useState(36);
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setVisibleCount(36);
-  }, [activeTab]);
+  }, [activeTab, url]);
 
   const visibleAlbums = useMemo(() => {
     return displayedAlbums.slice(0, visibleCount);
   }, [displayedAlbums, visibleCount]);
+
+  useEffect(() => {
+    if (!loadMoreSentinelRef.current) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting && displayedAlbums.length > visibleCount) {
+        setVisibleCount((prev) => prev + 36);
+      }
+    }, { rootMargin: '400px' });
+
+    observer.observe(loadMoreSentinelRef.current);
+    return () => observer.disconnect();
+  }, [displayedAlbums.length, visibleCount]);
 
   const displayedUrls = useMemo(() => displayedAlbums.map(a => a.url), [displayedAlbums]);
   const isAllDisplayedSelected = displayedUrls.length > 0 && displayedUrls.every(url => selectedUrls.has(url));
@@ -320,17 +347,14 @@ export const MultiAlbumView: React.FC = () => {
   const totalSavedCount = results.filter(a => isAlbumSavedInGallery(a)).length;
   const totalNewCount = results.length - totalSavedCount;
 
-  // Status helper for real-time card indicators with normalized URL matching
+  // Status helper for real-time card indicators with normalized URL matching (O(1) Map lookups)
   const getAlbumStatus = (albumUrl: string, albumTitle: string) => {
     const normAlbumUrl = normalizeUrl(albumUrl);
     const normTitle = albumTitle.trim().toLowerCase();
 
-    // 1. Saved in library?
-    const savedAlbum = albums.find(
-      (a) =>
-        (a.sourceUrl && normalizeUrl(a.sourceUrl) === normAlbumUrl) ||
-        (a.title && a.title.trim().toLowerCase() === normTitle)
-    );
+    // 1. Saved in library? (O(1) Map lookup)
+    const savedAlbum = (normAlbumUrl ? savedAlbumUrlMap.get(normAlbumUrl) : undefined) ||
+                       (normTitle ? savedAlbumUrlMap.get(normTitle) : undefined);
     if (savedAlbum) {
       return {
         status: 'saved' as const,
@@ -341,8 +365,8 @@ export const MultiAlbumView: React.FC = () => {
       };
     }
 
-    // 2. Active or completed job?
-    const job = jobs.find((j) => j.url && normalizeUrl(j.url) === normAlbumUrl);
+    // 2. Active or completed job? (O(1) Map lookup)
+    const job = normAlbumUrl ? jobsUrlMap.get(normAlbumUrl) : undefined;
     if (job) {
       if (job.status === 'active') {
         return {
@@ -353,7 +377,7 @@ export const MultiAlbumView: React.FC = () => {
         };
       }
       if (job.status === 'completed') {
-        const foundAlb = albums.find(a => a.id === job.resultAlbumId || (a.sourceUrl && normalizeUrl(a.sourceUrl) === normAlbumUrl));
+        const foundAlb = (job.resultAlbumId ? albums.find(a => a.id === job.resultAlbumId) : undefined) || (job.url ? savedAlbumUrlMap.get(normalizeUrl(job.url)) : undefined);
         return {
           status: 'saved' as const,
           label: `${t.viewInGallery} (${foundAlb?.folder || job.folder || t.folderPlaceholder})`,
@@ -730,7 +754,7 @@ export const MultiAlbumView: React.FC = () => {
         <form onSubmit={handleDiscover} className="space-y-4">
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
             {/* Target URL */}
-            <div className="lg:col-span-6 space-y-1.5">
+            <div className="lg:col-span-5 space-y-1.5">
               <div className="h-5 flex items-center">
                 <label className="text-xs font-bold text-slate-300 uppercase tracking-wider block truncate">
                   {t.urlLabel}
@@ -767,7 +791,7 @@ export const MultiAlbumView: React.FC = () => {
             </div>
 
             {/* Limit (Optional) */}
-            <div className="lg:col-span-3 space-y-1.5">
+            <div className="lg:col-span-2 space-y-1.5">
               <div className="h-5 flex items-center">
                 <label className="text-xs font-bold text-slate-300 uppercase tracking-wider block truncate whitespace-nowrap" title={t.limitTitle || t.qtyTitle}>
                   {t.limitLabel || t.qtyLabel}
@@ -780,6 +804,24 @@ export const MultiAlbumView: React.FC = () => {
                 placeholder={t.limitPlaceholder || t.qtyPlaceholder}
                 value={maxRelated === 0 ? '' : maxRelated}
                 onChange={(e) => setMultiAlbumState({ maxRelated: e.target.value === '' ? 0 : Number(e.target.value) })}
+                className="w-full h-12 px-4 rounded-2xl bg-surface-elevated border border-border text-slate-100 placeholder-slate-500 text-xs sm:text-sm font-medium outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all shadow-inner"
+              />
+            </div>
+
+            {/* Max Pages (Multi-page Crawler) */}
+            <div className="lg:col-span-2 space-y-1.5">
+              <div className="h-5 flex items-center">
+                <label className="text-xs font-bold text-slate-300 uppercase tracking-wider block truncate whitespace-nowrap" title={t.maxPagesTooltip}>
+                  {t.maxPagesLabel}
+                </label>
+              </div>
+              <input
+                type="number"
+                min="1"
+                max="200"
+                placeholder={t.maxPagesPlaceholder || '50 págs'}
+                value={maxPages || 50}
+                onChange={(e) => setMultiAlbumState({ maxPages: Number(e.target.value) || 50 })}
                 className="w-full h-12 px-4 rounded-2xl bg-surface-elevated border border-border text-slate-100 placeholder-slate-500 text-xs sm:text-sm font-medium outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all shadow-inner"
               />
             </div>
@@ -1057,6 +1099,11 @@ export const MultiAlbumView: React.FC = () => {
                 <span className="text-xs font-mono font-bold text-slate-300 px-2 py-0.5 rounded bg-surface border border-border">
                   {t.totalCount}: {results.length}
                 </span>
+                {pagesScanned > 0 && (
+                  <span className="text-xs font-mono font-bold text-indigo-300 px-2 py-0.5 rounded bg-indigo-950/60 border border-indigo-500/30">
+                    {t.pagesScannedBadge.replace('{count}', String(pagesScanned))}
+                  </span>
+                )}
                 <span className="text-xs font-mono font-bold text-emerald-400 px-2 py-0.5 rounded bg-emerald-950/60 border border-emerald-500/30">
                   {t.savedCount}: {totalSavedCount}
                 </span>
@@ -1104,6 +1151,10 @@ export const MultiAlbumView: React.FC = () => {
                 return (
                   <div
                     key={album.url}
+                    style={{
+                      contentVisibility: 'auto',
+                      containIntrinsicSize: 'auto 380px',
+                    }}
                     className={`bg-surface-elevated border rounded-2xl p-4 flex flex-col justify-between transition-all group shadow-md relative ${
                       isSelected
                         ? 'border-brand-500 bg-brand-950/20 shadow-glow-brand ring-1 ring-brand-500/30'
@@ -1184,6 +1235,13 @@ export const MultiAlbumView: React.FC = () => {
                       <div className="absolute top-2 right-2 pointer-events-none">
                         {getSourceBadge(album.source_type)}
                       </div>
+
+                      {/* Page Found Badge */}
+                      {album.page_found && album.page_found > 1 && (
+                        <span className="absolute bottom-2 right-2 z-20 px-1.5 py-0.5 rounded bg-indigo-950/90 backdrop-blur-md text-[9px] font-mono font-bold text-indigo-300 border border-indigo-500/40">
+                          P.{album.page_found}
+                        </span>
+                      )}
                     </div>
 
                     {/* Title and Status */}
@@ -1355,17 +1413,28 @@ export const MultiAlbumView: React.FC = () => {
           </div>
 
               {displayedAlbums.length > visibleCount && (
-                <div className="flex items-center justify-center pt-6">
+                <div
+                  ref={loadMoreSentinelRef}
+                  className="flex flex-col items-center justify-center pt-8 pb-4 gap-3 border border-dashed border-border/60 rounded-2xl bg-surface/30 mt-4"
+                >
+                  <div className="flex items-center gap-2 text-xs font-semibold text-brand-400">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>
+                      {isEn
+                        ? `Showing ${visibleAlbums.length} of ${displayedAlbums.length} albums...`
+                        : `Exibindo ${visibleAlbums.length} de ${displayedAlbums.length} álbuns...`}
+                    </span>
+                  </div>
                   <button
                     type="button"
                     onClick={() => setVisibleCount((prev) => prev + 36)}
-                    className="px-6 py-3 rounded-2xl bg-surface-elevated hover:bg-surface-hover border border-border text-slate-200 text-xs font-bold transition-all shadow-md flex items-center gap-2 cursor-pointer"
+                    className="px-6 py-2.5 rounded-2xl bg-surface-elevated hover:bg-surface-hover border border-border text-slate-200 text-xs font-bold transition-all shadow-md flex items-center gap-2 cursor-pointer hover:border-brand-500/40"
                   >
                     <Sparkles size={14} className="text-brand-400" />
                     <span>
                       {settings.language === 'en-US'
-                        ? `Show More Albums (${displayedAlbums.length - visibleCount} remaining)`
-                        : `Carregar Mais Álbuns (restam ${displayedAlbums.length - visibleCount})`}
+                        ? `Load Next 36 (${displayedAlbums.length - visibleAlbums.length} remaining)`
+                        : `Carregar Mais 36 (${displayedAlbums.length - visibleAlbums.length} restantes)`}
                     </span>
                   </button>
                 </div>
@@ -1585,6 +1654,10 @@ export const MultiAlbumView: React.FC = () => {
                         return (
                           <div
                             key={img.id || img.original_url}
+                            style={{
+                              contentVisibility: 'auto',
+                              containIntrinsicSize: 'auto 240px',
+                            }}
                             onClick={() => {
                               const next = new Set(draftSelectedImageUrls);
                               if (next.has(img.original_url)) {

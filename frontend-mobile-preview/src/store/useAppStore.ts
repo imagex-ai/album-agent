@@ -186,6 +186,8 @@ interface AppState {
   } | null;
 
   // Video Actions
+  isRenewingVideoStreams: boolean;
+  renewVideoStreams: (videoIds?: string[], folder?: string) => Promise<{ succeeded: number; failed: number }>;
   syncVideos: (healThumbnails?: boolean) => Promise<void>;
   uploadVideo: (file: File, folder?: string, fileIndex?: number, totalFiles?: number) => Promise<boolean>;
   importLocalPath: (path: string, folder?: string, mode?: 'copy' | 'move') => Promise<boolean>;
@@ -323,6 +325,8 @@ interface AppState {
     url: string;
     performerName: string;
     maxRelated: number;
+    maxPages?: number;
+    pagesScanned?: number;
     results: any[];
     streamingStatus: string;
     lastSearchedPerformer: string | null;
@@ -334,6 +338,8 @@ interface AppState {
     url: string;
     performerName: string;
     maxRelated: number;
+    maxPages?: number;
+    pagesScanned?: number;
     results: any[];
     streamingStatus: string;
     lastSearchedPerformer: string | null;
@@ -551,6 +557,8 @@ export const useAppStore = create<AppState>((set, get) => {
     url: '',
     performerName: '',
     maxRelated: 0,
+    maxPages: 50,
+    pagesScanned: 0,
     results: [] as any[],
     streamingStatus: '',
     lastSearchedPerformer: null as string | null,
@@ -838,6 +846,7 @@ export const useAppStore = create<AppState>((set, get) => {
     activeVideoFolder: null,
     videoSearchQuery: '',
     videoFilterFavoritesOnly: false,
+    isRenewingVideoStreams: false,
     activePlayingVideo: null,
     activeFolderModal: null,
     selectedVideoIds: [],
@@ -1367,6 +1376,8 @@ export const useAppStore = create<AppState>((set, get) => {
         url: '',
         performerName: '',
         maxRelated: 0,
+        maxPages: 50,
+        pagesScanned: 0,
         results: [],
         streamingStatus: '',
         lastSearchedPerformer: null,
@@ -2883,6 +2894,77 @@ export const useAppStore = create<AppState>((set, get) => {
         set({ videos, videoFolders: folders });
       } catch (err) {
         console.warn('Failed to sync videos:', err);
+      }
+    },
+
+    renewVideoStreams: async (videoIds?: string[], folder?: string) => {
+      const state = get();
+      if (state.isRenewingVideoStreams) return { succeeded: 0, failed: 0 };
+      const lang = state.settings?.language || 'pt-BR';
+      const isEn = lang === 'en-US';
+      const tVid = translations[lang]?.videos || translations['en-US'].videos;
+      set({ isRenewingVideoStreams: true });
+      get().addNotification({
+        title: tVid.renewStartedTitle || (isEn ? 'Renewing Video Streams' : 'Renovando Streams'),
+        message: tVid.renewStartedMsg || (isEn
+          ? 'Starting renewal of video stream links in background...'
+          : 'Iniciando renovação dos links de stream em segundo plano...'),
+        type: 'info'
+      });
+      try {
+        const res = await backendApi.renewVideoStreams(videoIds, folder);
+        await get().syncVideos();
+        if (res.refreshed > 0) {
+          const successMsg = (tVid.renewSuccess || (isEn
+            ? '{count} video streams renewed successfully!'
+            : '{count} streams de vídeo renovados com sucesso!'))
+            .replace('{count}', String(res.refreshed));
+          const warningMsg = (tVid.renewWarning || (isEn
+            ? '{succeeded} of {total} streams renewed ({failed} failed).'
+            : '{succeeded} de {total} streams renovados ({failed} falharam).'))
+            .replace('{succeeded}', String(res.refreshed))
+            .replace('{total}', String(res.refreshed + res.failed))
+            .replace('{failed}', String(res.failed));
+
+          get().addNotification({
+            title: tVid.renewCompletedTitle || (isEn ? 'Streams Renewal Completed' : 'Renovação Concluída'),
+            message: res.failed > 0 ? warningMsg : successMsg,
+            type: res.failed > 0 ? 'warning' : 'success'
+          });
+          if (res.deletedOnSource && res.deletedOnSource > 0) {
+            get().addNotification({
+              title: isEn ? 'Removed on Source Website' : 'Removido no Site de Origem',
+              message: isEn
+                ? `${res.deletedOnSource} video(s) were permanently removed on the source website (DMCA/Copyright) and marked with a warning badge.`
+                : `${res.deletedOnSource} vídeo(s) foram excluídos permanentemente no site de origem (DMCA/Direitos Autorais) e marcados com selo de aviso.`,
+              type: 'warning'
+            });
+          }
+        } else {
+          if (res.deletedOnSource && res.deletedOnSource > 0) {
+            get().addNotification({
+              title: isEn ? 'Removed on Source Website' : 'Removido no Site de Origem',
+              message: isEn
+                ? `All ${res.deletedOnSource} selected video(s) were permanently deleted on the source website (DMCA/Copyright).`
+                : `Todos os ${res.deletedOnSource} vídeo(s) selecionados foram excluídos permanentemente no site de origem (DMCA/Direitos Autorais).`,
+              type: 'warning'
+            });
+          } else {
+            get().addNotification({
+              title: tVid.renewFailedTitle || (isEn ? 'Streams Renewal Failed' : 'Falha na Renovação'),
+              message: tVid.renewError || (isEn
+                ? 'Could not renew video streams at this time.'
+                : 'Não foi possível renovar os links de stream dos vídeos no momento.'),
+              type: 'error'
+            });
+          }
+        }
+        return { succeeded: res.refreshed, failed: res.failed };
+      } catch (err) {
+        console.error('Error renewing video streams:', err);
+        return { succeeded: 0, failed: videoIds?.length || 1 };
+      } finally {
+        set({ isRenewingVideoStreams: false });
       }
     },
 

@@ -5,6 +5,7 @@ Physical manipulation of files, folders, metadata, and favorites.
 
 import os
 import sys
+import re
 import json
 import shutil
 import hashlib
@@ -20,6 +21,25 @@ import unicodedata
 import httpx
 import urllib.parse
 from pathlib import Path
+
+
+def sanitize_folder_name(name: Optional[str], default: str = "Extraídos") -> str:
+    """Sanitizes folder name for Windows/Unix compatibility, stripping invalid chars like :*?\"<>|/\\."""
+    if not name or not isinstance(name, str):
+        return default
+    # Remove chars forbidden on Windows filesystems
+    clean = re.sub(r'[\\/*?:"<>|]', '', name)
+    # Remove non-printable / control chars
+    clean = "".join(ch for ch in clean if ord(ch) >= 32)
+    # Collapse multiple spaces and strip trailing/leading spaces and dots
+    clean = re.sub(r'\s+', ' ', clean).strip(' ._')
+    if not clean:
+        return default
+    # Reserved Windows device names
+    reserved = {"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"}
+    if clean.upper() in reserved:
+        clean = f"{clean}_folder"
+    return clean[:120]
 
 try:
     import cv2
@@ -710,18 +730,9 @@ class VideoService:
         default_folder = os.path.join(self.base_dir, "Geral")
         os.makedirs(default_folder, exist_ok=True)
 
-        # --- STEP 1: Restore metadata from HF if local disk was wiped ---
+        # --- STEP 1: Restore or merge metadata from HF ---
         if cloud_storage.is_connected():
-            if not os.path.exists(self.metadata_file) or os.path.getsize(self.metadata_file) < 5:
-                print("[VideoService] Local metadata ausente — tentando restaurar do Hugging Face...")
-                remote_meta = cloud_storage.download_json("metadata/videos_metadata.json")
-                if remote_meta and isinstance(remote_meta, dict):
-                    try:
-                        with open(self.metadata_file, "w", encoding="utf-8") as fp:
-                            json.dump(remote_meta, fp, indent=2, ensure_ascii=False)
-                        print(f"[VideoService] Metadata restored from HF: {len(remote_meta)} videos.")
-                    except Exception as e:
-                        print(f"[VideoService] Erro ao escrever metadata restaurado: {e}")
+            self.restore_metadata_from_hf()
 
         if not os.path.exists(self.metadata_file):
             self._save_metadata({})
@@ -743,31 +754,159 @@ class VideoService:
         self.sync_local_videos_to_cloud()
 
     def _migrate_origins(self):
-        """Ensures all existing videos have an accurate source_origin ('web' vs 'pc')."""
+        """Ensures all existing videos have an accurate source_origin ('web' vs 'pc')
+        and heals missing/dynamic created_at timestamps so cloud videos never wrongly jump to the top."""
         try:
+            from datetime import datetime
             meta = self._load_metadata()
             modified = False
+
+            # Pre-load local albums for title/source matching
+            albums_dir = os.path.join(os.path.dirname(self.base_dir), "albums")
+            albums = []
+            if os.path.exists(albums_dir):
+                for fname in os.listdir(albums_dir):
+                    if fname.endswith(".json"):
+                        try:
+                            with open(os.path.join(albums_dir, fname), "r", encoding="utf-8") as fp:
+                                albums.append(json.load(fp))
+                        except Exception:
+                            pass
+
+            def clean_words(s):
+                if not s: return set()
+                s = re.sub(r'[^a-zA-Z0-9]', ' ', s.lower())
+                stop = {'the', 'and', 'com', 'mp4', '1080p', '720p', '360p', '480p', 'video', 'videos', 'para', 'que', 'dos', 'uma', 'seu', 'sua'}
+                return {w for w in s.split() if len(w) > 3 and w not in stop}
+
             for vid_id, entry in meta.items():
+                # 1. Recover/heal created_at
+                cur_created = entry.get("created_at")
+                date_recovered = None
+
+                # Check local disk file
+                rel_p = entry.get("rel_path")
+                if rel_p:
+                    loc = os.path.join(self.base_dir, rel_p.replace("/", os.sep))
+                    if os.path.exists(loc):
+                        try:
+                            mtime = os.path.getmtime(loc)
+                            date_recovered = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+                        except Exception:
+                            pass
+
+                # Check 10-digit unix timestamp in filename or title (e.g. 1790477465)
+                if not date_recovered:
+                    text_to_search = f"{entry.get('filename') or ''} {entry.get('title') or ''}"
+                    m = re.search(r'(\b17\d{8}\b)', text_to_search)
+                    if m:
+                        try:
+                            ts = int(m.group(1))
+                            if 1500000000 < ts < 2000000000:
+                                date_recovered = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+                        except Exception:
+                            pass
+
+                # Check matching album
+                if not date_recovered:
+                    v_words = clean_words(entry.get("title") or "") | clean_words(entry.get("folder") or "")
+                    best_alb = None
+                    best_overlap = 0
+                    if len(v_words) >= 2:
+                        for a in albums:
+                            a_words = clean_words(a.get("title") or "")
+                            overlap = len(v_words & a_words)
+                            if overlap > best_overlap:
+                                best_overlap = overlap
+                                best_alb = a
+                    if best_alb and best_overlap >= 2 and best_alb.get("created_at"):
+                        date_recovered = best_alb.get("created_at").replace(" UTC", "")
+
+                # If missing or it was generated with the dynamic fallback bug
+                if not cur_created or cur_created.startswith("2026-10-26 23:") or cur_created.startswith("2026-10-27 00:"):
+                    if date_recovered:
+                        entry["created_at"] = date_recovered
+                        modified = True
+                    elif not cur_created:
+                        entry["created_at"] = "2026-09-27 12:00:00"
+                        modified = True
+
+                # 2. Fix source_origin ('web' vs 'pc')
                 curr = entry.get("source_origin")
                 surl = entry.get("source_url") or ""
                 sid = entry.get("source_id") or ""
                 folder = entry.get("folder") or ""
+                fn = entry.get("filename") or ""
+                title = entry.get("title") or ""
                 folder_norm = "".join(c for c in unicodedata.normalize("NFKD", folder) if not unicodedata.combining(c)).lower()
+                text_check = f"{title} {folder} {fn}".lower()
+
+                # Detect web extractions via streaming markers, web album matches, url signatures or resolution tags
                 is_web = bool(
                     (surl and (surl.startswith("http://") or surl.startswith("https://"))) or
                     sid or
                     entry.get("custom_stream_url") or
-                    folder_norm.startswith("extra")
+                    entry.get("storage_location") == "stream_url" or
+                    folder_norm.startswith("extra") or
+                    re.search(r'_\d{3,4}p(?:_\d+)?\.(?:mp4|webm|m4v)', fn.lower()) or
+                    re.search(r'\b17\d{8}\b', text_check)
                 )
+
+                if not is_web:
+                    v_words = clean_words(title) | clean_words(folder)
+                    if len(v_words) >= 2:
+                        for a in albums:
+                            a_words = clean_words(a.get("title") or "")
+                            if len(v_words & a_words) >= 2:
+                                if a.get("source_url") or a.get("source_domain") or a.get("source_page"):
+                                    is_web = True
+                                    break
+
                 new_origin = "web" if is_web else "pc"
                 if curr != new_origin:
                     entry["source_origin"] = new_origin
                     modified = True
+
             if modified:
                 self._save_metadata(meta)
-                logger.info(f"[VideoService] Migrated source_origin for {len(meta)} videos.")
+                logger.info(f"[VideoService] Migrated source_origin and healed created_at timestamps for {len(meta)} videos.")
         except Exception as e:
             logger.warning(f"[VideoService] Error migrating origins: {e}")
+
+    def restore_metadata_from_hf(self) -> int:
+        """Downloads remote videos_metadata.json from Hugging Face and merges into local metadata."""
+        if not cloud_storage.is_connected():
+            return 0
+        try:
+            remote_meta = cloud_storage.download_json("metadata/videos_metadata.json")
+            if not remote_meta or not isinstance(remote_meta, dict):
+                return 0
+            with self._meta_lock:
+                local_meta = self._load_metadata()
+                modified = False
+                added = 0
+                for v_id, v_data in remote_meta.items():
+                    if v_id not in local_meta:
+                        local_meta[v_id] = v_data
+                        modified = True
+                        added += 1
+                    else:
+                        c_url = v_data.get("cloud_url")
+                        if c_url and not local_meta[v_id].get("cloud_url"):
+                            local_meta[v_id]["cloud_url"] = c_url
+                            modified = True
+                        if v_data.get("storage_location") == "huggingface" and local_meta[v_id].get("storage_location") != "huggingface":
+                            rel_p = local_meta[v_id].get("rel_path") or ""
+                            if not rel_p or not os.path.exists(os.path.join(self.base_dir, rel_p.replace("/", os.sep))):
+                                local_meta[v_id]["storage_location"] = "huggingface"
+                                modified = True
+                if modified:
+                    self._save_metadata(local_meta)
+                    logger.info(f"[VideoService] Sincronizados {added} vídeos remotos do Hugging Face.")
+                return added
+        except Exception as e:
+            logger.warning(f"[VideoService] Erro ao sincronizar metadados do HF: {e}")
+            return 0
 
     def sync_local_videos_to_cloud(self):
         """Auto-discovers any local videos marked as 'render_local' and uploads them to Hugging Face sequentially."""
@@ -1113,10 +1252,14 @@ class VideoService:
                         stat = os.stat(full_path)
                         size_bytes = stat.st_size
                         mtime = stat.st_mtime
-                        created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
+                        file_created = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
                     except Exception:
                         size_bytes = 0
-                        created_at = time.strftime("%Y-%m-%d %H:%M:%S")
+                        file_created = "2026-09-27 12:00:00"
+
+                    created_at = entry_meta.get("created_at") or file_created
+                    if not entry_meta.get("created_at"):
+                        entry_meta["created_at"] = created_at
 
                     clean_title = entry_meta.get("title") or os.path.splitext(f)[0].replace("_", " ")
                     storage_loc = entry_meta.get("storage_location", "local")
@@ -1190,6 +1333,10 @@ class VideoService:
                         size_bytes = hf_sizes.get(f"videos/{folder_name}/{fname}") or hf_sizes.get(fname) or 0
 
                 dur = entry_meta.get("duration_seconds") or 0.0
+                created_at = entry_meta.get("created_at") or "2026-09-27 12:00:00"
+                if not entry_meta.get("created_at"):
+                    entry_meta["created_at"] = created_at
+
                 videos.append({
                     "id": vid_id,
                     "title": clean_title,
@@ -1198,7 +1345,7 @@ class VideoService:
                     "file_size_bytes": size_bytes,
                     "format": "MP4",
                     "is_favorite": entry_meta.get("is_favorite", False),
-                    "created_at": entry_meta.get("created_at", time.strftime("%Y-%m-%d %H:%M:%S")),
+                    "created_at": created_at,
                     "rel_path": entry_meta.get("rel_path", ""),
                     "storage_location": storage_loc,
                     "source_origin": entry_meta.get("source_origin") or ("web" if (entry_meta.get("source_url") or entry_meta.get("source_id") or custom_stream or cloud_url or "".join(c for c in unicodedata.normalize("NFKD", entry_meta.get("folder", "")) if not unicodedata.combining(c)).lower().startswith("extra")) else "pc"),
@@ -1217,7 +1364,9 @@ class VideoService:
                     "highlights": entry_meta.get("highlights", []),
                     "source_url": entry_meta.get("source_url"),
                     "source_id": entry_meta.get("source_id"),
-                    "source_thumbnail_url": entry_meta.get("source_thumbnail_url")
+                    "source_thumbnail_url": entry_meta.get("source_thumbnail_url"),
+                    "stream_status": entry_meta.get("stream_status"),
+                    "stream_error": entry_meta.get("stream_error")
                 })
 
 
@@ -1232,8 +1381,9 @@ class VideoService:
         if entry:
             rel_path = entry.get("rel_path", "")
             full_path = os.path.join(self.base_dir, rel_path.replace("/", os.sep))
-            # Verify if local file exists, or if folder was renamed
-            if not os.path.exists(full_path):
+            # Verify if local file exists, or if folder was renamed (skip disk walks for stream-only videos)
+            is_remote_stream = (entry.get("storage_location") == "stream_url") or (rel_path and os.path.basename(rel_path).startswith("remote_"))
+            if not os.path.exists(full_path) and not is_remote_stream:
                 fname = entry.get("filename") or os.path.basename(rel_path)
                 for root, dirs, files in os.walk(self.base_dir):
                     if fname in files and not fname.startswith("remote_"):
@@ -1249,7 +1399,7 @@ class VideoService:
                         entry["folder"] = matched_disk.split("/")[0] if "/" in matched_disk else "Geral"
                         self._save_metadata(meta)
 
-            exists = os.path.exists(full_path) if full_path else False
+            exists = os.path.exists(full_path) if (full_path and not is_remote_stream) else False
             dur = entry.get("duration_seconds") or 0.0
             return {
                 "id": video_id,
@@ -1259,11 +1409,12 @@ class VideoService:
                 "file_size_bytes": entry.get("file_size_bytes") or (os.path.getsize(full_path) if exists else 0),
                 "format": entry.get("format") or (os.path.splitext(rel_path)[1][1:].upper() if rel_path else "MP4"),
                 "is_favorite": entry.get("is_favorite", False),
-                "created_at": entry.get("created_at") or time.strftime("%Y-%m-%d %H:%M:%S"),
+                "created_at": entry.get("created_at") or "2026-09-27 12:00:00",
                 "rel_path": rel_path,
                 "storage_location": entry.get("storage_location", "local"),
                 "source_origin": entry.get("source_origin") or ("web" if (entry.get("source_url") or entry.get("source_id") or entry.get("custom_stream_url") or "".join(c for c in unicodedata.normalize("NFKD", entry.get("folder", "")) if not unicodedata.combining(c)).lower().startswith("extra")) else "pc"),
                 "cloud_url": entry.get("cloud_url"),
+                "custom_stream_url": entry.get("custom_stream_url"),
                 "stream_url": (f"/api/videos/{video_id}/stream" if exists else (entry.get("custom_stream_url") or f"/api/videos/{video_id}/stream")),
                 "download_url": f"/api/videos/{video_id}/download",
                 "thumbnail_url": f"/api/videos/{video_id}/thumbnail",
@@ -1276,9 +1427,12 @@ class VideoService:
                 "highlight_end": entry.get("highlight_end", dur),
                 "highlight_score": entry.get("highlight_score", 0.0),
                 "highlights": entry.get("highlights", []),
+                "heatmap_data": entry.get("heatmap_data"),
                 "source_url": entry.get("source_url"),
                 "source_id": entry.get("source_id"),
                 "source_thumbnail_url": entry.get("source_thumbnail_url"),
+                "stream_status": entry.get("stream_status"),
+                "stream_error": entry.get("stream_error"),
                 "full_path": full_path if exists else None
             }
 
@@ -1358,7 +1512,7 @@ class VideoService:
 
     def create_folder(self, folder_name: str) -> bool:
         """Creates a new folder on disk."""
-        clean_name = "".join(c for c in folder_name if c.isalnum() or c in (" ", "-", "_")).strip()
+        clean_name = sanitize_folder_name(folder_name, default="")
         if not clean_name:
             return False
         target_path = os.path.join(self.base_dir, clean_name)
@@ -1366,29 +1520,35 @@ class VideoService:
         return True
 
     def rename_folder(self, old_name: str, new_name: str) -> bool:
-        """Renames a physical folder and updates metadata paths while preserving video IDs."""
+        """Renames a folder on disk and updates metadata paths while preserving video IDs."""
+        clean_new = sanitize_folder_name(new_name, default="")
+        if not clean_new or clean_new == old_name:
+            return False
+
         old_path = os.path.join(self.base_dir, old_name)
-        clean_new = "".join(c for c in new_name if c.isalnum() or c in (" ", "-", "_")).strip()
         new_path = os.path.join(self.base_dir, clean_new)
 
-        if not os.path.exists(old_path) or os.path.exists(new_path) or not clean_new:
-            return False
+        # Se a pasta antiga existir fisicamente, renomeia; se não, cria a nova
+        if os.path.exists(old_path):
+            try:
+                os.rename(old_path, new_path)
+            except Exception as e:
+                print(f"Error renaming physical folder: {e}")
+                return False
+        else:
+            os.makedirs(new_path, exist_ok=True)
 
-        try:
-            os.rename(old_path, new_path)
-            # Update metadata paths preserving IDs
-            meta = self._load_metadata()
-            for vid_id, v in meta.items():
-                rp = v.get("rel_path", "")
-                if rp.startswith(old_name + "/"):
-                    new_rp = clean_new + "/" + rp[len(old_name) + 1:]
-                    v["rel_path"] = new_rp
-                    v["folder"] = clean_new
-            self._save_metadata(meta)
-            return True
-        except Exception as e:
-            print(f"Error renaming folder: {e}")
-            return False
+        # Update metadata paths preserving IDs for both local and stream videos
+        meta = self._load_metadata()
+        for vid_id, v in meta.items():
+            rp = v.get("rel_path", "")
+            f_curr = v.get("folder", "")
+            if rp.startswith(old_name + "/") or f_curr == old_name:
+                fname = os.path.basename(rp) if rp else f"{v.get('title', 'video')}.mp4"
+                v["rel_path"] = f"{clean_new}/{fname}"
+                v["folder"] = clean_new
+        self._save_metadata(meta)
+        return True
 
     def delete_folder(self, folder_name: str) -> bool:
         """Deletes a folder from disk. Videos inside are moved to 'Geral' to prevent data loss."""
@@ -1396,43 +1556,38 @@ class VideoService:
             return False  # Cannot delete default folder
 
         folder_path = os.path.join(self.base_dir, folder_name)
-        if not os.path.exists(folder_path):
-            return False
-
         geral_path = os.path.join(self.base_dir, "Geral")
         os.makedirs(geral_path, exist_ok=True)
 
+        # Move any existing physical video files to Geral
+        if os.path.exists(folder_path):
+            for f in os.listdir(folder_path):
+                src_file = os.path.join(folder_path, f)
+                if os.path.isfile(src_file):
+                    dst_file = os.path.join(geral_path, f)
+                    if os.path.exists(dst_file):
+                        final_f = f"{int(time.time())}_{f}"
+                        dst_file = os.path.join(geral_path, final_f)
+                    try:
+                        shutil.move(src_file, dst_file)
+                    except Exception:
+                        pass
+            try:
+                shutil.rmtree(folder_path)
+            except Exception as e:
+                print(f"Error removing physical folder: {e}")
+
+        # Update metadata for all videos (including stream_url videos)
         meta = self._load_metadata()
-
-        # Move any existing video files to Geral
-        for f in os.listdir(folder_path):
-            src_file = os.path.join(folder_path, f)
-            if os.path.isfile(src_file):
-                dst_file = os.path.join(geral_path, f)
-                final_f = f
-                if os.path.exists(dst_file):
-                    final_f = f"{int(time.time())}_{f}"
-                    dst_file = os.path.join(geral_path, final_f)
-                try:
-                    shutil.move(src_file, dst_file)
-                except Exception:
-                    pass
-
-        # Update metadata for moved videos
         for vid_id, v in meta.items():
             rp = v.get("rel_path", "")
-            if rp.startswith(folder_name + "/"):
-                fname = os.path.basename(rp)
+            f_curr = v.get("folder", "")
+            if rp.startswith(folder_name + "/") or f_curr == folder_name:
+                fname = os.path.basename(rp) if rp else f"{v.get('title', 'video')}.mp4"
                 v["rel_path"] = f"Geral/{fname}"
                 v["folder"] = "Geral"
         self._save_metadata(meta)
-
-        try:
-            shutil.rmtree(folder_path)
-            return True
-        except Exception as e:
-            print(f"Error deleting folder: {e}")
-            return False
+        return True
 
     def move_video(self, video_id: str, target_folder: str) -> Optional[Dict[str, Any]]:
         """Moves a video file to another folder on disk while preserving its ID."""
@@ -1440,33 +1595,38 @@ class VideoService:
         if not video:
             return None
 
-        src_path = video["full_path"]
-        dst_folder_path = os.path.join(self.base_dir, target_folder)
+        clean_folder = target_folder.strip() or "Geral"
+        dst_folder_path = os.path.join(self.base_dir, clean_folder)
         os.makedirs(dst_folder_path, exist_ok=True)
 
-        dst_path = os.path.join(dst_folder_path, video["filename"])
-        if src_path == dst_path:
-            return video
+        filename = video.get("filename") or f"{video_id}.mp4"
+        src_path = video.get("full_path")
 
-        if os.path.exists(dst_path):
-            base, ext = os.path.splitext(video["filename"])
-            dst_path = os.path.join(dst_folder_path, f"{base}_{int(time.time())}{ext}")
+        if src_path and os.path.exists(src_path):
+            dst_path = os.path.join(dst_folder_path, filename)
+            if src_path == dst_path:
+                return video
+            if os.path.exists(dst_path):
+                base, ext = os.path.splitext(filename)
+                dst_path = os.path.join(dst_folder_path, f"{base}_{int(time.time())}{ext}")
+            try:
+                shutil.move(src_path, dst_path)
+                new_rel = os.path.relpath(dst_path, self.base_dir).replace("\\", "/")
+            except Exception as e:
+                print(f"Error moving physical video file: {e}")
+                return None
+        else:
+            # Stream-only or remote video (no physical disk file)
+            new_rel = f"{clean_folder}/{filename}"
 
-        try:
-            shutil.move(src_path, dst_path)
-            # Update metadata keeping the SAME video_id
-            meta = self._load_metadata()
-            entry = meta.get(video_id, {})
-            new_rel = os.path.relpath(dst_path, self.base_dir).replace("\\", "/")
-            entry["id"] = video_id
-            entry["rel_path"] = new_rel
-            entry["folder"] = target_folder
-            meta[video_id] = entry
-            self._save_metadata(meta)
-            return self.get_video_by_id(video_id)
-        except Exception as e:
-            print(f"Error moving video: {e}")
-            return None
+        meta = self._load_metadata()
+        entry = meta.get(video_id, {})
+        entry["id"] = video_id
+        entry["rel_path"] = new_rel
+        entry["folder"] = clean_folder
+        meta[video_id] = entry
+        self._save_metadata(meta)
+        return self.get_video_by_id(video_id)
 
     def rename_video(self, video_id: str, new_title: str) -> bool:
         """Renames a video's display title in metadata."""

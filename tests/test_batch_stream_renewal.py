@@ -60,6 +60,16 @@ def test_refresh_album_streams_endpoint_not_found(client):
     assert response.status_code == 404
 
 
+def test_renew_video_streams_endpoint_empty(client):
+    """Tests /api/videos/renew-streams contract when no matching video IDs are requested."""
+    response = client.post("/api/videos/renew-streams", json={"video_ids": ["nonexistent-vid-999"]})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert "refreshed" in data
+    assert "failed" in data
+
+
 def test_translations_renew_streams_keys():
     """Validates that renewStreams translation keys exist in both pt-BR and en-US."""
     trans_path = os.path.join(
@@ -73,3 +83,10 @@ def test_translations_renew_streams_keys():
     assert "renewBatchSuccess:" in content
     assert "renewBatchWarning:" in content
     assert "renewBatchError:" in content
+    assert "renewSelectedTitle:" in content
+    assert "renewStreamTooltip:" in content
+    assert "renewSuccess:" in content
+    assert "renewWarning:" in content
+    assert "renewError:" in content
+    assert "renewStartedTitle:" in content
+    assert "renewCompletedTitle:" in content

@@ -469,6 +469,7 @@ def suggest_smart_folder_name(target_url: str, page_title: str = "") -> str:
             r"channel",
         ])
         folder_cand = re.sub(rf"(?i)\s*(?:{suffixes_pat}).*", "", page_title).strip()
+        folder_cand = re.sub(r'[\\/*?:"<>|]', '', folder_cand).strip(' ._')
         if len(folder_cand) >= 3:
             return folder_cand
     return "Extraídos"

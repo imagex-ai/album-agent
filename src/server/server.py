@@ -48,11 +48,11 @@ if sys.platform == "win32":
 
 import httpx
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request, Response, UploadFile, File, Form
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from .video_service import video_service
+from .video_service import video_service, sanitize_folder_name
 from .trash_service import trash_service
 
 from ..core.models import Album, AlbumImage, ResolutionMethod, TelemetryMetrics
@@ -1178,7 +1178,7 @@ async def health_check():
     """System health check and version information."""
     return {
         "status": "ok",
-        "version": "5.3.0",
+        "version": "5.4.0",
         "timestamp": time.time()
     }
 
@@ -2050,7 +2050,7 @@ def _extract_video_info_from_url_or_albums(stream_url: str, referer: Optional[st
 
     if not target_page:
         try:
-            from .video_service import video_service
+            from .video_service import video_service, sanitize_folder_name
             v_meta = video_service._load_metadata()
             for vid, ventry in v_meta.items():
                 c_stream = ventry.get("custom_stream_url") or ""
@@ -2078,11 +2078,12 @@ async def _re_resolve_video_stream(target_page: str, target_height: Optional[int
     and returns (fresh_stream_url, all_formats_info).
     """
     import yt_dlp
+    hdrs = {k: v for k, v in _get_video_download_headers(target_page, target_page).items() if k.lower() != "cookie"}
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "http_headers": _get_video_download_headers(target_page, target_page)
+        "http_headers": hdrs
     }
     extracted_cookies = {}
     def _extract():
@@ -2095,7 +2096,11 @@ async def _re_resolve_video_stream(target_page: str, target_height: Optional[int
     try:
         info = await asyncio.to_thread(_extract)
     except Exception as exc:
-        logger.warning(f"Auto re-resolution yt-dlp failed for {target_page}: {exc}")
+        exc_str = str(exc)
+        if "Unable to extract hash" in exc_str or "deleted" in exc_str.lower():
+            logger.warning(f"Video {target_page} was deleted or removed from the source website.")
+        else:
+            logger.warning(f"Auto re-resolution yt-dlp failed for {target_page}: {exc}")
         try:
             fallback_stream = await _resolve_best_video_stream("vid", target_page)
             if fallback_stream:
@@ -5238,6 +5243,7 @@ async def _relaunch_job_in_place(session_id: str, priority: bool = False) -> boo
         clean_title = re.sub(r"^(?:Save Video:\s*|Salvar Vídeo:\s*)+", "", raw_title, flags=re.I).strip() or "video_extraido"
 
         target_path = job.get("target_path")
+        folder_name = sanitize_folder_name(folder_name, default="Extraídos")
         target_folder = os.path.join(video_service.base_dir, folder_name)
         os.makedirs(target_folder, exist_ok=True)
         if not is_stream_only:
@@ -6911,7 +6917,7 @@ async def save_extracted_video_to_gallery(req: SaveExtractedVideoRequest):
     m_vid = re.search(r"(?:viewkey=|video-|/video/|/videos/)([a-zA-Z0-9_-]+)", vurl) or re.search(r"(?:viewkey=|video-|/video/|/videos/)([a-zA-Z0-9_-]+)", source_page_url)
     vid_id = m_vid.group(1) if m_vid else (req.candidate_id or "")
 
-    target_folder_name = req.folder or "Extraídos"
+    target_folder_name = sanitize_folder_name(req.folder, default="Extraídos")
     target_folder = os.path.join(video_service.base_dir, target_folder_name)
     os.makedirs(target_folder, exist_ok=True)
 
@@ -7074,8 +7080,8 @@ def _find_matching_existing_video(item_id: str, item_url: str, item_title: str, 
 
 class ScanPageVideosRequest(BaseModel):
     url: str
-    max_items: Optional[int] = 100
-    max_pages: Optional[int] = 1
+    max_items: Optional[int] = 5000
+    max_pages: Optional[int] = 50
 
 
 class BatchSaveVideoItemInput(BaseModel):
@@ -7343,12 +7349,19 @@ async def _resolve_best_video_stream(vid_id: str, page_url: str) -> Optional[str
 @app.post("/api/video-scraper/scan-page")
 async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
     """
-    Scans a web page URL to discover and extract ALL listed videos (thumbnails, titles, durations, IDs).
+    Scans a web page URL to discover and extract videos across all next pages (thumbnails, titles, durations, IDs).
+    Actively seeks subsequent pages (pagination links, NEXT buttons, rel=next) to gather complete playlists/categories.
     Also persists the scanned collection as a video Album in the library for future access.
     """
     target_url = req.url.strip()
     if not target_url or not (target_url.startswith("http://") or target_url.startswith("https://")):
         raise HTTPException(status_code=400, detail="Invalid URL.")
+
+    # Determine pagination limits
+    # If max_items is None, 0, or negative, default to 5000 for complete playlist/category crawling
+    limit = req.max_items if (req.max_items is not None and req.max_items > 0) else 5000
+    # If max_pages is None, 0, or negative, default to 50 pages safety ceiling
+    max_pages = req.max_pages if (req.max_pages is not None and req.max_pages > 0) else 50
 
     from playwright.async_api import async_playwright
 
@@ -7363,138 +7376,250 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             )
             page = await context.new_page()
-            try:
-                await page.goto(target_url, wait_until="domcontentloaded", timeout=40000)
-            except Exception as nav_err:
-                logger.warning(f"Navigation to {target_url} encountered: {nav_err}. Continuing with current DOM state if available.")
 
+            current_url = target_url
+            visited_urls = set()
+            scanned_items = []
+            seen_ids = set()
+            clean_page_title = ""
+            suggested_folder = ""
+            page_count = 0
 
-            # Smooth auto-scroll to trigger lazy loading / IntersectionObserver / virtualized DOM
-            await page.evaluate("""async () => {
-                const distance = 900;
-                const delay = 120;
-                let scrolled = 0;
-                while (document.scrollingElement.scrollTop + window.innerHeight < document.scrollingElement.scrollHeight) {
-                    document.scrollingElement.scrollBy(0, distance);
-                    scrolled += distance;
-                    await new Promise(r => setTimeout(r, delay));
-                    if (scrolled > 25000) break;
-                }
-                window.scrollTo(0, 0);
-            }""")
-            await asyncio.sleep(0.5)
+            while current_url and page_count < max_pages and len(scanned_items) < limit:
+                page_count += 1
+                visited_urls.add(current_url)
+                logger.info(f"[VideoScraper] Scanning page {page_count}/{max_pages}: {current_url}")
 
-            raw_title = await page.title()
-            clean_page_title = re.sub(r"\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$", "", raw_title or "Vídeos da Página", flags=re.I).strip()
+                timeout_ms = 40000 if page_count == 1 else 25000
+                try:
+                    await page.goto(current_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                except Exception as nav_err:
+                    logger.warning(f"Navigation to {current_url} encountered: {nav_err}. Continuing with current DOM state if available.")
 
-            # Universal DOM video extractor (Link-based + Multi-Card aggregation)
-            scanned_items = await page.evaluate(r"""() => {
-                const items = [];
-                const seenIds = new Set();
-                const seenHrefs = new Set();
-
-                function extractVideoId(href, a) {
-                    if (!href) return null;
-                    if (a && a.closest && a.closest('header, nav, #header, #headerWrapper, .language-select, .languageMenu, .headerMenu, footer, .footer')) return null;
-                    const txt = (a ? (a.innerText || '').trim().toLowerCase() : '');
-                    if (['english', 'português', 'español', 'deutsch', 'français', 'italiano', 'idioma', 'language'].includes(txt)) return null;
-
-                    // Provider A pattern: /video-VuuljJoHUPf/
-                    const mEp = href.match(/video-([a-zA-Z0-9]{8,15})/);
-                    if (mEp) return 'ep_' + mEp[1];
-
-                    // Provider B pattern: ?viewkey=ph60a...
-                    const mPh = href.match(/viewkey=([a-zA-Z0-9]+)/);
-                    if (mPh) return 'ph_' + mPh[1];
-
-                    // Provider C pattern: /video123456/ or /video.abcde/
-                    const mXv = href.match(/\/video(\d+)\//) || href.match(/\/video\.([a-zA-Z0-9]+)\//);
-                    if (mXv) return 'xv_' + mXv[1];
-
-                    // Generic tube patterns: /video/ID, /videos/ID, /watch/ID, /watch?v=ID
-                    const mGen = href.match(/(?:\/videos?\/|\/watch\?v=|\/watch\/|\/v\/)([a-zA-Z0-9_-]{5,32})/);
-                    if (mGen) return 'gen_' + mGen[1];
-
-                    return null;
-                }
-
-                function extractThumbnail(container) {
-                    if (!container) return '';
-                    const img = container.querySelector('img');
-                    if (img) {
-                        const src = img.getAttribute('data-src') ||
-                                    img.getAttribute('data-thumb_url') ||
-                                    img.getAttribute('data-mediumthumb') ||
-                                    img.getAttribute('data-lazy-src') ||
-                                    img.getAttribute('data-original') ||
-                                    img.getAttribute('data-thumb') ||
-                                    img.getAttribute('data-preview') ||
-                                    img.getAttribute('data-poster') ||
-                                    img.getAttribute('src');
-                        if (src && !src.startsWith('data:image/svg') && !src.includes('placeholder')) {
-                            return src.startsWith('//') ? 'https:' + src : src;
+                # Scroll behavior: thorough on page 1 to trigger lazy loading, fast and responsive on next pages
+                if page_count == 1:
+                    await page.evaluate("""async () => {
+                        const distance = 900;
+                        const delay = 100;
+                        let scrolled = 0;
+                        while (document.scrollingElement.scrollTop + window.innerHeight < document.scrollingElement.scrollHeight) {
+                            document.scrollingElement.scrollBy(0, distance);
+                            scrolled += distance;
+                            await new Promise(r => setTimeout(r, delay));
+                            if (scrolled > 25000) break;
                         }
-                        if (img.srcset) {
-                            const parts = img.srcset.split(',');
-                            if (parts.length > 0) {
-                                const first = parts[0].trim().split(' ')[0];
-                                if (first) return first.startsWith('//') ? 'https:' + first : first;
+                        window.scrollTo(0, 0);
+                    }""")
+                else:
+                    await page.evaluate("""async () => {
+                        window.scrollBy(0, 1500);
+                        await new Promise(r => setTimeout(r, 60));
+                        window.scrollTo(0, document.body.scrollHeight);
+                        await new Promise(r => setTimeout(r, 60));
+                        window.scrollTo(0, 0);
+                    }""")
+                await asyncio.sleep(0.3)
+
+                if page_count == 1:
+                    raw_title = await page.title()
+                    clean_page_title = re.sub(r"\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$", "", raw_title or "Vídeos da Página", flags=re.I).strip()
+                    clean_page_title = sanitize_folder_name(clean_page_title, default="Vídeos da Página")
+                    suggested_folder = suggest_smart_folder_name(target_url, clean_page_title)
+
+                # Universal DOM video extractor + Next Page Detection
+                page_data = await page.evaluate(r"""(curPageNum) => {
+                    const items = [];
+                    const localSeenIds = new Set();
+
+                    function extractVideoId(href, a) {
+                        if (!href) return null;
+                        if (a && a.closest && a.closest('header, nav, #header, #headerWrapper, .language-select, .languageMenu, .headerMenu, footer, .footer')) return null;
+                        const txt = (a ? (a.innerText || '').trim().toLowerCase() : '');
+                        if (['english', 'português', 'español', 'deutsch', 'français', 'italiano', 'idioma', 'language'].includes(txt)) return null;
+
+                        // Provider A pattern: /video-VuuljJoHUPf/
+                        const mEp = href.match(/video-([a-zA-Z0-9]{8,15})/);
+                        if (mEp) return 'ep_' + mEp[1];
+
+                        // Provider B pattern: ?viewkey=ph60a...
+                        const mPh = href.match(/viewkey=([a-zA-Z0-9]+)/);
+                        if (mPh) return 'ph_' + mPh[1];
+
+                        // Provider C pattern: /video123456/ or /video.abcde/
+                        const mXv = href.match(/\/video(\d+)\//) || href.match(/\/video\.([a-zA-Z0-9]+)\//);
+                        if (mXv) return 'xv_' + mXv[1];
+
+                        // Generic tube patterns: /video/ID, /videos/ID, /watch/ID, /watch?v=ID
+                        const mGen = href.match(/(?:\/videos?\/|\/watch\?v=|\/watch\/|\/v\/)([a-zA-Z0-9_-]{5,32})/);
+                        if (mGen) return 'gen_' + mGen[1];
+
+                        return null;
+                    }
+
+                    function extractThumbnail(container) {
+                        if (!container) return '';
+                        const img = container.querySelector('img');
+                        if (img) {
+                            const src = img.getAttribute('data-src') ||
+                                        img.getAttribute('data-thumb_url') ||
+                                        img.getAttribute('data-mediumthumb') ||
+                                        img.getAttribute('data-lazy-src') ||
+                                        img.getAttribute('data-original') ||
+                                        img.getAttribute('data-thumb') ||
+                                        img.getAttribute('data-preview') ||
+                                        img.getAttribute('data-poster') ||
+                                        img.getAttribute('src');
+                            if (src && !src.startsWith('data:image/svg') && !src.includes('placeholder')) {
+                                return src.startsWith('//') ? 'https:' + src : src;
+                            }
+                            if (img.srcset) {
+                                const parts = img.srcset.split(',');
+                                if (parts.length > 0) {
+                                    const first = parts[0].trim().split(' ')[0];
+                                    if (first) return first.startsWith('//') ? 'https:' + first : first;
+                                }
+                            }
+                        }
+                        // Check background-image
+                        const bgEls = [container, ...(container.querySelectorAll ? container.querySelectorAll('*') : [])];
+                        for (const el of bgEls.slice(0, 8)) {
+                            const style = el.getAttribute ? (el.getAttribute('style') || '') : '';
+                            const mBg = style.match(/background-image:\s*url\(['"]?(https?:\/\/[^'")]+)['"]?\)/i);
+                            if (mBg) return mBg[1];
+                        }
+                        return '';
+                    }
+
+                    const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                    const videoLinks = allLinks.filter(a => extractVideoId(a.href, a) !== null);
+
+                    videoLinks.forEach((a, idx) => {
+                        const rawId = extractVideoId(a.href, a);
+                        if (!rawId || localSeenIds.has(rawId)) return;
+                        localSeenIds.add(rawId);
+
+                        const cleanId = rawId.replace(/^[a-z]{2,3}_/, '');
+                        const card = a.closest('.mb, .video-box, .thumb-block, .item-video, .video-item, article.thumb, .videothumb, .phimage, .thumb, li, td') || a.parentElement || a;
+                        const thumb = extractThumbnail(card) || extractThumbnail(a);
+
+                        let title = a.getAttribute('title') ||
+                                    card.querySelector('.title, .video-title, h3, h4, h2, .name, [class*="title"]')?.innerText?.trim() ||
+                                    a.querySelector('img')?.getAttribute('alt') ||
+                                    a.querySelector('img')?.getAttribute('title') ||
+                                    a.innerText.trim();
+                        title = title.replace(/\s+/g, ' ').replace(/\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$/i, '').trim();
+
+                        const durEl = card.querySelector('.mbtim, .duration, .time, .badge-duration, [class*="duration"], [class*="time"]');
+                        const duration = durEl ? durEl.innerText.trim() : '';
+
+                        const qEl = card.querySelector('.mbhd, .hd, .badge-quality, [class*="hd"], [class*="quality"]');
+                        const quality = qEl ? qEl.innerText.trim() : '1080p HD';
+
+                        const isPrimary = !!a.closest('div.mb, div.video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, .main-results, #vidresults, #contentVideos, .video-list') && !a.closest('table, td, aside, .sidebar, #related, .related, .recommended, .top-videos');
+                        const section = isPrimary ? 'main' : 'recommended';
+
+                        items.push({
+                            id: cleanId,
+                            url: a.href,
+                            title: title || ('Vídeo ' + (idx + 1)),
+                            thumbnail_url: thumb,
+                            duration: duration,
+                            quality_hint: quality,
+                            section: section,
+                            is_primary: isPrimary,
+                            page_found: curPageNum
+                        });
+                    });
+
+                    // Multi-strategy Next Page Detection
+                    let nextUrl = null;
+
+                    // Strategy 1: Explicit <link rel="next"> or <a rel="next">
+                    const relNext = document.querySelector('link[rel="next"], a[rel="next"]');
+                    if (relNext && relNext.href && !relNext.href.startsWith('javascript:') && !relNext.href.startsWith('#')) {
+                        nextUrl = relNext.href;
+                    }
+
+                    // Strategy 2: Pagination container selectors with next classes
+                    if (!nextUrl) {
+                        const nextSel = document.querySelector('.pagination .next a, .pagination a.next, a.next_page, a.next-page, a.pagination-next, .pagination-next a, .page-next a, li.page_next a, .page_next a, a#next_page, a.nextPage, [aria-label*="Next" i], [title*="Next page" i], [title*="Próxima" i]');
+                        if (nextSel && nextSel.href && !nextSel.href.startsWith('javascript:') && !nextSel.href.startsWith('#')) {
+                            nextUrl = nextSel.href;
+                        }
+                    }
+
+                    // Strategy 3: Text content inspection of anchors
+                    if (!nextUrl) {
+                        for (const a of allLinks) {
+                            const txt = (a.innerText || '').trim().toLowerCase();
+                            const title = (a.getAttribute('title') || '').trim().toLowerCase();
+                            const aria = (a.getAttribute('aria-label') || '').trim().toLowerCase();
+                            const cls = (a.className || '').toString().toLowerCase();
+
+                            const isNextMatch = (
+                                txt === 'next' || txt === 'next »' || txt === 'next >' || txt === 'next ›' ||
+                                txt === '»' || txt === '›' || txt === 'próxima' || txt === 'proxima' ||
+                                txt === 'seguinte' || txt === 'suivante' || txt === 'weiter' ||
+                                title.includes('next page') || title.includes('próxima') || aria.includes('next page') ||
+                                cls.includes('pagination-next') || cls.includes('next-page')
+                            );
+
+                            if (isNextMatch && a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
+                                nextUrl = a.href;
+                                break;
                             }
                         }
                     }
-                    // Check background-image
-                    const bgEls = [container, ...(container.querySelectorAll ? container.querySelectorAll('*') : [])];
-                    for (const el of bgEls.slice(0, 8)) {
-                        const style = el.getAttribute ? (el.getAttribute('style') || '') : '';
-                        const mBg = style.match(/background-image:\s*url\(['"]?(https?:\/\/[^'")]+)['"]?\)/i);
-                        if (mBg) return mBg[1];
+
+                    // Strategy 4: Numbered pagination next link (e.g. curPageNum + 1)
+                    if (!nextUrl) {
+                        const nextPageNumStr = String(curPageNum + 1);
+                        for (const a of allLinks) {
+                            const txt = (a.innerText || '').trim();
+                            if (txt === nextPageNumStr && a.closest('.pagination, .paging, .pages, .pagination-holder, nav, ul, ol')) {
+                                if (a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
+                                    nextUrl = a.href;
+                                    break;
+                                }
+                            }
+                        }
                     }
-                    return '';
-                }
 
-                const allLinks = Array.from(document.querySelectorAll('a[href]'));
-                const videoLinks = allLinks.filter(a => extractVideoId(a.href, a) !== null);
+                    return { items: items, nextUrl: nextUrl };
+                }""", page_count)
 
-                videoLinks.forEach((a, idx) => {
-                    const rawId = extractVideoId(a.href, a);
-                    if (!rawId || seenIds.has(rawId)) return;
-                    seenIds.add(rawId);
-                    seenHrefs.add(a.href);
+                extracted_items = page_data.get("items", [])
+                new_items_this_page = 0
 
-                    const cleanId = rawId.replace(/^[a-z]{2,3}_/, '');
-                    const card = a.closest('.mb, .video-box, .thumb-block, .item-video, .video-item, article.thumb, .videothumb, .phimage, .thumb, li, td') || a.parentElement || a;
-                    const thumb = extractThumbnail(card) || extractThumbnail(a);
+                for item in extracted_items:
+                    vid_id = item.get("id")
+                    if vid_id and vid_id not in seen_ids:
+                        seen_ids.add(vid_id)
+                        scanned_items.append(item)
+                        new_items_this_page += 1
+                        if len(scanned_items) >= limit:
+                            break
 
-                    let title = a.getAttribute('title') ||
-                                card.querySelector('.title, .video-title, h3, h4, h2, .name, [class*="title"]')?.innerText?.trim() ||
-                                a.querySelector('img')?.getAttribute('alt') ||
-                                a.querySelector('img')?.getAttribute('title') ||
-                                a.innerText.trim();
-                    title = title.replace(/\s+/g, ' ').replace(/\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$/i, '').trim();
+                logger.info(f"[VideoScraper] Page {page_count}: found {len(extracted_items)} items ({new_items_this_page} new, total {len(scanned_items)}/{limit})")
 
-                    const durEl = card.querySelector('.mbtim, .duration, .time, .badge-duration, [class*="duration"], [class*="time"]');
-                    const duration = durEl ? durEl.innerText.trim() : '';
+                if len(scanned_items) >= limit:
+                    logger.info(f"[VideoScraper] Reached requested limit of {limit} videos. Halting multi-page scan.")
+                    break
 
-                    const qEl = card.querySelector('.mbhd, .hd, .badge-quality, [class*="hd"], [class*="quality"]');
-                    const quality = qEl ? qEl.innerText.trim() : '1080p HD';
+                detected_next = page_data.get("nextUrl")
 
-                    const isPrimary = !!a.closest('div.mb, div.video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, .main-results, #vidresults, #contentVideos, .video-list') && !a.closest('table, td, aside, .sidebar, #related, .related, .recommended, .top-videos');
-                    const section = isPrimary ? 'main' : 'recommended';
+                # Strategy 5 Fallback: URL pattern increment if on page 1 and no explicit next link was found
+                if not detected_next and page_count == 1:
+                    m_pat = re.match(r"^(https?://[^/]+(?:/[^/]+)+?)(?:/)?$", current_url)
+                    if m_pat and not re.search(r"\.(?:html|php|aspx?)$", current_url):
+                        candidate_next = m_pat.group(1).rstrip("/") + "/2/"
+                        detected_next = candidate_next
 
-                    items.push({
-                        id: cleanId,
-                        url: a.href,
-                        title: title || ('Vídeo ' + (idx + 1)),
-                        thumbnail_url: thumb,
-                        duration: duration,
-                        quality_hint: quality,
-                        section: section,
-                        is_primary: isPrimary
-                    });
-                });
+                if not detected_next or detected_next in visited_urls or new_items_this_page == 0:
+                    logger.info(f"[VideoScraper] No more next pages or end of playlist reached after {page_count} page(s).")
+                    break
 
-                return items;
-            }""")
+                current_url = detected_next
 
             # If target_url itself is a single video watch page, prepend it as the main hero video
             canon_hero = extract_canonical_target_page(target_url)
@@ -7523,7 +7648,8 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
                     "duration": "",
                     "quality_hint": "1080p HD",
                     "section": "main",
-                    "is_primary": True
+                    "is_primary": True,
+                    "page_found": 1
                 })
 
             # Fast thumbnail & metadata enrichment for videos without direct thumbnails (e.g. table / list links)
@@ -7546,12 +7672,8 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
                                     item["duration"] = f"{m}:{s:02d}"
                     except Exception:
                         pass
-                await asyncio.gather(*[_enrich_thumb(it) for it in items_missing_thumb[:35]])
+                await asyncio.gather(*[_enrich_thumb(it) for it in items_missing_thumb[:100]])
 
-            # Suggest smart folder name
-            suggested_folder = suggest_smart_folder_name(target_url, clean_page_title)
-
-            limit = req.max_items or 100
             final_videos = scanned_items[:limit]
 
             # Cross-reference with existing videos in the user's gallery
@@ -7586,6 +7708,7 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
                 "already_saved_count": already_saved_count,
                 "new_videos_count": new_videos_count,
                 "album_id": "",
+                "pages_scanned": page_count,
                 "videos": final_videos
             }
 
@@ -7594,6 +7717,382 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
             raise HTTPException(status_code=500, detail=f"Error scanning page videos: {str(exc)}")
         finally:
             await browser.close()
+
+
+@app.post("/api/video-scraper/scan-page-stream")
+async def scan_page_for_videos_stream_endpoint(req: ScanPageVideosRequest):
+    """
+    Real-time streaming (SSE) video scraper endpoint.
+    Crawls subsequent playlist/tag/category pages and streams newly discovered video batches
+    to the client as each page finishes loading, allowing dynamic live display in the UI.
+    """
+    target_url = req.url.strip()
+    if not target_url or not (target_url.startswith("http://") or target_url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="Invalid URL.")
+
+    limit = req.max_items if (req.max_items is not None and req.max_items > 0) else 5000
+    max_pages = req.max_pages if (req.max_pages is not None and req.max_pages > 0) else 50
+
+    from playwright.async_api import async_playwright
+
+    async def event_generator():
+        async with async_playwright() as p:
+            try:
+                browser = await p.chromium.launch(headless=True)
+            except Exception as launch_err:
+                logger.warning(f"Chromium local não iniciou ({launch_err}), utilizando Chrome do sistema...")
+                browser = await p.chromium.launch(headless=True, channel="chrome")
+            try:
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                )
+                page = await context.new_page()
+
+                current_url = target_url
+                visited_urls = set()
+                scanned_items = []
+                seen_ids = set()
+                clean_page_title = ""
+                suggested_folder = ""
+                page_count = 0
+
+                # Pre-fetch existing gallery videos for instantaneous matching
+                try:
+                    all_existing = video_service.list_all_videos()
+                except Exception:
+                    all_existing = []
+
+                while current_url and page_count < max_pages and len(scanned_items) < limit:
+                    page_count += 1
+                    visited_urls.add(current_url)
+                    logger.info(f"[VideoScraperStream] Crawling page {page_count}/{max_pages}: {current_url}")
+
+                    timeout_ms = 40000 if page_count == 1 else 25000
+                    try:
+                        await page.goto(current_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    except Exception as nav_err:
+                        logger.warning(f"Navigation to {current_url} encountered: {nav_err}. Continuing with current DOM state if available.")
+
+                    if page_count == 1:
+                        await page.evaluate("""async () => {
+                            const distance = 900;
+                            const delay = 100;
+                            let scrolled = 0;
+                            while (document.scrollingElement.scrollTop + window.innerHeight < document.scrollingElement.scrollHeight) {
+                                document.scrollingElement.scrollBy(0, distance);
+                                scrolled += distance;
+                                await new Promise(r => setTimeout(r, delay));
+                                if (scrolled > 25000) break;
+                            }
+                            window.scrollTo(0, 0);
+                        }""")
+                    else:
+                        await page.evaluate("""async () => {
+                            window.scrollBy(0, 1500);
+                            await new Promise(r => setTimeout(r, 60));
+                            window.scrollTo(0, document.body.scrollHeight);
+                            await new Promise(r => setTimeout(r, 60));
+                            window.scrollTo(0, 0);
+                        }""")
+                    await asyncio.sleep(0.3)
+
+                    if page_count == 1:
+                        raw_title = await page.title()
+                        clean_page_title = re.sub(r"\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$", "", raw_title or "Vídeos da Página", flags=re.I).strip()
+                        clean_page_title = sanitize_folder_name(clean_page_title, default="Vídeos da Página")
+                        suggested_folder = suggest_smart_folder_name(target_url, clean_page_title)
+
+                        # Check if target_url itself is a single video watch page
+                        canon_hero = extract_canonical_target_page(target_url)
+                        self_id = None
+                        if canon_hero:
+                            m_hero = re.search(r"(?:viewkey=|video-)([a-zA-Z0-9_-]+)", target_url)
+                            self_id = m_hero.group(1) if m_hero else None
+                        if self_id:
+                            try:
+                                hero_thumb = await page.evaluate(r"""() => {
+                                    const og = document.querySelector('meta[property="og:image"]')?.content || '';
+                                    if (og) return og;
+                                    const poster = document.querySelector('video')?.getAttribute('poster') || '';
+                                    if (poster) return poster;
+                                    return '';
+                                }""")
+                            except Exception:
+                                hero_thumb = ""
+                            hero_item = {
+                                "id": self_id,
+                                "url": target_url,
+                                "title": clean_page_title,
+                                "thumbnail_url": hero_thumb or "",
+                                "duration": "",
+                                "quality_hint": "1080p HD",
+                                "section": "main",
+                                "is_primary": True,
+                                "page_found": 1
+                            }
+                            seen_ids.add(self_id)
+                            matched = _find_matching_existing_video(self_id, target_url, clean_page_title, all_existing)
+                            if matched:
+                                hero_item["already_saved"] = True
+                                hero_item["saved_folder"] = matched.get("folder", "Galeria")
+                                hero_item["saved_video_id"] = matched.get("id", "")
+                                hero_item["saved_filename"] = matched.get("filename", "")
+                            else:
+                                hero_item["already_saved"] = False
+                            scanned_items.append(hero_item)
+
+                    # Extract page items and next link
+                    page_data = await page.evaluate(r"""(curPageNum) => {
+                        const items = [];
+                        const localSeenIds = new Set();
+
+                        function extractVideoId(href, a) {
+                            if (!href) return null;
+                            if (a && a.closest && a.closest('header, nav, #header, #headerWrapper, .language-select, .languageMenu, .headerMenu, footer, .footer')) return null;
+                            const txt = (a ? (a.innerText || '').trim().toLowerCase() : '');
+                            if (['english', 'português', 'español', 'deutsch', 'français', 'italiano', 'idioma', 'language'].includes(txt)) return null;
+
+                            const mEp = href.match(/video-([a-zA-Z0-9]{8,15})/);
+                            if (mEp) return 'ep_' + mEp[1];
+                            const mPh = href.match(/viewkey=([a-zA-Z0-9]+)/);
+                            if (mPh) return 'ph_' + mPh[1];
+                            const mXv = href.match(/\/video(\d+)\//) || href.match(/\/video\.([a-zA-Z0-9]+)\//);
+                            if (mXv) return 'xv_' + mXv[1];
+                            const mGen = href.match(/(?:\/videos?\/|\/watch\?v=|\/watch\/|\/v\/)([a-zA-Z0-9_-]{5,32})/);
+                            if (mGen) return 'gen_' + mGen[1];
+                            return null;
+                        }
+
+                        function extractThumbnail(container) {
+                            if (!container) return '';
+                            const img = container.querySelector('img');
+                            if (img) {
+                                const src = img.getAttribute('data-src') ||
+                                            img.getAttribute('data-thumb_url') ||
+                                            img.getAttribute('data-mediumthumb') ||
+                                            img.getAttribute('data-lazy-src') ||
+                                            img.getAttribute('data-original') ||
+                                            img.getAttribute('data-thumb') ||
+                                            img.getAttribute('data-preview') ||
+                                            img.getAttribute('data-poster') ||
+                                            img.getAttribute('src');
+                                if (src && !src.startsWith('data:image/svg') && !src.includes('placeholder')) {
+                                    return src.startsWith('//') ? 'https:' + src : src;
+                                }
+                                if (img.srcset) {
+                                    const parts = img.srcset.split(',');
+                                    if (parts.length > 0) {
+                                        const first = parts[0].trim().split(' ')[0];
+                                        if (first) return first.startsWith('//') ? 'https:' + first : first;
+                                    }
+                                }
+                            }
+                            const bgEls = [container, ...(container.querySelectorAll ? container.querySelectorAll('*') : [])];
+                            for (const el of bgEls.slice(0, 8)) {
+                                const style = el.getAttribute ? (el.getAttribute('style') || '') : '';
+                                const mBg = style.match(/background-image:\s*url\(['"]?(https?:\/\/[^'")]+)['"]?\)/i);
+                                if (mBg) return mBg[1];
+                            }
+                            return '';
+                        }
+
+                        const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                        const videoLinks = allLinks.filter(a => extractVideoId(a.href, a) !== null);
+
+                        videoLinks.forEach((a, idx) => {
+                            const rawId = extractVideoId(a.href, a);
+                            if (!rawId || localSeenIds.has(rawId)) return;
+                            localSeenIds.add(rawId);
+
+                            const cleanId = rawId.replace(/^[a-z]{2,3}_/, '');
+                            const card = a.closest('.mb, .video-box, .thumb-block, .item-video, .video-item, article.thumb, .videothumb, .phimage, .thumb, li, td') || a.parentElement || a;
+                            const thumb = extractThumbnail(card) || extractThumbnail(a);
+
+                            let title = a.getAttribute('title') ||
+                                        card.querySelector('.title, .video-title, h3, h4, h2, .name, [class*="title"]')?.innerText?.trim() ||
+                                        a.querySelector('img')?.getAttribute('alt') ||
+                                        a.querySelector('img')?.getAttribute('title') ||
+                                        a.innerText.trim();
+                            title = title.replace(/\s+/g, ' ').replace(/\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$/i, '').trim();
+
+                            const durEl = card.querySelector('.mbtim, .duration, .time, .badge-duration, [class*="duration"], [class*="time"]');
+                            const duration = durEl ? durEl.innerText.trim() : '';
+
+                            const qEl = card.querySelector('.mbhd, .hd, .badge-quality, [class*="hd"], [class*="quality"]');
+                            const quality = qEl ? qEl.innerText.trim() : '1080p HD';
+
+                            const isPrimary = !!a.closest('div.mb, div.video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, .main-results, #vidresults, #contentVideos, .video-list') && !a.closest('table, td, aside, .sidebar, #related, .related, .recommended, .top-videos');
+                            const section = isPrimary ? 'main' : 'recommended';
+
+                            items.push({
+                                id: cleanId,
+                                url: a.href,
+                                title: title || ('Vídeo ' + (idx + 1)),
+                                thumbnail_url: thumb,
+                                duration: duration,
+                                quality_hint: quality,
+                                section: section,
+                                is_primary: isPrimary,
+                                page_found: curPageNum
+                            });
+                        });
+
+                        // Multi-strategy Next Page Detection
+                        let nextUrl = null;
+                        const relNext = document.querySelector('link[rel="next"], a[rel="next"]');
+                        if (relNext && relNext.href && !relNext.href.startsWith('javascript:') && !relNext.href.startsWith('#')) {
+                            nextUrl = relNext.href;
+                        }
+
+                        if (!nextUrl) {
+                            const nextSel = document.querySelector('.pagination .next a, .pagination a.next, a.next_page, a.next-page, a.pagination-next, .pagination-next a, .page-next a, li.page_next a, .page_next a, a#next_page, a.nextPage, [aria-label*="Next" i], [title*="Next page" i], [title*="Próxima" i]');
+                            if (nextSel && nextSel.href && !nextSel.href.startsWith('javascript:') && !nextSel.href.startsWith('#')) {
+                                nextUrl = nextSel.href;
+                            }
+                        }
+
+                        if (!nextUrl) {
+                            for (const a of allLinks) {
+                                const txt = (a.innerText || '').trim().toLowerCase();
+                                const title = (a.getAttribute('title') || '').trim().toLowerCase();
+                                const aria = (a.getAttribute('aria-label') || '').trim().toLowerCase();
+                                const cls = (a.className || '').toString().toLowerCase();
+
+                                const isNextMatch = (
+                                    txt === 'next' || txt === 'next »' || txt === 'next >' || txt === 'next ›' ||
+                                    txt === '»' || txt === '›' || txt === 'próxima' || txt === 'proxima' ||
+                                    txt === 'seguinte' || txt === 'suivante' || txt === 'weiter' ||
+                                    title.includes('next page') || title.includes('próxima') || aria.includes('next page') ||
+                                    cls.includes('pagination-next') || cls.includes('next-page')
+                                );
+
+                                if (isNextMatch && a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
+                                    nextUrl = a.href;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!nextUrl) {
+                            const nextPageNumStr = String(curPageNum + 1);
+                            for (const a of allLinks) {
+                                const txt = (a.innerText || '').trim();
+                                if (txt === nextPageNumStr && a.closest('.pagination, .paging, .pages, .pagination-holder, nav, ul, ol')) {
+                                    if (a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
+                                        nextUrl = a.href;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        return { items: items, nextUrl: nextUrl };
+                    }""", page_count)
+
+                    extracted_items = page_data.get("items", [])
+                    new_this_page = []
+
+                    for item in extracted_items:
+                        vid_id = item.get("id")
+                        if vid_id and vid_id not in seen_ids:
+                            seen_ids.add(vid_id)
+                            matched = _find_matching_existing_video(vid_id, item.get("url", ""), item.get("title", ""), all_existing)
+                            if matched:
+                                item["already_saved"] = True
+                                item["saved_folder"] = matched.get("folder", "Galeria")
+                                item["saved_video_id"] = matched.get("id", "")
+                                item["saved_filename"] = matched.get("filename", "")
+                            else:
+                                item["already_saved"] = False
+
+                            scanned_items.append(item)
+                            new_this_page.append(item)
+                            if len(scanned_items) >= limit:
+                                break
+
+                    # Fast thumb enrichment for table/list links missing thumbnails
+                    items_missing_thumb = [it for it in new_this_page if not it.get("thumbnail_url") and matches_enrichment_provider(it.get("url", ""))]
+                    if items_missing_thumb:
+                        async def _enrich_thumb(item):
+                            try:
+                                async with httpx.AsyncClient(timeout=3.0) as cl:
+                                    r = await cl.get(get_enrichment_api_url(item['id'], item.get('url')), headers={"User-Agent": "Mozilla/5.0"})
+                                    if r.status_code == 200:
+                                        d = r.json()
+                                        thumb_src = d.get("default_thumb", {}).get("src")
+                                        if thumb_src:
+                                            item["thumbnail_url"] = thumb_src
+                                        if d.get("title") and (not item.get("title") or item["title"].startswith("Vídeo ")):
+                                            item["title"] = d["title"]
+                                        if d.get("length_sec"):
+                                            sec = int(d["length_sec"])
+                                            m, s = divmod(sec, 60)
+                                            item["duration"] = f"{m}:{s:02d}"
+                            except Exception:
+                                pass
+                        await asyncio.gather(*[_enrich_thumb(it) for it in items_missing_thumb[:30]])
+
+                    already_saved_total = sum(1 for v in scanned_items if v.get("already_saved"))
+                    main_count_total = sum(1 for v in scanned_items if v.get("is_primary", True))
+                    rec_count_total = len(scanned_items) - main_count_total
+
+                    # Yield page event immediately so the frontend displays the new batch dynamically!
+                    page_payload = {
+                        "type": "page",
+                        "page_number": page_count,
+                        "pages_scanned": page_count,
+                        "page_title": clean_page_title,
+                        "suggested_folder": suggested_folder,
+                        "new_videos": new_this_page,
+                        "total_found": len(scanned_items),
+                        "main_count": main_count_total,
+                        "recommended_count": rec_count_total,
+                        "already_saved_count": already_saved_total,
+                        "new_videos_count": len(scanned_items) - already_saved_total
+                    }
+                    yield f"data: {json.dumps(page_payload)}\n\n"
+
+                    if len(scanned_items) >= limit:
+                        logger.info(f"[VideoScraperStream] Reached requested limit of {limit} videos.")
+                        break
+
+                    detected_next = page_data.get("nextUrl")
+                    if not detected_next and page_count == 1:
+                        m_pat = re.match(r"^(https?://[^/]+(?:/[^/]+)+?)(?:/)?$", current_url)
+                        if m_pat and not re.search(r"\.(?:html|php|aspx?)$", current_url):
+                            candidate_next = m_pat.group(1).rstrip("/") + "/2/"
+                            detected_next = candidate_next
+
+                    if not detected_next or detected_next in visited_urls or len(new_this_page) == 0:
+                        logger.info(f"[VideoScraperStream] No more next pages or end of playlist reached after {page_count} page(s).")
+                        break
+
+                    current_url = detected_next
+
+                # Complete event
+                complete_payload = {
+                    "type": "complete",
+                    "success": True,
+                    "page_title": clean_page_title,
+                    "suggested_folder": suggested_folder,
+                    "total_found": len(scanned_items),
+                    "main_count": sum(1 for v in scanned_items if v.get("is_primary", True)),
+                    "recommended_count": sum(1 for v in scanned_items if not v.get("is_primary", True)),
+                    "already_saved_count": sum(1 for v in scanned_items if v.get("already_saved")),
+                    "new_videos_count": len(scanned_items) - sum(1 for v in scanned_items if v.get("already_saved")),
+                    "pages_scanned": page_count,
+                    "album_id": "",
+                    "videos": scanned_items[:limit]
+                }
+                yield f"data: {json.dumps(complete_payload)}\n\n"
+
+            except Exception as exc:
+                logger.error(f"Error in video scraper stream: {exc}", exc_info=True)
+                yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
+            finally:
+                await browser.close()
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.post("/api/video-scraper/batch-save")
@@ -7606,7 +8105,7 @@ async def batch_save_videos_endpoint(req: BatchSaveVideosRequest):
     if not req.videos:
         raise HTTPException(status_code=400, detail="No videos selected for saving.")
 
-    target_folder_name = req.folder.strip() if req.folder and req.folder.strip() else "Extraídos"
+    target_folder_name = sanitize_folder_name(req.folder, default="Extraídos")
     target_folder = os.path.join(video_service.base_dir, target_folder_name)
     os.makedirs(target_folder, exist_ok=True)
 
@@ -7773,7 +8272,11 @@ async def get_videos_and_folders(heal: bool = False):
 
 @app.post("/api/videos/sync")
 async def sync_videos_endpoint():
-    """Triggers disk scan and asynchronous thumbnail healing for all videos missing thumbnails."""
+    """Triggers disk scan, HF metadata sync, and asynchronous thumbnail healing for all videos missing thumbnails."""
+    try:
+        video_service.restore_metadata_from_hf()
+    except Exception as e:
+        logger.warning(f"Error syncing HF metadata in videos endpoint: {e}")
     video_service.auto_heal_all_thumbnails(background=True)
     return {
         "success": True,
@@ -8408,25 +8911,7 @@ async def sync_huggingface_data():
 
     # 4. Sincronizar metadata/videos_metadata.json
     try:
-        remote_vids = _cs.download_json("metadata/videos_metadata.json")
-        if remote_vids and isinstance(remote_vids, dict):
-            v_meta_file = os.path.join(VIDEOS_DIR, "videos_metadata.json")
-            local_vids = {}
-            if os.path.exists(v_meta_file):
-                try:
-                    with open(v_meta_file, "r", encoding="utf-8") as f:
-                        local_vids = json.load(f)
-                except Exception:
-                    local_vids = {}
-            added_vids = 0
-            for v_id, v_data in remote_vids.items():
-                if v_id not in local_vids:
-                    local_vids[v_id] = v_data
-                    added_vids += 1
-            if added_vids > 0:
-                with open(v_meta_file, "w", encoding="utf-8") as f:
-                    json.dump(local_vids, f, indent=2, ensure_ascii=False)
-            results["restored_videos"] = added_vids
+        results["restored_videos"] = video_service.restore_metadata_from_hf()
     except Exception as e:
         results["errors"].append(f"Erro em metadata/videos_metadata.json: {str(e)}")
 
@@ -8564,6 +9049,14 @@ async def get_video_thumbnail(video_id: str):
     """Returns a high-speed cached JPEG thumbnail for the video.
     If local file is missing (Render restart), fetches from Hugging Face dataset."""
     thumb_path = video_service.get_or_generate_thumbnail(video_id)
+    if not thumb_path or not os.path.exists(thumb_path):
+        # Fallback for trashed videos: check trash metadata for source_thumbnail_url
+        trash_item = trash_service._load_meta().get(f"trash_vid_{video_id}")
+        if trash_item:
+            cand_thumb = trash_item.get("metadata", {}).get("source_thumbnail_url") or trash_item.get("thumbnail_url")
+            if cand_thumb and str(cand_thumb).startswith("http") and "/api/videos/" not in str(cand_thumb):
+                thumb_path = video_service.get_or_generate_thumbnail(video_id, thumbnail_url=cand_thumb)
+
     if thumb_path and os.path.exists(thumb_path):
         return FileResponse(
             thumb_path,
@@ -8760,6 +9253,50 @@ async def toggle_video_favorite(video_id: str):
     return {"success": True, "video_id": video_id, "is_favorite": new_fav}
 
 
+@app.post("/api/videos/{video_id}/upload-hf")
+async def upload_video_to_hf(video_id: str):
+    """Triggers background upload of a local video to Hugging Face dataset."""
+    from src.server.video_service import cloud_storage
+    if not cloud_storage.is_connected():
+        conn, err = cloud_storage.get_connection_status()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Hugging Face desconectado: {err or 'Configure HF_TOKEN e HF_DATASET_REPO nas configurações.'}"
+        )
+    video = video_service.get_video_by_id(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Vídeo não encontrado")
+
+    local_path = video.get("full_path")
+    if not local_path or not os.path.exists(local_path):
+        raise HTTPException(status_code=400, detail="Arquivo local do vídeo não encontrado no disco para upload.")
+
+    folder = video.get("folder", "Geral")
+    filename = video.get("filename") or os.path.basename(local_path)
+    video_service._trigger_background_upload(video_id, local_path, folder, filename)
+    return {
+        "success": True,
+        "message": f"Upload de '{video.get('title')}' para Hugging Face iniciado em segundo plano."
+    }
+
+
+@app.post("/api/videos/sync-all-to-hf")
+async def sync_all_videos_to_hf():
+    """Triggers background upload of all pending local videos to Hugging Face sequentially."""
+    from src.server.video_service import cloud_storage
+    if not cloud_storage.is_connected():
+        conn, err = cloud_storage.get_connection_status()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Hugging Face desconectado: {err or 'Configure HF_TOKEN e HF_DATASET_REPO nas configurações.'}"
+        )
+    video_service.sync_local_videos_to_cloud()
+    return {
+        "success": True,
+        "message": "Sincronização em segundo plano de todos os vídeos locais para o Hugging Face iniciada."
+    }
+
+
 async def _resolve_album_video_smart_highlight(video_id: str, force: bool = False, desired_window: float = 35.0):
     if not _completed_albums:
         _load_albums_from_disk()
@@ -8868,14 +9405,20 @@ async def batch_delete_videos(req: BatchDeleteVideosRequest):
     """Moves multiple videos to the Trash Bin."""
     deleted_ids = []
     meta = video_service._load_metadata()
+    videos_to_move = []
     for vid in req.video_ids:
         video = video_service.get_video_by_id(vid)
         if video:
-            item = trash_service.move_video_to_trash(video)
-            if item:
-                deleted_ids.append(vid)
-                if vid in meta:
-                    del meta[vid]
+            videos_to_move.append(video)
+
+    trash_items = trash_service.move_videos_to_trash_batch(videos_to_move)
+    for item in trash_items:
+        orig_id = item.get("metadata", {}).get("original_video_id")
+        if orig_id:
+            deleted_ids.append(orig_id)
+            if orig_id in meta:
+                del meta[orig_id]
+
     video_service._save_metadata(meta)
     return {"success": True, "deleted_ids": deleted_ids}
 
@@ -8911,23 +9454,48 @@ async def get_trash_stats():
 
 
 @app.get("/api/trash/videos/{trash_id}/stream")
-async def stream_trash_video(trash_id: str):
+async def stream_trash_video(trash_id: str, request: Request):
     """Streams a video currently stored in the trash."""
     meta = trash_service._load_meta()
     item = meta.get(trash_id)
     if not item or item.get("type") != "video":
         raise HTTPException(status_code=404, detail="Video in trash not found")
-    trash_filename = item.get("metadata", {}).get("trash_filename")
+    item_meta = item.get("metadata", {})
+    trash_filename = item_meta.get("trash_filename")
     vpath = os.path.join(trash_service.trash_videos_dir, trash_filename) if trash_filename else ""
-    return FileResponse(
-        vpath,
-        media_type="video/mp4",
-        content_disposition_type="inline",
-        headers={
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "public, max-age=3600"
-        }
-    )
+    if vpath and os.path.exists(vpath):
+        return FileResponse(
+            vpath,
+            media_type="video/mp4",
+            content_disposition_type="inline",
+            headers={
+                "Accept-Ranges": "bytes",
+                "Cache-Control": "public, max-age=3600"
+            }
+        )
+
+    # Remote / stream_url proxy support
+    if item_meta.get("storage_location") == "stream_url" or item_meta.get("custom_stream_url"):
+        raw_stream = item_meta.get("custom_stream_url") or item_meta.get("source_url") or ""
+        if "/api/proxy-video-stream" in raw_stream and "url=" in raw_stream:
+            try:
+                parsed_q = urllib.parse.parse_qs(urllib.parse.urlparse(raw_stream).query)
+                if "url" in parsed_q and parsed_q["url"]:
+                    raw_stream = parsed_q["url"][0]
+            except Exception:
+                pass
+        if raw_stream and raw_stream.startswith("http"):
+            return await proxy_video_stream(
+                request=request,
+                url=raw_stream,
+                referer=item_meta.get("source_url") or raw_stream
+            )
+
+    cloud_url = item_meta.get("cloud_url") or item_meta.get("source_url")
+    if cloud_url and cloud_url.startswith("http"):
+        return RedirectResponse(cloud_url)
+
+    raise HTTPException(status_code=404, detail="Video not found locally or in trash")
 
 
 
@@ -9354,11 +9922,12 @@ async def _refresh_single_image_stream(img, default_page: Optional[str] = None) 
     if not target_url:
         return False, "No valid video URL or ID found in image"
 
+    hdrs = {k: v for k, v in _get_video_download_headers(target_url, target_url).items() if k.lower() != "cookie"}
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "http_headers": _get_video_download_headers(target_url, target_url)
+        "http_headers": hdrs
     }
     extracted_cookies = {}
     def _extract():
@@ -9475,11 +10044,12 @@ async def _refresh_album_video_streams(album: Album) -> tuple[list, list]:
                 failed.append({"id": str(img.id), "error": "No target URL could be identified"})
             continue
 
+        hdrs = {k: v for k, v in _get_video_download_headers(target_url, target_url).items() if k.lower() != "cookie"}
         ydl_opts = {
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
-            "http_headers": _get_video_download_headers(target_url, target_url)
+            "http_headers": hdrs
         }
         extracted_cookies = {}
         def _extract():
@@ -9571,6 +10141,7 @@ async def refresh_album_streams_endpoint(session_id: str):
         if refreshed:
             _completed_albums[session_id] = album
             _save_album_to_disk(session_id, album)
+            _sync_refreshed_album_to_video_gallery(album)
 
         return {
             "success": True,
@@ -9578,6 +10149,60 @@ async def refresh_album_streams_endpoint(session_id: str):
             "failed": len(failed),
             "details": {"refreshed": refreshed, "failed": failed},
         }
+
+
+def _sync_refreshed_album_to_video_gallery(album: Album):
+    """Syncs renewed stream URLs from an album to matching entries in the Video Gallery metadata."""
+    try:
+        from .video_service import video_service, sanitize_folder_name
+        v_meta = video_service._load_metadata()
+        updated = False
+        for img in getattr(album, "images", []):
+            if getattr(img, "media_type", None) != "video":
+                continue
+            new_stream = getattr(img, "video_stream_url", None) or getattr(img, "original_url", None)
+            if not new_stream:
+                continue
+            s_page = getattr(img, "source_page", None) or getattr(album, "source_page", None) or getattr(album, "url", None)
+            cand_id = getattr(img, "candidate_id", None) or getattr(img, "id", None)
+            target_vk = None
+            if s_page:
+                m_vk = re.search(r'(?:viewkey=|video-)([a-zA-Z0-9_-]+)', s_page)
+                if m_vk:
+                    target_vk = m_vk.group(1)
+
+            for vid, ventry in v_meta.items():
+                match = False
+                v_source = ventry.get("source_url") or ""
+                v_sid = ventry.get("source_id") or ""
+                v_cust = ventry.get("custom_stream_url") or ""
+
+                if target_vk and (target_vk in v_source or target_vk == v_sid):
+                    match = True
+                elif s_page and v_source and (s_page == v_source or s_page in v_source or v_source in s_page):
+                    match = True
+                elif cand_id and str(vid) == str(cand_id):
+                    match = True
+                elif matches_video_id_in_cdn(new_stream) and matches_video_id_in_cdn(v_cust):
+                    if matches_video_id_in_cdn(new_stream) == matches_video_id_in_cdn(v_cust):
+                        match = True
+
+                if match:
+                    ref_param = f"&referer={urllib.parse.quote(s_page)}" if s_page else ""
+                    ventry["custom_stream_url"] = f"/api/proxy-video-stream?url={urllib.parse.quote(new_stream)}{ref_param}"
+                    if getattr(img, "width", None):
+                        ventry["width"] = img.width
+                    if getattr(img, "height", None):
+                        ventry["height"] = img.height
+                    if getattr(img, "duration_seconds", None):
+                        ventry["duration_seconds"] = img.duration_seconds
+                    if getattr(img, "file_size", None):
+                        ventry["file_size_bytes"] = img.file_size
+                    updated = True
+        if updated:
+            video_service._save_metadata(v_meta)
+    except Exception as e:
+        logger.warning(f"Error syncing refreshed album to video gallery: {e}")
 
 
 @app.post("/api/albums/{session_id}/refresh-stream/{candidate_id}")
@@ -9618,9 +10243,171 @@ async def refresh_single_stream_endpoint(session_id: str, candidate_id: str):
         if ok:
             _completed_albums[session_id] = album
             _save_album_to_disk(session_id, album)
+            _sync_refreshed_album_to_video_gallery(album)
             return {"success": True, "new_url": img.video_stream_url}
         else:
             raise HTTPException(status_code=502, detail=err)
+
+
+class VideoRenewStreamsRequest(BaseModel):
+    video_ids: Optional[List[str]] = None
+    folder: Optional[str] = None
+
+
+@app.post("/api/videos/renew-streams")
+async def renew_video_streams_endpoint(req: Optional[VideoRenewStreamsRequest] = None):
+    """
+    Renova URLs de stream expiradas para vídeos da Galeria de Vídeos (por lista de IDs ou pasta).
+    Re-executa a extração via yt-dlp para obter novos links diretos e tokens CDN frescos.
+    """
+    from .video_service import video_service, sanitize_folder_name
+    v_meta = video_service._load_metadata()
+    target_ids = []
+
+    req_ids = req.video_ids if req and req.video_ids else None
+    req_folder = req.folder if req and req.folder else None
+
+    for vid, ventry in v_meta.items():
+        if req_ids is not None:
+            if vid in req_ids:
+                target_ids.append(vid)
+        elif req_folder is not None:
+            if ventry.get("folder") == req_folder and (
+                ventry.get("storage_location") == "stream_url"
+                or ventry.get("custom_stream_url")
+                or ventry.get("source_origin") == "web"
+            ):
+                target_ids.append(vid)
+        else:
+            if (
+                ventry.get("storage_location") == "stream_url"
+                or ventry.get("custom_stream_url")
+                or ventry.get("source_origin") == "web"
+            ):
+                target_ids.append(vid)
+
+    if not target_ids:
+        return {"success": True, "refreshed": 0, "failed": 0, "details": []}
+
+    refreshed = []
+    failed = []
+
+    sem = asyncio.Semaphore(3)
+
+    async def _renew_single(vid: str):
+        ventry = v_meta.get(vid)
+        if not ventry:
+            failed.append({"id": vid, "error": "Video not found in metadata"})
+            return
+
+        target_page = ventry.get("source_url")
+        if not target_page:
+            c_stream = ventry.get("custom_stream_url") or ""
+            target_page, _, _, _ = _extract_video_info_from_url_or_albums(c_stream)
+
+        if not target_page:
+            failed.append({"id": vid, "error": "No source page found for video"})
+            return
+
+        async with sem:
+            try:
+                target_h = ventry.get("height")
+                fresh_url, info = await _re_resolve_video_stream(target_page, target_h)
+                if not fresh_url:
+                    fresh_url = await _resolve_best_video_stream("vid", target_page)
+
+                if fresh_url:
+                    ref_param = f"&referer={urllib.parse.quote(target_page)}" if target_page else ""
+                    ventry["custom_stream_url"] = f"/api/proxy-video-stream?url={urllib.parse.quote(fresh_url)}{ref_param}"
+                    ventry["stream_status"] = "ok"
+                    ventry["stream_error"] = None
+
+                    if info:
+                        dur = int(info.get("duration") or 0)
+                        if dur > 0:
+                            ventry["duration_seconds"] = dur
+                        formats = [f for f in info.get("formats", []) if f.get("ext") == "mp4" and f.get("url")]
+                        pool = formats if formats else [f for f in info.get("formats", []) if f.get("url")]
+                        exact = next((f for f in pool if f.get("url") == fresh_url or (target_h and f.get("height") == target_h)), None)
+                        if exact:
+                            if exact.get("width"):
+                                ventry["width"] = exact["width"]
+                            if exact.get("height"):
+                                ventry["height"] = exact["height"]
+                            f_sz = exact.get("filesize") or exact.get("filesize_approx") or 0
+                            if f_sz > 0:
+                                ventry["file_size_bytes"] = f_sz
+
+                    refreshed.append({"id": vid, "new_url": ventry["custom_stream_url"]})
+
+                    # Sync back to album images if matching
+                    for alb in list(_completed_albums.values()):
+                        for img in getattr(alb, "images", []):
+                            if getattr(img, "media_type", None) != "video":
+                                continue
+                            img_src = getattr(img, "source_page", None) or getattr(alb, "source_page", None) or getattr(alb, "url", None) or ""
+                            if (img_src and img_src == target_page) or (getattr(img, "candidate_id", None) == vid):
+                                img.video_stream_url = fresh_url
+                                img.original_url = fresh_url
+                                if ventry.get("width"):
+                                    img.width = ventry["width"]
+                                if ventry.get("height"):
+                                    img.height = ventry["height"]
+                                if ventry.get("duration_seconds"):
+                                    img.duration_seconds = int(ventry["duration_seconds"])
+                                if ventry.get("file_size_bytes"):
+                                    img.file_size = ventry["file_size_bytes"]
+                else:
+                    # Check if deleted on source website
+                    is_deleted = False
+                    try:
+                        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as chk_client:
+                            chk_r = await chk_client.get(target_page, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                            if chk_r.status_code in (404, 410):
+                                is_deleted = True
+                            else:
+                                html_txt = chk_r.text.lower()
+                                if "video has been deleted" in html_txt or "deletedfile" in html_txt or "hdpnotfound" in html_txt or "file has been removed" in html_txt:
+                                    is_deleted = True
+                    except Exception:
+                        pass
+
+                    if is_deleted:
+                        ventry["stream_status"] = "deleted_on_source"
+                        ventry["stream_error"] = "Deleted on source website (DMCA/Copyright)"
+                        failed.append({"id": vid, "error": "Deleted on source website", "status": "deleted_on_source"})
+                    else:
+                        ventry["stream_status"] = "expired"
+                        ventry["stream_error"] = "Stream expired and could not be re-resolved"
+                        failed.append({"id": vid, "error": "Failed to extract fresh video stream", "status": "expired"})
+            except Exception as exc:
+                exc_str = str(exc)
+                is_deleted = "Unable to extract hash" in exc_str or "deleted" in exc_str.lower()
+                if is_deleted:
+                    ventry["stream_status"] = "deleted_on_source"
+                    ventry["stream_error"] = "Deleted on source website (DMCA/Copyright)"
+                    failed.append({"id": vid, "error": "Deleted on source website", "status": "deleted_on_source"})
+                else:
+                    ventry["stream_status"] = "expired"
+                    ventry["stream_error"] = str(exc)
+                    failed.append({"id": vid, "error": str(exc), "status": "expired"})
+
+    tasks = [_renew_single(vid) for vid in target_ids]
+    await asyncio.gather(*tasks)
+
+    if refreshed or failed:
+        video_service._save_metadata(v_meta)
+
+    deleted_count = len([f for f in failed if f.get("status") == "deleted_on_source"])
+
+    return {
+        "success": True,
+        "refreshed": len(refreshed),
+        "failed": len(failed),
+        "deleted_on_source": deleted_count,
+        "details": {"refreshed": refreshed, "failed": failed}
+    }
+
 
 
 

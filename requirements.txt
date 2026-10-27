@@ -13,3 +13,7 @@ google-genai>=1.0.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 huggingface_hub>=0.23.0
+pywebview>=6.2.1
+yt-dlp>=2026.8.19
+imageio-ffmpeg>=0.6.0
+curl-cffi>=0.16.3

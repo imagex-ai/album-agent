@@ -17,6 +17,8 @@ import threading
 import subprocess
 import urllib.request
 import urllib.error
+import tempfile
+import struct
 from typing import Dict, Any, Optional, Tuple
 
 logger = logging.getLogger("imagex_updater")
@@ -245,61 +247,117 @@ def _run_subprocess(cmd: list, cwd: str, step_name: str, base_progress: int) -> 
     return "\n".join(output_lines)
 
 
-def _execute_frozen_exe_update(exe_url: str):
+def _validate_downloaded_executable(path: str, downloaded: int, expected_size: int) -> None:
+    """Reject incomplete or structurally invalid Windows executables before handoff."""
+    if not isinstance(expected_size, int) or expected_size <= 0 or downloaded != expected_size:
+        raise ValueError("update_invalid_download")
+    with open(path, "rb") as file:
+        header = file.read(64)
+        if len(header) != 64 or header[:2] != b"MZ":
+            raise ValueError("update_invalid_download")
+        pe_offset = struct.unpack_from("<I", header, 60)[0]
+        if pe_offset < 64 or pe_offset + 24 > downloaded:
+            raise ValueError("update_invalid_download")
+        file.seek(pe_offset)
+        pe_header = file.read(24)
+        if len(pe_header) != 24 or pe_header[:4] != b"PE\0\0":
+            raise ValueError("update_invalid_download")
+        sections = struct.unpack_from("<H", pe_header, 6)[0]
+        optional_size = struct.unpack_from("<H", pe_header, 20)[0]
+        section_table = pe_offset + 24 + optional_size
+        if not sections or optional_size < 96 or section_table + sections * 40 > downloaded:
+            raise ValueError("update_invalid_download")
+        if file.read(2) not in (b"\x0b\x01", b"\x0b\x02"):
+            raise ValueError("update_invalid_download")
+        file.seek(section_table)
+        for _ in range(sections):
+            section = file.read(40)
+            raw_size, raw_offset = struct.unpack_from("<II", section, 16)
+            if raw_size and (raw_offset > downloaded or raw_size > downloaded - raw_offset):
+                raise ValueError("update_invalid_download")
+
+
+def _execute_frozen_exe_update(exe_url: str, expected_size: int = 0):
     """
-    Downloads the new .exe binary from GitHub Release Assets and swaps
-    the current executable safely via an atomic Windows batch launcher.
+    Download and validate an asset before handing off replacement to Windows.
+    A separate backup is retained; the copy itself is not atomic.
     """
     current_exe = os.path.abspath(sys.executable)
     exe_dir = os.path.dirname(current_exe)
-    new_exe = os.path.join(exe_dir, "IMAGEX_update.exe")
-    bat_file = os.path.join(exe_dir, "apply_update.bat")
+    fd, new_exe = tempfile.mkstemp(prefix="imagex-update-", suffix=".exe", dir=exe_dir)
+    os.close(fd)
+    backup_exe = new_exe + ".previous.exe"
+    bat_file = new_exe + ".bat"
 
     _log_state("exe_download", "Iniciando download do novo executável...", 15, f"Baixando de: {exe_url}")
 
     req = urllib.request.Request(exe_url, headers={"User-Agent": "IMAGEX-App-AutoUpdater"})
-    with urllib.request.urlopen(req, timeout=30) as response, open(new_exe, "wb") as out_file:
-        total_size = int(response.getheader("Content-Length", 0))
-        downloaded = 0
-        block_size = 65536
+    try:
+        if not isinstance(expected_size, int) or expected_size <= 0:
+            raise ValueError("update_invalid_download")
+        with urllib.request.urlopen(req, timeout=30) as response, open(new_exe, "wb") as out_file:
+            content_length = int(response.getheader("Content-Length", 0) or 0)
+            downloaded = 0
+            while True:
+                buffer = response.read(65536)
+                if not buffer:
+                    break
+                downloaded += len(buffer)
+                if downloaded > expected_size:
+                    raise ValueError("update_invalid_download")
+                out_file.write(buffer)
+                if content_length > 0:
+                    pct = min(90, 15 + int((downloaded / content_length) * 75))
+                    _log_state("exe_download", f"Baixando executável ({downloaded // (1024*1024)}MB / {content_length // (1024*1024)}MB)...", pct)
+            out_file.flush()
+            os.fsync(out_file.fileno())
+        if content_length > 0 and downloaded != content_length:
+            raise ValueError("update_invalid_download")
+        _validate_downloaded_executable(new_exe, downloaded, expected_size)
+    except Exception:
+        try:
+            os.unlink(new_exe)
+        except OSError:
+            pass
+        raise
 
-        while True:
-            buffer = response.read(block_size)
-            if not buffer:
-                break
-            downloaded += len(buffer)
-            out_file.write(buffer)
-            if total_size > 0:
-                pct = 15 + int((downloaded / total_size) * 75)
-                _log_state("exe_download", f"Baixando executável ({downloaded // (1024*1024)}MB / {total_size // (1024*1024)}MB)...", pct)
-
-    _log_state("exe_swap", "Criando script de substituição atômica...", 92, "Preparando reinício com a nova versão...")
+    _log_state("exe_swap", "Preparando atualização...", 92)
 
     # Windows batch script to swap the executable after current process exits
-    bat_content = f"""@echo off
+    bat_content = """@echo off
+setlocal DisableDelayedExpansion
 chcp 65001 > nul
 timeout /t 2 /nobreak > nul
-if exist "{new_exe}" (
-    copy /y "{new_exe}" "{current_exe}" > nul
-    del "{new_exe}" > nul
-)
-start "" "{current_exe}"
-del "%~f0"
+copy /b /y "%IMAGEX_UPDATE_CURRENT%" "%IMAGEX_UPDATE_BACKUP%" > nul
+if errorlevel 1 goto backup_failed
+copy /b /y "%IMAGEX_UPDATE_NEW%" "%IMAGEX_UPDATE_CURRENT%" > nul
+if errorlevel 1 goto restore
+fc /b "%IMAGEX_UPDATE_NEW%" "%IMAGEX_UPDATE_CURRENT%" > nul
+if errorlevel 1 goto restore
+del "%IMAGEX_UPDATE_NEW%" > nul 2>&1
+start "" "%IMAGEX_UPDATE_CURRENT%"
+goto cleanup
+:restore
+copy /b /y "%IMAGEX_UPDATE_BACKUP%" "%IMAGEX_UPDATE_CURRENT%" > nul
+if errorlevel 1 exit /b 1
+fc /b "%IMAGEX_UPDATE_BACKUP%" "%IMAGEX_UPDATE_CURRENT%" > nul
+if errorlevel 1 exit /b 1
+:backup_failed
+start "" "%IMAGEX_UPDATE_CURRENT%"
+:cleanup
+exit /b 0
 """
     with open(bat_file, "w", encoding="utf-8") as f:
         f.write(bat_content)
 
-    with _update_lock:
-        _update_state["status"] = "completed"
-        _update_state["progress"] = 100
-        _update_state["step"] = "completed"
-        _update_state["message"] = "Executável atualizado com sucesso! Reiniciando a aplicação..."
-        _update_state["logs"].append("✓ Executável novo baixado. Reiniciando via apply_update.bat...")
-
     # Launch batch script in detached process and exit
+    env = os.environ.copy()
+    env.update(IMAGEX_UPDATE_CURRENT=current_exe, IMAGEX_UPDATE_NEW=new_exe,
+               IMAGEX_UPDATE_BACKUP=backup_exe)
     subprocess.Popen(
         ["cmd.exe", "/c", bat_file],
         cwd=exe_dir,
+        env=env,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
     )
     time.sleep(1.0)
@@ -327,7 +385,7 @@ def _execute_update_sequence():
                     "Esta versão não possui um executável (.exe) anexado no GitHub Releases. "
                     "Acesse o link do GitHub para baixar o release ou atualizar pelo código-fonte."
                 )
-            _execute_frozen_exe_update(exe_url)
+            _execute_frozen_exe_update(exe_url, check_data.get("exe_asset_size") or 0)
             return
 
         # Case B: Source / Git Repository Mode

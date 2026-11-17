@@ -256,7 +256,7 @@ export const UpdateModal: React.FC = () => {
           </div>
 
           {/* If actively updating */}
-          {isApplyingUpdate ? (
+          {(isApplyingUpdate || isError) ? (
             <div className="space-y-4 py-2">
               {/* Progress Bar */}
               <div className="space-y-1.5">
@@ -356,7 +356,9 @@ export const UpdateModal: React.FC = () => {
                     <AlertTriangle size={14} />
                     {t.errorTitle}
                   </div>
-                  <p className="text-slate-300">{updateStatus?.error || statusMsg}</p>
+                  <p className="text-slate-300">{updateStatus?.error === 'update_invalid_download'
+                    ? (isEn ? 'The downloaded update is incomplete or invalid. Please try again.' : 'A atualização baixada está incompleta ou é inválida. Tente novamente.')
+                    : (updateStatus?.error || statusMsg)}</p>
                 </div>
               )}
             </div>

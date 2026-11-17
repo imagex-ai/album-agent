@@ -6,17 +6,25 @@ Autonomous platform for intelligent extraction, organization, and inspection of 
 
 ## ✨ What's new in v5.7.0
 
-- Profile Hub: creator profiles, collections and source comments in one place.
-- Timeline and Watch: recent posts, related videos and navigation between content.
-- Your shortcuts: easier access to saved directories and favorite profiles.
-- New player: unified controls, a mini-player and picture-in-picture on supported devices.
+- Profile Hub: explore creator profiles, videos, albums and playlists in one integrated experience.
+- Saved directories and favorites: keep shortcuts and find profiles more easily.
+- Selection and review: choose media and destinations per profile, then review the batch before saving.
+- Timeline: browse recent posts and open profiles and collections while keeping your place.
+- Watch: play videos, explore related content and read comments and replies from the source.
+- Updated player: consistent controls, a floating mini-player and picture-in-picture on supported devices.
+- More convenient controls: keyboard shortcuts, touch gestures, speed, quality and fullscreen.
 
 ## 🛠️ Improvements and fixes
 
-- Playback: improvements to video recovery and continuity while navigating.
-- Profiles and library: refinements to avatar loading and persistence of favorites and shortcuts.
+- Playback: improved video recovery and continuity when switching screens or using the mini-player.
+- Mobile player: responsive controls, larger touch targets and easier-to-use menus.
+- Navigation: fixes to preserve context and scroll position when returning from videos and profiles.
+- Timeline: improvements to post refresh, displayed dates and duplicate prevention.
+- Profiles and comments: improved avatar loading and handling of temporary failures.
+- Favorites and directories: improved persistence and synchronization of saved shortcuts.
+- Performance: progressive loading of profiles and collections, with improved metadata processing.
 
-Availability varies by source and device.
+Available features vary by source and device.
 
 ---
 

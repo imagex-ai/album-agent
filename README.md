@@ -4,14 +4,19 @@ Autonomous platform for intelligent extraction, organization, and inspection of 
 
 ---
 
-## What's new in v5.7.0
+## ✨ What's new in v5.7.0
 
-- **Profile Hub:** Browse creator profiles, collections and source comments, with saved directories and favorites.
-- **Timeline and Watch:** Explore recent posts and watch videos without leaving the Hub.
-- **Video player:** Unified playback controls, a floating mini-player and picture-in-picture support where available.
-- **Reliability:** Improved avatar loading, playback recovery and persistence of saved shortcuts.
+- Profile Hub: creator profiles, collections and source comments in one place.
+- Timeline and Watch: recent posts, related videos and navigation between content.
+- Your shortcuts: easier access to saved directories and favorite profiles.
+- New player: unified controls, a mini-player and picture-in-picture on supported devices.
 
-Capabilities and availability depend on the source and device.
+## 🛠️ Improvements and fixes
+
+- Playback: improvements to video recovery and continuity while navigating.
+- Profiles and library: refinements to avatar loading and persistence of favorites and shortcuts.
+
+Availability varies by source and device.
 
 ---
 

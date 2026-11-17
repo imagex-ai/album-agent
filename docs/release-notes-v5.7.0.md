@@ -1,19 +1,29 @@
 # IMAGEX v5.7.0
 
-## Novidades
+## ✨ Novidades
 
-- Profile Hub: navegue por perfis de criadores, coleções e comentários publicados na origem. Salve diretórios e perfis favoritos para encontrá-los mais facilmente.
-- Timeline e Watch: explore publicações recentes e assista a vídeos sem sair do Hub.
-- Reprodutor de vídeo: controles unificados, mini-player flutuante e suporte a picture-in-picture em dispositivos compatíveis.
-- Melhorias de estabilidade: carregamento de avatares, recuperação de reprodução e persistência de atalhos salvos.
+- Profile Hub: perfis, coleções e comentários da origem em um só lugar.
+- Timeline e Watch: publicações recentes, vídeos relacionados e navegação entre conteúdos.
+- Seus atalhos: diretórios salvos e perfis favoritos mais fáceis de acessar.
+- Novo player: controles unificados, mini-player e picture-in-picture em dispositivos compatíveis.
 
-As funcionalidades disponíveis variam conforme a fonte e o dispositivo.
+## 🛠️ Melhorias e correções
 
-## What's new
+- Reprodução: melhorias na recuperação de vídeos e na continuidade ao navegar.
+- Perfis e biblioteca: ajustes no carregamento de avatares e na persistência de favoritos e atalhos.
 
-- Profile Hub: browse creator profiles, collections and source comments. Save directories and favorite profiles for quick access.
-- Timeline and Watch: explore recent posts and watch videos without leaving the Hub.
-- Video player: unified controls, a floating mini-player and picture-in-picture on supported devices.
-- Reliability improvements: avatar loading, playback recovery and persistence of saved shortcuts.
+A disponibilidade varia conforme a fonte e o dispositivo.
 
-Available features vary by source and device.
+## ✨ What's new
+
+- Profile Hub: creator profiles, collections and source comments in one place.
+- Timeline and Watch: recent posts, related videos and navigation between content.
+- Your shortcuts: easier access to saved directories and favorite profiles.
+- New player: unified controls, a mini-player and picture-in-picture on supported devices.
+
+## 🛠️ Improvements and fixes
+
+- Playback: improvements to video recovery and continuity while navigating.
+- Profiles and library: refinements to avatar loading and persistence of favorites and shortcuts.
+
+Availability varies by source and device.

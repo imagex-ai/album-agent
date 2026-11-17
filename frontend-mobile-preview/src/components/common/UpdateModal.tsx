@@ -98,8 +98,8 @@ export const UpdateModal: React.FC = () => {
 
   if (!updateModalOpen && !isApplyingUpdate) return null;
 
-  const currentVersion = updateInfo?.current_version || '5.6.1';
-  const latestVersion = updateInfo?.latest_version || '5.6.1';
+  const currentVersion = updateInfo?.current_version || '5.7.0';
+  const latestVersion = updateInfo?.latest_version || '5.7.0';
   const releaseName = updateInfo?.release_name || `IMAGEX ${latestVersion}`;
   const releaseNotes = updateInfo?.release_notes || '';
   const publishedDate = updateInfo?.published_at

@@ -1265,7 +1265,7 @@ def _infer_extension_from_magic_or_mime(raw_bytes: bytes = b"", content_type: st
     return ".jpg" 
 
 
-APP_VERSION = "5.6.1"
+APP_VERSION = "5.7.0"
 
 
 @app.get("/api/health")

@@ -1,6 +1,17 @@
-# ⚡ IMAGEX v5.6.1
+# ⚡ IMAGEX v5.7.0
 
 Autonomous platform for intelligent extraction, organization, and inspection of web albums and videos in their original maximum resolution. 🚀🔍
+
+---
+
+## What's new in v5.7.0
+
+- **Profile Hub:** Browse creator profiles, collections and source comments, with saved directories and favorites.
+- **Timeline and Watch:** Explore recent posts and watch videos without leaving the Hub.
+- **Video player:** Unified playback controls, a floating mini-player and picture-in-picture support where available.
+- **Reliability:** Improved avatar loading, playback recovery and persistence of saved shortcuts.
+
+Capabilities and availability depend on the source and device.
 
 ---
 

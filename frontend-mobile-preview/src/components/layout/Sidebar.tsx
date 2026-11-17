@@ -23,7 +23,8 @@ import {
   History,
   ListVideo,
   Heart,
-  ThumbsUp
+  ThumbsUp,
+  Download
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { useProfileHubLibraryStore } from '../../store/useProfileHubLibraryStore';
@@ -111,7 +112,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
     {
       title: t.systemConfig,
       items: [
-        { id: 'settings' as ViewId, label: t.systemSettings, icon: Settings, badge: updateAttention ? t.badgeNew : null, badgeColor: 'bg-amber-500/20 text-amber-300 border border-amber-500/30' },
+        { id: 'settings' as ViewId, label: t.systemSettings, icon: Settings, badge: null },
       ]
     }
   ];
@@ -148,18 +149,19 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
                   )}
                 </button>
-                {updateAttention && (
-                  <button
-                    type="button"
-                    onClick={() => setUpdateModalOpen(true)}
-                    className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold animate-pulse hover:bg-amber-500/30 transition-colors cursor-pointer"
-                    title={settings.language === 'en-US' ? 'New version available! Click to update.' : 'Nova versão disponível! Clique para atualizar.'}
-                  >
-                    {t.badgeNew}
-                  </button>
-                )}
               </div>
-              <p className="text-[11px] text-slate-400 font-medium tracking-wide">Media Suite</p>
+              {updateAttention ? (
+                <button
+                  type="button"
+                  onClick={() => setUpdateModalOpen(true)}
+                  className="mt-0.5 flex items-center gap-1 text-[11px] font-semibold text-amber-300 hover:text-amber-200 transition-colors text-left"
+                >
+                  <Download size={12} aria-hidden="true" className="shrink-0" />
+                  {updateLabel}
+                </button>
+              ) : (
+                <p className="text-[11px] text-slate-400 font-medium tracking-wide">Media Suite</p>
+              )}
             </div>
           </div>
         ) : (
@@ -167,7 +169,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
             type="button"
             onClick={() => setUpdateModalOpen(true)}
             className="w-10 h-10 mx-auto rounded-xl overflow-hidden shadow-glow-brand border border-white/10 relative cursor-pointer block p-0 bg-slate-950"
-            title="IMAGEX v5.7.0"
+            title={updateAttention ? updateLabel : 'IMAGEX v5.7.0'}
+            aria-label={updateAttention ? updateLabel : 'IMAGEX v5.7.0'}
           >
             <img
               src="/app-icon.png"
@@ -240,7 +243,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
                         />
                         {isUpdateItem && collapsed && !isMobileOpen && <span aria-hidden="true" className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-amber-400" />}
                       </span>
-                      {(!collapsed || isMobileOpen) && <span>{item.label}</span>}
+                      {(!collapsed || isMobileOpen) && (
+                        <span className="text-left">
+                          <span className="block">{item.label}</span>
+                          {isUpdateItem && <span className="block text-[11px] font-semibold text-amber-300">{updateLabel}</span>}
+                        </span>
+                      )}
                     </div>
 
                     {(!collapsed || isMobileOpen) && item.badge && (

@@ -1,4 +1,5 @@
 import React from 'react';
+import { version as appVersion } from '../../../package.json';
 import {
   Film,
   PlaySquare,
@@ -354,7 +355,7 @@ export const SettingsView: React.FC = () => {
                   {updaterT.systemSectionTitle || (isEn ? 'System Updates' : 'Atualizações do Sistema')}
                 </h3>
                 <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-brand-500/20 text-brand-300 border border-brand-500/30">
-                  v5.5
+                  v{updateInfo?.current_version || appVersion}
                 </span>
                 {updateInfo?.update_available && (
                   <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse">

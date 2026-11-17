@@ -28,6 +28,7 @@ import {
 import { useAppStore } from '../../store/useAppStore';
 import { useProfileHubLibraryStore } from '../../store/useProfileHubLibraryStore';
 import { translations } from '../../i18n/translations';
+import { updateNeedsAttention } from '../../services/updateAlerts';
 import { ViewId } from '../../types';
 
 interface SidebarProps {
@@ -49,13 +50,15 @@ interface NavSection {
 
 export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseMobile }) => {
   const [collapsed, setCollapsed] = useState(false);
-  const { currentView, navigateToView, setSlideshowOpen, albums, videos, trashItems, jobs, logs, settings, updateInfo, setUpdateModalOpen } = useAppStore();
+  const { currentView, navigateToView, setSlideshowOpen, albums, videos, trashItems, jobs, logs, settings, updateInfo, dismissedUpdateVersion, setUpdateModalOpen } = useAppStore();
   const libraryHistoryCount = useProfileHubLibraryStore((state) => state.history.length);
   const libraryPlaylistsCount = useProfileHubLibraryStore((state) => state.playlists.length);
   const libraryFavoritesCount = useProfileHubLibraryStore((state) => state.favorites.length);
   const libraryLikedCount = useProfileHubLibraryStore((state) => state.liked.length);
   const hydrateLibrary = useProfileHubLibraryStore((state) => state.hydrateLibrary);
   const t = translations[settings.language].sidebar;
+  const updateAttention = updateNeedsAttention(updateInfo, dismissedUpdateVersion);
+  const updateLabel = translations[settings.language].updater.modalTitle;
 
   useEffect(() => {
     void hydrateLibrary();
@@ -108,7 +111,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
     {
       title: t.systemConfig,
       items: [
-        { id: 'settings' as ViewId, label: t.systemSettings, icon: Settings, badge: null },
+        { id: 'settings' as ViewId, label: t.systemSettings, icon: Settings, badge: updateAttention ? t.badgeNew : null, badgeColor: 'bg-amber-500/20 text-amber-300 border border-amber-500/30' },
       ]
     }
   ];
@@ -141,18 +144,18 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
                   title={settings.language === 'en-US' ? 'Check for updates' : 'Verificar atualizações do app'}
                 >
                   v5.7.0
-                  {updateInfo?.update_available && (
+                  {updateAttention && (
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
                   )}
                 </button>
-                {updateInfo?.update_available && (
+                {updateAttention && (
                   <button
                     type="button"
                     onClick={() => setUpdateModalOpen(true)}
                     className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold animate-pulse hover:bg-amber-500/30 transition-colors cursor-pointer"
                     title={settings.language === 'en-US' ? 'New version available! Click to update.' : 'Nova versão disponível! Clique para atualizar.'}
                   >
-                    UPDATE
+                    {t.badgeNew}
                   </button>
                 )}
               </div>
@@ -171,7 +174,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
               alt="IMAGEX"
               className="w-full h-full object-cover"
             />
-            {updateInfo?.update_available && (
+            {updateAttention && (
               <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-amber-400 border-2 border-slate-950 animate-pulse" />
             )}
           </button>
@@ -208,7 +211,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
               {section.items.map(item => {
                 const Icon = item.icon;
                 const isActive = !item.disabled && currentView === item.id;
-                const accessibleLabel = item.disabled ? `${item.label}: ${t.comingSoon}` : item.label;
+                const isUpdateItem = !item.disabled && item.id === 'settings' && updateAttention;
+                const accessibleLabel = item.disabled ? `${item.label}: ${t.comingSoon}` : isUpdateItem ? `${item.label}: ${updateLabel}` : item.label;
                 return (
                   <button
                     key={item.id ?? item.label}
@@ -227,12 +231,15 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
                     title={collapsed && !isMobileOpen ? accessibleLabel : undefined}
                   >
                     <div className="flex items-center gap-3">
-                      <Icon
-                        size={18}
-                        className={`transition-colors ${
-                          item.disabled ? 'text-slate-400' : isActive ? 'text-brand-400' : 'text-slate-400 group-hover:text-slate-200'
-                        }`}
-                      />
+                      <span className="relative shrink-0">
+                        <Icon
+                          size={18}
+                          className={`transition-colors ${
+                            item.disabled ? 'text-slate-400' : isActive ? 'text-brand-400' : 'text-slate-400 group-hover:text-slate-200'
+                          }`}
+                        />
+                        {isUpdateItem && collapsed && !isMobileOpen && <span aria-hidden="true" className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-amber-400" />}
+                      </span>
                       {(!collapsed || isMobileOpen) && <span>{item.label}</span>}
                     </div>
 

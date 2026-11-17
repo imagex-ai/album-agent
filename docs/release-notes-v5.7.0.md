@@ -4,6 +4,7 @@
 
 - Profile Hub: explore perfis de criadores, vídeos, álbuns e playlists em uma experiência integrada.
 - Diretórios salvos e favoritos: guarde seus atalhos e encontre perfis com mais facilidade.
+- Avisos de atualização: notificações e indicadores em Configurações quando uma nova versão estiver disponível.
 - Seleção e revisão: escolha mídias e destinos por perfil e confira o lote antes de confirmar o salvamento.
 - Timeline: acompanhe publicações recentes e acesse perfis e coleções sem perder o contexto.
 - Watch: assista a vídeos, veja relacionados e leia comentários e respostas publicados na origem.
@@ -26,6 +27,7 @@ As funcionalidades disponíveis variam conforme a fonte e o dispositivo.
 
 - Profile Hub: explore creator profiles, videos, albums and playlists in one integrated experience.
 - Saved directories and favorites: keep shortcuts and find profiles more easily.
+- Update alerts: notifications and Settings indicators when a new version is available.
 - Selection and review: choose media and destinations per profile, then review the batch before saving.
 - Timeline: browse recent posts and open profiles and collections while keeping your place.
 - Watch: play videos, explore related content and read comments and replies from the source.

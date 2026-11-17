@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Search, Bell, X } from 'lucide-react';
 import { useAppStore } from '../../../store/useAppStore';
 import { useProfileTimelineStore } from '../../../store/useProfileTimelineStore';
+import { updateNeedsAttention } from '../../../services/updateAlerts';
 
 export interface TimelineMobileHeaderProps {
   onOpenMobileMenu?: () => void;
@@ -9,6 +10,7 @@ export interface TimelineMobileHeaderProps {
 
 export const TimelineMobileHeader: React.FC<TimelineMobileHeaderProps> = ({ onOpenMobileMenu }) => {
   const isEn = useAppStore(state => state.settings?.language === 'en-US');
+  const updateAttention = useAppStore(state => updateNeedsAttention(state.updateInfo, state.dismissedUpdateVersion));
   const setNotificationDrawerOpen = useAppStore(state => state.setNotificationDrawerOpen);
   const unreadCount = useAppStore(state => state.notifications.filter(notification => !notification.isRead).length);
   const searchQuery = useProfileTimelineStore(state => state.searchQuery);
@@ -34,15 +36,16 @@ export const TimelineMobileHeader: React.FC<TimelineMobileHeaderProps> = ({ onOp
       <button
         type="button"
         onClick={() => onOpenMobileMenu?.()}
-        className="flex items-center gap-2.5 min-w-0 cursor-pointer group rounded-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--tl-accent-hover)]"
+        className="relative flex items-center gap-2.5 min-w-0 cursor-pointer group rounded-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--tl-accent-hover)]"
         title={isEn ? 'Open navigation menu' : 'Abrir menu de navegação'}
-        aria-label={isEn ? 'Open navigation menu' : 'Abrir menu de navegação'}
+        aria-label={isEn ? `Open navigation menu${updateAttention ? ': update available' : ''}` : `Abrir menu de navegação${updateAttention ? ': atualização disponível' : ''}`}
       >
         <img
           src="/app-icon.png"
           alt="IMAGEX"
           className="w-7 h-7 rounded-lg object-cover shadow-md shrink-0 group-hover:scale-105 transition-transform"
         />
+        {updateAttention && <span aria-hidden="true" className="absolute -top-0.5 left-5 w-2.5 h-2.5 rounded-full bg-amber-400 ring-2 ring-[var(--tl-surface)]" />}
         <span className="font-extrabold text-sm text-[var(--tl-text-primary)] tracking-tight truncate">
           IMAGEX
         </span>

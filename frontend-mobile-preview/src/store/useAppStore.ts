@@ -40,6 +40,7 @@ import {
   GlobalSliderConfig
 } from '../types';
 import { soundEffects } from '../services/soundEffects';
+import { claimUpdateNotification, vibrateForUpdate } from '../services/updateAlerts';
 import { ambientAudio } from '../services/ambientAudio';
 import { backendApi, UpdateCheckResponse, UpdateStatusResponse } from '../services/realApi';
 import { scrollRestorationManager, getViewScrollKey } from '../services/scrollRestoration';
@@ -3805,6 +3806,20 @@ export const useAppStore = create<AppState>((set, get) => {
 
         const dismissed = get().dismissedUpdateVersion;
         if (data.update_available) {
+          if (claimUpdateNotification(data.latest_version, dismissed)) {
+            const state = get();
+            const isEn = state.settings.language === 'en-US';
+            state.addNotification({
+              type: 'info',
+              title: translations[state.settings.language].updater.modalTitle,
+              message: isEn
+                ? `Version ${data.latest_version} is available. Open Settings to see what's new.`
+                : `A versão ${data.latest_version} está disponível. Abra Configurações para ver as novidades.`,
+              linkViewId: 'settings',
+            });
+            soundEffects.success(state.settings.soundEnabled);
+            vibrateForUpdate();
+          }
           if (!silent) {
             set({ updateModalOpen: true });
           } else if (data.latest_version !== dismissed) {

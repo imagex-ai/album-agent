@@ -3,6 +3,7 @@ import { Search, Bell, Menu, Command, Bot, Folder, X, Languages, Maximize2, Mini
 import { toggleAppFullscreen, isAppFullscreen, isDesktopApp, getDesktopFullscreen, toggleDesktopFullscreen, desktopFullscreenEvent } from '../../services/desktopService';
 import { useAppStore } from '../../store/useAppStore';
 import { translations } from '../../i18n/translations';
+import { updateNeedsAttention } from '../../services/updateAlerts';
 
 interface TopHeaderProps {
   onOpenMobileMenu?: () => void;
@@ -11,6 +12,8 @@ interface TopHeaderProps {
 export const TopHeader: React.FC<TopHeaderProps> = ({ onOpenMobileMenu }) => {
   const {
     settings,
+    updateInfo,
+    dismissedUpdateVersion,
     updateSettings,
     notifications,
     setNotificationDrawerOpen,
@@ -26,6 +29,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ onOpenMobileMenu }) => {
 
   const t = translations[settings.language].header;
   const isEn = settings.language === 'en-US';
+  const updateAttention = updateNeedsAttention(updateInfo, dismissedUpdateVersion);
   const unreadCount = notifications.filter(n => !n.isRead).length;
   const currentAlbum = currentView === 'album-detail' ? albums.find(a => a.id === activeAlbumId) : null;
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -63,11 +67,12 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ onOpenMobileMenu }) => {
         {onOpenMobileMenu && (
           <button
             onClick={onOpenMobileMenu}
-            className="md:hidden p-2 rounded-xl bg-surface-elevated border border-border text-slate-300 hover:text-white shrink-0 active:scale-95 transition-transform"
+            className="md:hidden relative p-2 rounded-xl bg-surface-elevated border border-border text-slate-300 hover:text-white shrink-0 active:scale-95 transition-transform"
             title={t.navigationMenu || (isEn ? 'Navigation Menu' : 'Menu de Navegação')}
-            aria-label={t.openMenu || (isEn ? 'Open Menu' : 'Abrir Menu')}
+            aria-label={`${t.openMenu || (isEn ? 'Open Menu' : 'Abrir Menu')}${updateAttention ? `: ${translations[settings.language].updater.modalTitle}` : ''}`}
           >
             <Menu size={18} />
+            {updateAttention && <span aria-hidden="true" className="absolute top-1 right-1 w-2 h-2 rounded-full bg-amber-400 ring-2 ring-slate-900" />}
           </button>
         )}
 

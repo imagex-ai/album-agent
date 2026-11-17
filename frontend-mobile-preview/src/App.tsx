@@ -56,6 +56,9 @@ import { TimelinePreviewView } from './components/views/TimelinePreviewView';
 import { ProfileHubLibraryView } from './components/profile-hub/library/ProfileHubLibraryView';
 import { AddToPlaylistModal } from './components/profile-hub/library/AddToPlaylistModal';
 
+// Match the backend update-check cache so a long-running session discovers releases.
+const UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+
 export const App: React.FC = () => {
   const {
     currentView,
@@ -188,6 +191,21 @@ export const App: React.FC = () => {
   useEffect(() => {
     syncBackendData();
   }, [syncBackendData]);
+
+  useEffect(() => {
+    const checkWhileVisible = () => {
+      const state = useAppStore.getState();
+      if (document.visibilityState === 'visible' && !state.isCheckingUpdate) {
+        void state.checkForUpdates(true, false);
+      }
+    };
+    const timer = window.setInterval(checkWhileVisible, UPDATE_CHECK_INTERVAL_MS);
+    document.addEventListener('visibilitychange', checkWhileVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', checkWhileVisible);
+    };
+  }, []);
 
   // Apply Theme class to document element
   useEffect(() => {

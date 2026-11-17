@@ -1,5 +1,5 @@
 {
-  "name": "imagex-ai-frontend",
+  "name": "imagex-frontend",
   "private": true,
   "version": "5.6.1",
   "type": "module",
@@ -27,6 +27,7 @@
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.14",
+    "terser": "^5.51.2",
     "typescript": "^5.6.3",
     "vite": "^5.4.10"
   }

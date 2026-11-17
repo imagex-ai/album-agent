@@ -1,9 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { Folder, FolderPlus, Check, X, HardDrive } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { translations } from '../../i18n/translations';
 import { IconBadge } from './IconBadge';
 import { ModalPortal } from './ModalPortal';
+import { AppDialog } from './AppDialog';
+import { validGalleryDestination, validVideoDestination } from '../../services/destinationValidation';
 
 interface FolderSelectModalProps {
   isOpen: boolean;
@@ -18,6 +20,7 @@ interface FolderSelectModalProps {
   itemTitle?: string;
   mediaType?: 'video' | 'album' | string;
   type?: string;
+  purpose?: 'save' | 'destination';
 }
 
 export const FolderSelectModal: React.FC<FolderSelectModalProps> = ({
@@ -32,7 +35,8 @@ export const FolderSelectModal: React.FC<FolderSelectModalProps> = ({
   subtitle,
   itemTitle,
   mediaType,
-  type
+  type,
+  purpose = 'save'
 }) => {
   const { settings, albumFolders, videoFolders, createAlbumFolder, createVideoFolder, updateSettings } = useAppStore();
   const t = translations[settings.language]?.folderModal || translations['en-US'].folderModal;
@@ -47,12 +51,15 @@ export const FolderSelectModal: React.FC<FolderSelectModalProps> = ({
   const [createdFolders, setCreatedFolders] = useState<string[]>([]);
   const [isCreatingNew, setIsCreatingNew] = useState(false);
   const [rememberDefault, setRememberDefault] = useState(false);
+  const [destinationError, setDestinationError] = useState('');
+  const fieldId = useId();
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (isOpen) {
       setSelectedFolder(currentFolder || defaultFolder || defaultFallbackFolder);
       setIsCreatingNew(false);
       setNewFolderName('');
+      setDestinationError('');
     }
   }, [isOpen, currentFolder, defaultFolder, defaultFallbackFolder]);
 
@@ -74,7 +81,7 @@ export const FolderSelectModal: React.FC<FolderSelectModalProps> = ({
     if (isCreatingNew && newFolderName.trim()) {
       finalFolder = newFolderName.trim();
       setCreatedFolders(prev => Array.from(new Set([...prev, finalFolder])));
-      try {
+      if (purpose !== 'destination') try {
         if (initialMediaType === 'video') {
           await createVideoFolder(finalFolder);
         } else {
@@ -84,10 +91,18 @@ export const FolderSelectModal: React.FC<FolderSelectModalProps> = ({
         console.warn('Erro ao criar pasta:', err);
       }
     }
+    if (!finalFolder && purpose === 'destination') {
+      setDestinationError(t.folderRequired);
+      return;
+    }
+    if (purpose === 'destination' && !(initialMediaType === 'video' ? validVideoDestination(finalFolder) : validGalleryDestination(finalFolder))) {
+      setDestinationError(initialMediaType === 'video' ? t.invalidVideoFolder : t.folderRequired);
+      return;
+    }
     if (!finalFolder) {
       finalFolder = defaultFallbackFolder;
     }
-    if (rememberDefault && finalFolder) {
+    if (rememberDefault && finalFolder && purpose !== 'destination') {
       if (initialMediaType === 'video') {
         updateSettings({ defaultVideoFolder: finalFolder });
       } else {
@@ -107,12 +122,16 @@ export const FolderSelectModal: React.FC<FolderSelectModalProps> = ({
     e.preventDefault();
     if (!newFolderName.trim()) return;
     const clean = newFolderName.trim();
+    if (purpose === 'destination' && !(initialMediaType === 'video' ? validVideoDestination(clean) : validGalleryDestination(clean))) {
+      setDestinationError(initialMediaType === 'video' ? t.invalidVideoFolder : t.folderRequired);
+      return;
+    }
     setCreatedFolders(prev => Array.from(new Set([...prev, clean])));
     setSelectedFolder(clean);
     setIsCreatingNew(false);
     setNewFolderName('');
 
-    try {
+    if (purpose !== 'destination') try {
       if (initialMediaType === 'video') {
         await createVideoFolder(clean);
       } else {
@@ -122,6 +141,26 @@ export const FolderSelectModal: React.FC<FolderSelectModalProps> = ({
       console.warn('Erro ao criar pasta no store:', err);
     }
   };
+
+  if (purpose === 'destination') return <AppDialog className="pd-dialog phr-folder-dialog" titleId={`${fieldId}-title`} descriptionId={`${fieldId}-hint`} onClose={onClose}>
+    <header><div><Folder size={19} /><h2 id={`${fieldId}-title`}>{modalTitle}</h2></div><button type="button" className="pd-icon-button" onClick={onClose} aria-label={t.cancel}><X size={18} /></button></header>
+    <div className="pd-dialog-body">
+      {itemTitle && <p className="phr-picker-owner">{itemTitle}</p>}
+      <p id={`${fieldId}-hint`} className="phr-muted">{t.deferredHint}</p>
+      <label className="phr-field-label" htmlFor={`${fieldId}-folder`}>{t.selectExisting}</label>
+      <select id={`${fieldId}-folder`} className="phr-select" value={selectedFolder} aria-invalid={Boolean(destinationError)} aria-describedby={destinationError ? `${fieldId}-error` : `${fieldId}-hint`}
+        onChange={event => { setSelectedFolder(event.target.value); setDestinationError(''); }}>
+        <option value="">{t.selectExisting}</option>{folders.map(folder => <option key={folder} value={folder}>{folder}</option>)}
+      </select>
+      <details className="phr-new-folder"><summary>{t.createNew}</summary><form noValidate onSubmit={handleCreateNewSubmit}>
+        <label className="phr-field-label" htmlFor={`${fieldId}-name`}>{t.newFolderName}</label>
+        <div className="phr-inline-controls"><input id={`${fieldId}-name`} value={newFolderName} onChange={event => { setNewFolderName(event.target.value); setDestinationError(''); }} aria-invalid={Boolean(destinationError)} aria-describedby={destinationError ? `${fieldId}-error` : undefined} placeholder={t.placeholder} maxLength={100} />
+          <button type="submit" className="pd-button" disabled={!newFolderName.trim()}>{t.add}</button></div>
+      </form></details>
+      {destinationError && <p id={`${fieldId}-error`} role="alert" className="phr-error">{destinationError}</p>}
+    </div>
+    <footer><button type="button" className="pd-button" onClick={onClose}>{t.cancel}</button><button type="button" className="pd-button pd-primary phr-primary" onClick={() => void handleConfirm()}>{t.chooseDestination}</button></footer>
+  </AppDialog>;
 
   return (
     <ModalPortal>
@@ -191,7 +230,7 @@ export const FolderSelectModal: React.FC<FolderSelectModalProps> = ({
         {/* Create New Folder Inline */}
         <div className="pt-1">
           {isCreatingNew ? (
-            <form onSubmit={handleCreateNewSubmit} className="space-y-2">
+            <form noValidate onSubmit={handleCreateNewSubmit} className="space-y-2">
               <label className="text-xs font-medium text-slate-300">
                 {t.newFolderName}
               </label>

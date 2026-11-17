@@ -42,17 +42,20 @@ class TrashService:
         self._last_hf_sync = 0.0
 
         # Restaura metadados da lixeira do Hugging Face se o disco do Render tiver resetado
-        self._ensure_trash_restored()
+        from src.core.startup_policy import startup_maintenance_enabled
+        maintenance = startup_maintenance_enabled()
+        if maintenance:
+            self._ensure_trash_restored()
 
-        if not os.path.exists(self.trash_meta_file):
+        if maintenance and not os.path.exists(self.trash_meta_file):
             self._save_meta({})
 
     def _ensure_trash_restored(self):
         """Restores trash metadata from Hugging Face if local file was wiped by Render restart."""
         try:
             from .video_service import cloud_storage
-            if cloud_storage.is_connected():
-                if not os.path.exists(self.trash_meta_file) or os.path.getsize(self.trash_meta_file) < 5:
+            if not os.path.exists(self.trash_meta_file) or os.path.getsize(self.trash_meta_file) < 5:
+                if cloud_storage.is_connected():
                     remote_meta = cloud_storage.download_json("metadata/trash_metadata.json")
                     if remote_meta and isinstance(remote_meta, dict):
                         os.makedirs(os.path.dirname(self.trash_meta_file), exist_ok=True)

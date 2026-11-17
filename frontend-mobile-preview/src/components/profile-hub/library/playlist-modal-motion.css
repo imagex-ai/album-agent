@@ -1,0 +1,75 @@
+.playlist-modal-overlay {
+  animation: playlist-overlay-enter var(--playlist-motion-duration, 350ms) ease both;
+  transition: opacity var(--playlist-motion-duration, 350ms) ease;
+}
+.playlist-modal-panel {
+  animation: playlist-panel-enter var(--playlist-motion-duration, 350ms) cubic-bezier(0.22, 1, 0.36, 1) both;
+  transition: opacity var(--playlist-motion-duration, 350ms) ease,
+    transform var(--playlist-motion-duration, 350ms) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.playlist-modal-overlay[data-closing="true"] {
+  animation: none !important;
+  opacity: 0 !important;
+  transform: none !important;
+  transition: opacity var(--playlist-motion-duration, 350ms) ease !important;
+}
+.playlist-modal-overlay[data-closing="true"] .playlist-modal-panel {
+  animation: none;
+  opacity: 0;
+  transform: translateY(20px);
+}
+@keyframes playlist-overlay-enter { from { opacity: 0; } to { opacity: 1; } }
+@keyframes playlist-panel-enter { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+
+/* The form and its trigger are separate states: keep the outgoing form mounted
+   until its exit finishes so focus and interaction can be handed back safely. */
+.playlist-create-form,
+.playlist-create-trigger {
+  animation: playlist-create-enter var(--playlist-motion-duration, 350ms) cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.playlist-modal-overlay .playlist-create-form[data-closing="true"] {
+  animation: none !important;
+  opacity: 0 !important;
+  transform: translateY(8px) !important;
+  transition: opacity var(--playlist-motion-duration, 350ms) ease,
+    transform var(--playlist-motion-duration, 350ms) ease !important;
+}
+@keyframes playlist-create-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.playlist-option-check {
+  transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease,
+    transform var(--playlist-motion-duration, 350ms) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.playlist-option-check svg {
+  transition: opacity var(--playlist-motion-duration, 350ms) ease,
+    transform var(--playlist-motion-duration, 350ms) cubic-bezier(0.22, 1, 0.36, 1);
+}
+[data-playlist-option][aria-pressed="false"] .playlist-option-check svg {
+  opacity: 0;
+  transform: scale(0.7);
+}
+[data-playlist-option][aria-pressed="true"] .playlist-option-check svg {
+  opacity: 1;
+  transform: scale(1);
+}
+@media (min-width: 640px) {
+  .playlist-modal-panel { animation-name: playlist-panel-center-enter; }
+  .playlist-modal-overlay[data-closing="true"] .playlist-modal-panel { transform: translateY(8px) scale(0.98); }
+  @keyframes playlist-panel-center-enter { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+}
+.playlist-modal-overlay[data-motion-disabled="true"],
+.playlist-modal-overlay[data-motion-disabled="true"] .playlist-modal-panel,
+.playlist-modal-overlay[data-motion-disabled="true"] .playlist-create-form,
+.playlist-modal-overlay[data-motion-disabled="true"] .playlist-create-trigger,
+.playlist-modal-overlay[data-motion-disabled="true"] .playlist-option-check,
+.playlist-modal-overlay[data-motion-disabled="true"] .playlist-option-check svg { animation: none; transition: none; }
+.playlist-modal-overlay[data-motion-disabled="true"] .playlist-create-form[data-closing="true"] {
+  transition: none !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .playlist-modal-overlay, .playlist-modal-panel, .playlist-create-form,
+  .playlist-create-trigger, .playlist-option-check, .playlist-option-check svg { animation: none; transition: none; }
+  .playlist-modal-overlay .playlist-create-form[data-closing="true"] { transition: none !important; }
+}

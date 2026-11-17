@@ -1,0 +1,163 @@
+/**
+ * floating-mini-player.css
+ *
+ * GPU-accelerated spring physics, Edge-Stash equalizer, and reduced-motion
+ * support for IMAGEX.AI Floating Mini-Player.
+ *
+ * Governed by:
+ * - docs/video-player-architecture.md (Sections 4, 7, 8)
+ * - docs/superpowers/specs/2026-11-14-universal-video-player-design.md
+ */
+
+/* Shell GPU transform & physics spring easing */
+.fmp-shell {
+  transform: translate3d(calc(var(--fmp-x, 0px) + var(--fmp-dx, 0px)), calc(var(--fmp-y, 0px) + var(--fmp-dy, 0px)), 0);
+  opacity: var(--fmp-swipe-opacity, 1);
+  will-change: transform, opacity;
+  transition: transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease-out;
+}
+
+.fmp-shell[data-visible="true"] {
+  animation: fmp-enter var(--anim-speed-duration, 250ms) cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+
+@keyframes fmp-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(calc(var(--fmp-x, 0px) + var(--fmp-dx, 0px)), calc(var(--fmp-y, 0px) + var(--fmp-dy, 0px) + 16px), 0) scale(0.96);
+  }
+  to {
+    opacity: var(--fmp-swipe-opacity, 1);
+    transform: translate3d(calc(var(--fmp-x, 0px) + var(--fmp-dx, 0px)), calc(var(--fmp-y, 0px) + var(--fmp-dy, 0px)), 0);
+  }
+}
+
+@supports (animation-timing-function: linear(0, 1)) {
+  .fmp-shell {
+    transition: transform 0.32s linear(
+      0, 0.009, 0.035 2.1%, 0.141 4.4%, 0.723 12.9%, 0.938 16.7%,
+      1.017, 1.077, 1.101 24.3%, 1.104 27.2%, 1.085 30.6%,
+      1.009 42.4%, 0.994 48.6%, 1 65%
+    ), opacity 0.2s ease-out;
+  }
+}
+
+.fmp-shell.fmp-dragging {
+  transition: none !important;
+}
+
+/* Reserve the title/grip gesture for free drag before pointerdown. Setting this
+   on the header ancestor would also prevent the action strip from scrolling. */
+.fmp-header-title {
+  touch-action: none;
+}
+
+@media (pointer: coarse) {
+  .fmp-shell[data-stashed] { width: 44px !important; }
+  .fmp-stash-tab { width: 44px; }
+  .fmp-header-title { min-width: 64px; }
+  .fmp-header-actions { min-width: 0; max-width: calc(100% - 68px); flex-shrink: 1; overflow-x: auto; touch-action: pan-x; scrollbar-width: thin; scrollbar-color: var(--tl-text-muted) transparent; }
+  .fmp-header-actions::-webkit-scrollbar { height: 2px; }
+  .fmp-header-actions::-webkit-scrollbar-thumb { background: var(--tl-text-muted); border-radius: 2px; }
+  .fmp-header-actions > button { flex: 0 0 44px; min-width: 44px; min-height: 44px; }
+}
+
+/* Exit transition for close / dismiss */
+.fmp-shell[data-closing="true"] {
+  transform: translate3d(calc(var(--fmp-x, 0px) + var(--fmp-dx, 0px)), calc(var(--fmp-y, 0px) + var(--fmp-dy, 0px) + 36px), 0) scale(0.92) !important;
+  opacity: 0 !important;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 1, 1), opacity 0.18s ease-in !important;
+  pointer-events: none !important;
+}
+
+/* Stashed exit */
+.fmp-shell[data-closing="true"] .fmp-stash-tab {
+  opacity: 0 !important;
+  transform: scale(0.85) !important;
+  transition: opacity 200ms ease, transform 200ms ease !important;
+}
+
+/* Edge-Stash lateral tab styles */
+.fmp-stash-tab {
+  will-change: transform;
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.fmp-stash-tab[data-closing="true"] {
+  transform: translate3d(var(--fmp-stash-exit-x, 0px), -50%, 0) scale(0.85) !important;
+  opacity: 0 !important;
+  transition: transform 0.18s ease-in, opacity 0.15s ease-in !important;
+  pointer-events: none !important;
+}
+
+/* Audio equalizer bars: composited transform: scaleY ONLY */
+@keyframes fmp-eq-scale {
+  0%, 100% {
+    transform: scaleY(0.28);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.fmp-eq-bar {
+  transform-origin: bottom;
+  animation: fmp-eq-scale 0.7s ease-in-out infinite alternate;
+  will-change: transform;
+}
+
+.fmp-eq-bar:nth-child(1) {
+  animation-duration: 0.58s;
+  animation-delay: 0.08s;
+}
+
+.fmp-eq-bar:nth-child(2) {
+  animation-duration: 0.82s;
+  animation-delay: 0s;
+}
+
+.fmp-eq-bar:nth-child(3) {
+  animation-duration: 0.64s;
+  animation-delay: 0.16s;
+}
+
+.fmp-eq-paused .fmp-eq-bar {
+  animation-play-state: paused !important;
+  transform: scaleY(0.3) !important;
+}
+
+/* Reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  .fmp-shell,
+  .fmp-stash-tab {
+    transition: none !important;
+    animation: none !important;
+  }
+  .fmp-eq-bar {
+    animation: none !important;
+    transform: scaleY(0.55) !important;
+  }
+}
+
+.fmp-shell.fmp-reduced-motion,
+.fmp-reduced-motion .fmp-shell,
+.fmp-reduced-motion .fmp-stash-tab,
+.fmp-shell.fmp-reduced-motion .fmp-stash-tab {
+  transition: none !important;
+  animation: none !important;
+}
+
+.fmp-shell.fmp-reduced-motion .fmp-eq-bar,
+.fmp-reduced-motion .fmp-eq-bar {
+  animation: none !important;
+  transform: scaleY(0.55) !important;
+}
+
+/* The app preference applies to the header controls as well as the shell. */
+.fmp-shell.fmp-reduced-motion .fmp-header-actions > button {
+  transition: none !important;
+  animation: none !important;
+  translate: none !important;
+  rotate: none !important;
+  scale: none !important;
+}

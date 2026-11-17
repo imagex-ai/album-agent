@@ -1,5 +1,5 @@
 """
-IMAGEX.AI Auto-Update Engine
+IMAGEX Auto-Update Engine
 Provides automatic GitHub release discovery, semver comparison,
 and one-click autonomous updates for BOTH:
 1. Source / Git Clone repositories (git pull + npm run build)
@@ -100,7 +100,7 @@ def check_for_updates(current_version: str, force: bool = False) -> Dict[str, An
     api_url = f"https://api.github.com/repos/{repo}/releases/latest"
 
     headers = {
-        "User-Agent": "IMAGEX-AI-App-AutoUpdater",
+        "User-Agent": "IMAGEX-App-AutoUpdater",
         "Accept": "application/vnd.github.v3+json"
     }
     github_token = os.environ.get("GITHUB_TOKEN")
@@ -252,12 +252,12 @@ def _execute_frozen_exe_update(exe_url: str):
     """
     current_exe = os.path.abspath(sys.executable)
     exe_dir = os.path.dirname(current_exe)
-    new_exe = os.path.join(exe_dir, "IMAGEX_AI_update.exe")
+    new_exe = os.path.join(exe_dir, "IMAGEX_update.exe")
     bat_file = os.path.join(exe_dir, "apply_update.bat")
 
     _log_state("exe_download", "Iniciando download do novo executável...", 15, f"Baixando de: {exe_url}")
 
-    req = urllib.request.Request(exe_url, headers={"User-Agent": "IMAGEX-AI-App-AutoUpdater"})
+    req = urllib.request.Request(exe_url, headers={"User-Agent": "IMAGEX-App-AutoUpdater"})
     with urllib.request.urlopen(req, timeout=30) as response, open(new_exe, "wb") as out_file:
         total_size = int(response.getheader("Content-Length", 0))
         downloaded = 0

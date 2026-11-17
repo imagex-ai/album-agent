@@ -37,17 +37,18 @@ export const AiEngineSelector: React.FC<AiEngineSelectorProps> = ({
   const { activeAiEngine, setActiveAiEngine, settings } = useAppStore();
   const rawEngine = selectedEngine || activeAiEngine;
   const currentEngine: AiEngineType = rawEngine === 'ai_react' ? 'ai_react' : 'gemini_surgical_scout';
-  const tAi: any = translations[settings.language]?.aiEngine || translations['pt-BR']?.aiEngine || translations['en-US']?.aiEngine || {};
+  const isEn = settings.language === 'en-US';
+  const tAi: any = translations[settings.language]?.aiEngine || (isEn ? translations['en-US']?.aiEngine : translations['pt-BR']?.aiEngine) || {};
 
   const engineOptions: AiEngineOption[] = [
     {
       id: 'gemini_surgical_scout',
-      title: tAi.engine1?.title || '1. Modo Rápido / Cirúrgico (Surgical Scout)',
-      shortTitle: tAi.engine1?.shortTitle || '1. Modo Cirúrgico (Rápido)',
-      badge: tAi.engine1?.badge || 'RECOMENDADO (90%)',
-      description: tAi.engine1?.desc || 'Extração cirúrgica direta por HTTP com Raio-X Físico de bytes. Ultra-rápido (1 a 3s), consumo leve de memória e sem peso de navegador gráfico.',
-      bestFor: tAi.engine1?.bestFor || '90% das galerias da web, portfólios fotográficos e páginas com links diretos de mídia.',
-      brainType: tAi.engine1?.brainType || 'Gemini Flash + Raio-X Físico de Bytes',
+      title: tAi.engine1?.title || (isEn ? '1. Fast / Surgical Mode (Surgical Scout)' : '1. Modo Rápido / Cirúrgico (Surgical Scout)'),
+      shortTitle: tAi.engine1?.shortTitle || (isEn ? '1. Surgical Mode (Fast)' : '1. Modo Cirúrgico (Rápido)'),
+      badge: tAi.engine1?.badge || (isEn ? 'RECOMMENDED (90%)' : 'RECOMENDADO (90%)'),
+      description: tAi.engine1?.desc || (isEn ? 'Direct surgical HTTP extraction with physical byte X-Ray. Ultra-fast (1 to 3s), lightweight memory footprint, and no heavy browser overhead.' : 'Extração cirúrgica direta por HTTP com Raio-X Físico de bytes. Ultra-rápido (1 a 3s), consumo leve de memória e sem peso de navegador gráfico.'),
+      bestFor: tAi.engine1?.bestFor || (isEn ? '90% of web galleries, photography portfolios, and direct media pages.' : '90% das galerias da web, portfólios fotográficos e páginas com links diretos de mídia.'),
+      brainType: tAi.engine1?.brainType || (isEn ? 'Gemini Flash + Physical Byte X-Ray' : 'Gemini Flash + Raio-X Físico de Bytes'),
       icon: Zap,
       colorClass: 'text-amber-400',
       borderClass: 'border-amber-500/40 hover:border-amber-400',
@@ -56,12 +57,12 @@ export const AiEngineSelector: React.FC<AiEngineSelectorProps> = ({
     },
     {
       id: 'ai_react',
-      title: tAi.engine2?.title || '2. Modo Navegador Real / IA ReAct (Playwright)',
-      shortTitle: tAi.engine2?.shortTitle || '2. Navegador Real (ReAct)',
-      badge: tAi.engine2?.badge || 'Navegador Completo',
-      description: tAi.engine2?.desc || 'Navegador Chromium headless real com percepção visual multimodal, Set-of-Marks e reflexão adaptativa para interagir com a página.',
-      bestFor: tAi.engine2?.bestFor || 'Sites complexos com JavaScript pesado, Cloudflare, abas interativas, botões ocultos ou scroll infinito.',
-      brainType: tAi.engine2?.brainType || 'IA Multimodal / Qwen 2.5 + Chromium Headless',
+      title: tAi.engine2?.title || (isEn ? '2. Real Browser / AI ReAct (Playwright)' : '2. Modo Navegador Real / IA ReAct (Playwright)'),
+      shortTitle: tAi.engine2?.shortTitle || (isEn ? '2. Real Browser (ReAct)' : '2. Navegador Real (ReAct)'),
+      badge: tAi.engine2?.badge || (isEn ? 'Full Browser' : 'Navegador Completo'),
+      description: tAi.engine2?.desc || (isEn ? 'Headless Chromium browser with multimodal visual perception, Set-of-Marks, and adaptive reflection to interact with complex pages.' : 'Navegador Chromium headless real com percepção visual multimodal, Set-of-Marks e reflexão adaptativa para interagir com a página.'),
+      bestFor: tAi.engine2?.bestFor || (isEn ? 'Complex JavaScript sites, Cloudflare protection, interactive tabs, hidden buttons, or infinite scroll.' : 'Sites complexos com JavaScript pesado, Cloudflare, abas interativas, botões ocultos ou scroll infinito.'),
+      brainType: tAi.engine2?.brainType || (isEn ? 'Multimodal AI / Qwen 2.5 + Headless Chromium' : 'IA Multimodal / Qwen 2.5 + Chromium Headless'),
       icon: Bot,
       colorClass: 'text-brand-400',
       borderClass: 'border-brand-500/40 hover:border-brand-400',

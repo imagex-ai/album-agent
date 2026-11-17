@@ -1,3 +1,4 @@
+import { normalizePlayerHighlights } from '../video-player/engine/playerHighlights';
 import React, { useState, useMemo } from 'react';
 import {
   Trash2,
@@ -26,6 +27,7 @@ import { formatFileSize } from '../../utils/formatters';
 import { translations } from '../../i18n/translations';
 import { IconBadge } from '../common/IconBadge';
 import { ModalPortal } from '../common/ModalPortal';
+import { UniversalVideoPlayer } from '../video-player/ui/UniversalVideoPlayer';
 
 export const TrashView: React.FC = () => {
   const {
@@ -658,12 +660,18 @@ export const TrashView: React.FC = () => {
                 </button>
               </div>
               <div className="aspect-video bg-black flex items-center justify-center">
-                <video
-                  src={previewingVideoItem.stream_url}
-                  controls
-                  autoPlay
-                  playsInline
-                  className="w-full h-full object-contain"
+                <UniversalVideoPlayer
+                  density="compact"
+                  autoPlayOnActive
+                  posterUrl={previewingVideoItem.thumbnail_url}
+                  source={{
+                    id: previewingVideoItem.id,
+                    highlights: normalizePlayerHighlights(previewingVideoItem),
+                    title: previewingVideoItem.title,
+                    streamUrl: previewingVideoItem.stream_url || '',
+                    posterUrl: previewingVideoItem.thumbnail_url,
+                  }}
+                  className="w-full h-full object-contain rounded-none border-0"
                 />
               </div>
               <div className="p-4 flex items-center justify-end gap-2 border-t border-border">

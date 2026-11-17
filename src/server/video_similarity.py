@@ -62,9 +62,20 @@ def frame_hash(exe, path, seconds, cancel):
     for row in range(8):
         for col in range(8):
             value = (value << 1) | (pixels[row * 9 + col] > pixels[row * 9 + col + 1])
-    return value
+    return value, sum(pixels) / len(pixels)
 
 
 def fingerprints_close(first, second):
-    distances = [(a ^ b).bit_count() for a, b in zip(first, second)]
-    return len(distances) == 3 and max(distances) <= 6 and sum(distances) <= 12
+    # Match samples in time order; allow a small shift from cuts or introductions.
+    # Four separate corresponding frames provide more evidence than one logo.
+    if len(first) != 7 or len(second) != 7:
+        return False
+    previous = [0] * 8
+    for i, left in enumerate(first):
+        current = [0] * 8
+        for j, right in enumerate(second):
+            matches = bool(left is not None and right is not None and abs(i - j) <= 2
+                           and abs(left[1] - right[1]) <= 20 and (left[0] ^ right[0]).bit_count() <= 5)
+            current[j + 1] = max(previous[j + 1], current[j], previous[j] + int(matches))
+        previous = current
+    return previous[-1] >= 4

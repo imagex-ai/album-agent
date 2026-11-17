@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Zap,
   Compass,
@@ -13,15 +13,20 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
-  ShieldCheck,
   Film,
   Trash2,
   X,
   Home,
   Flame,
-  Sparkles
+  Sparkles,
+  UserRound,
+  History,
+  ListVideo,
+  Heart,
+  ThumbsUp
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
+import { useProfileHubLibraryStore } from '../../store/useProfileHubLibraryStore';
 import { translations } from '../../i18n/translations';
 import { ViewId } from '../../types';
 
@@ -30,13 +35,12 @@ interface SidebarProps {
   onCloseMobile?: () => void;
 }
 
-interface NavItem {
-  id: ViewId;
+type NavItem = {
   label: string;
   icon: any;
   badge: string | null;
   badgeColor?: string;
-}
+} & ({ id: ViewId; disabled?: false } | { id?: never; disabled: true });
 
 interface NavSection {
   title: string;
@@ -46,7 +50,16 @@ interface NavSection {
 export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseMobile }) => {
   const [collapsed, setCollapsed] = useState(false);
   const { currentView, navigateToView, setSlideshowOpen, albums, videos, trashItems, jobs, logs, settings, updateInfo, setUpdateModalOpen } = useAppStore();
+  const libraryHistoryCount = useProfileHubLibraryStore((state) => state.history.length);
+  const libraryPlaylistsCount = useProfileHubLibraryStore((state) => state.playlists.length);
+  const libraryFavoritesCount = useProfileHubLibraryStore((state) => state.favorites.length);
+  const libraryLikedCount = useProfileHubLibraryStore((state) => state.liked.length);
+  const hydrateLibrary = useProfileHubLibraryStore((state) => state.hydrateLibrary);
   const t = translations[settings.language].sidebar;
+
+  useEffect(() => {
+    void hydrateLibrary();
+  }, [hydrateLibrary]);
 
   const activeJobsCount = jobs.filter(j => j.status === 'active').length;
   const errorLogsCount = logs.filter(l => l.level === 'error').length;
@@ -64,11 +77,22 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
       ]
     },
     {
+      title: t.profileHub,
+      items: [
+        { id: 'timeline-preview', label: t.hubTimeline, icon: Activity, badge: null },
+        { id: 'profile-hub', label: t.hubExplore, icon: UserRound, badge: null },
+        { id: 'timeline-history' as ViewId, label: t.hubHistory, icon: History, badge: libraryHistoryCount > 0 ? String(libraryHistoryCount) : null },
+        { id: 'timeline-playlists' as ViewId, label: t.hubPlaylists, icon: ListVideo, badge: libraryPlaylistsCount > 0 ? String(libraryPlaylistsCount) : null },
+        { id: 'timeline-favorites' as ViewId, label: t.hubFavorites, icon: Heart, badge: libraryFavoritesCount > 0 ? String(libraryFavoritesCount) : null },
+        { id: 'timeline-liked' as ViewId, label: t.hubLiked, icon: ThumbsUp, badge: libraryLikedCount > 0 ? String(libraryLikedCount) : null },
+      ]
+    },
+    {
       title: t.libraryExplorer,
       items: [
         { id: 'gallery' as ViewId, label: t.albumLibrary, icon: FolderHeart, badge: albums.length.toString() },
         { id: 'videos' as ViewId, label: t.videoGallery, icon: Film, badge: videos.length > 0 ? videos.length.toString() : null },
-        { id: 'shorts' as ViewId, label: t.shortsFeed || 'Shorts & Reels', icon: Flame, badge: 'HOT', badgeColor: 'bg-purple-500/20 text-purple-300 border border-purple-500/30' },
+        { id: 'shorts' as ViewId, label: t.shortsFeed || 'Shorts', icon: Flame, badge: 'HOT', badgeColor: 'bg-purple-500/20 text-purple-300 border border-purple-500/30' },
         { id: 'duplicates' as ViewId, label: t.duplicatesFinder, icon: Copy, badge: null },
         { id: 'trash' as ViewId, label: t.trash || 'Trash', icon: Trash2, badge: trashItems.length > 0 ? trashItems.length.toString() : null },
       ]
@@ -76,7 +100,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
     {
       title: t.observability,
       items: [
-        { id: 'job-history' as ViewId, label: t.jobManagement, icon: ListTodo, badge: jobs.length.toString() },
+        { id: 'job-history' as ViewId, label: t.jobManagement, icon: ListTodo, badge: null },
         { id: 'realtime-logs' as ViewId, label: t.realtimeLogs, icon: Terminal, badge: errorLogsCount > 0 ? `${errorLogsCount} ERR` : null, badgeColor: 'bg-rose-500/20 text-rose-400 border border-rose-500/30' },
         { id: 'performance-metrics' as ViewId, label: t.performanceStorage, icon: BarChart3, badge: null },
       ]
@@ -100,12 +124,16 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
       <div className="p-4 border-b border-border flex items-center justify-between">
         {!collapsed || isMobileOpen ? (
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-brand-600 to-accent-purple flex items-center justify-center font-bold text-white shadow-glow-brand">
-              X
+            <div className="w-10 h-10 rounded-xl overflow-hidden shadow-glow-brand border border-white/10 shrink-0 bg-slate-950 flex items-center justify-center">
+              <img
+                src="/app-icon.png"
+                alt="IMAGEX"
+                className="w-full h-full object-cover"
+              />
             </div>
             <div>
               <div className="font-extrabold text-sm tracking-wider text-slate-100 flex items-center gap-1.5">
-                IMAGEX.AI
+                IMAGEX
                 <button
                   type="button"
                   onClick={() => setUpdateModalOpen(true)}
@@ -128,17 +156,21 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
                   </button>
                 )}
               </div>
-              <p className="text-[11px] text-slate-400 font-medium">Enterprise Extraction</p>
+              <p className="text-[11px] text-slate-400 font-medium tracking-wide">Media Suite</p>
             </div>
           </div>
         ) : (
           <button
             type="button"
             onClick={() => setUpdateModalOpen(true)}
-            className="w-10 h-10 mx-auto rounded-xl bg-gradient-to-tr from-brand-600 to-accent-purple flex items-center justify-center font-bold text-white shadow-glow-brand relative cursor-pointer"
-            title="IMAGEX.AI v5.6.1"
+            className="w-10 h-10 mx-auto rounded-xl overflow-hidden shadow-glow-brand border border-white/10 relative cursor-pointer block p-0 bg-slate-950"
+            title="IMAGEX v5.6.1"
           >
-            X
+            <img
+              src="/app-icon.png"
+              alt="IMAGEX"
+              className="w-full h-full object-cover"
+            />
             {updateInfo?.update_available && (
               <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-amber-400 border-2 border-slate-950 animate-pulse" />
             )}
@@ -175,23 +207,30 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
             <div className="space-y-1">
               {section.items.map(item => {
                 const Icon = item.icon;
-                const isActive = currentView === item.id;
+                const isActive = !item.disabled && currentView === item.id;
+                const accessibleLabel = item.disabled ? `${item.label}: ${t.comingSoon}` : item.label;
                 return (
                   <button
-                    key={item.id}
-                    onClick={() => handleItemClick(item.id)}
-                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm font-medium transition-all group ${
-                      isActive
-                        ? 'bg-brand-600/20 text-brand-300 border border-brand-500/30 shadow-glow-brand'
-                        : 'text-slate-400 hover:text-slate-200 hover:bg-surface-elevated'
+                    key={item.id ?? item.label}
+                    type="button"
+                    disabled={item.disabled}
+                    aria-label={accessibleLabel}
+                    aria-current={isActive ? 'page' : undefined}
+                    onClick={() => { if (!item.disabled) handleItemClick(item.id); }}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm font-medium transition-all group border ${
+                      item.disabled
+                        ? 'border-transparent text-slate-400 cursor-not-allowed'
+                        : isActive
+                        ? 'bg-brand-600/20 text-brand-300 border-brand-500/30 shadow-glow-brand'
+                        : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-surface-elevated'
                     }`}
-                    title={collapsed && !isMobileOpen ? item.label : undefined}
+                    title={collapsed && !isMobileOpen ? accessibleLabel : undefined}
                   >
                     <div className="flex items-center gap-3">
                       <Icon
                         size={18}
                         className={`transition-colors ${
-                          isActive ? 'text-brand-400' : 'text-slate-400 group-hover:text-slate-200'
+                          item.disabled ? 'text-slate-400' : isActive ? 'text-brand-400' : 'text-slate-400 group-hover:text-slate-200'
                         }`}
                       />
                       {(!collapsed || isMobileOpen) && <span>{item.label}</span>}
@@ -227,19 +266,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
           <Sparkles size={15} className="text-amber-300 shrink-0" />
           {(!collapsed || isMobileOpen) && <span className="truncate">{t.globalSlider || 'Slider Global (Fotos/GIFs)'}</span>}
         </button>
-      </div>
-
-      {/* Footer Status */}
-      <div className="p-3 border-t border-border bg-surface/40">
-        <div className="flex items-center gap-2 text-xs text-slate-400">
-          <ShieldCheck size={16} className="text-emerald-400 shrink-0" />
-          {(!collapsed || isMobileOpen) && (
-            <div className="truncate">
-              <span className="font-semibold text-slate-300">Anti-Bot Shield</span>
-              <p className="text-[10px] text-slate-400">Stealth Active</p>
-            </div>
-          )}
-        </div>
       </div>
     </div>
   );

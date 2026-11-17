@@ -36,7 +36,7 @@ export const FolderModal: React.FC = () => {
     } else if (activeFolderModal.type === 'create') {
       setInputVal('');
     } else if (activeFolderModal.type === 'move') {
-      setSelectedFolder(videoFolders[0]?.name || 'Geral');
+      setSelectedFolder(videoFolders[0]?.name || (isEn ? 'General' : 'Geral'));
     }
   }, [activeFolderModal, videoFolders]);
 

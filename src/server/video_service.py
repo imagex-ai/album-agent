@@ -738,37 +738,42 @@ class VideoService:
         self._meta_lock = threading.RLock()
         self._last_hf_meta_sync = 0.0
         self._ensure_storage_initialized()
-        self._migrate_origins()
+        from src.core.startup_policy import startup_maintenance_enabled
+        if startup_maintenance_enabled():
+            self._migrate_origins()
 
     def _ensure_storage_initialized(self):
         """Creates data/videos and default folders. On cloud restarts, restores metadata from HF."""
+        from src.core.startup_policy import startup_maintenance_enabled
+        maintenance = startup_maintenance_enabled()
         os.makedirs(self.base_dir, exist_ok=True)
         os.makedirs(self.thumbnails_dir, exist_ok=True)
         default_folder = os.path.join(self.base_dir, "Geral")
         os.makedirs(default_folder, exist_ok=True)
 
-        # --- STEP 1: Restore or merge metadata from HF ---
-        if cloud_storage.is_connected():
+        # Local boots need no remote check unless sync or recovery is needed.
+        needs_restore = not os.path.exists(self.metadata_file) or os.path.getsize(self.metadata_file) < 3
+        if maintenance and (self.is_auto_sync_enabled() or needs_restore) and cloud_storage.is_connected():
             self.restore_metadata_from_hf()
 
-        if not os.path.exists(self.metadata_file):
+        if maintenance and not os.path.exists(self.metadata_file):
             self._save_metadata({})
 
         # Recriar fisicamente as pastas de todos os vídeos conhecidos no metadata
         try:
             meta = self._load_metadata()
-            for v in meta.values():
-                folder = v.get("folder")
-                if folder and not folder.startswith("."):
-                    os.makedirs(os.path.join(self.base_dir, folder), exist_ok=True)
+            folders = {v.get("folder") for v in meta.values() if v.get("folder") and not v.get("folder").startswith(".")}
+            for folder in folders:
+                os.makedirs(os.path.join(self.base_dir, folder), exist_ok=True)
         except Exception:
             pass
 
         # If completely empty (no metadata entries AND no remote entries), show sample
-        self._ensure_sample_video()
+        if maintenance:
+            self._ensure_sample_video()
 
         # Auto-sincronizar vídeos locais para o Hugging Face APENAS se explicitamente configurado pelo usuário
-        if self.is_auto_sync_enabled():
+        if maintenance and self.is_auto_sync_enabled():
             self.sync_local_videos_to_cloud()
         else:
             logger.info("[VideoService] Auto-sync para nuvem desativado por padrão (AUTO_CLOUD_SYNC=false). Vídeos permanecem 100% locais.")
@@ -783,76 +788,104 @@ class VideoService:
         try:
             from datetime import datetime
             meta = self._load_metadata()
+            if not meta:
+                return
+
+            # Fast check: skip if all entries already have source_origin and valid created_at
+            needs_any = any(
+                not v.get("source_origin") or
+                not v.get("created_at") or
+                not v.get("updated_at") or
+                (v.get("created_at", "").startswith(("2026-10-26 23:", "2026-10-27 00:")) and not v.get("date_healed"))
+                for v in meta.values()
+            )
+            if not needs_any:
+                return
+
             modified = False
 
-            # Pre-load local albums for title/source matching
-            albums_dir = os.path.join(os.path.dirname(self.base_dir), "albums")
-            albums = []
-            if os.path.exists(albums_dir):
-                for fname in os.listdir(albums_dir):
-                    if fname.endswith(".json"):
-                        try:
-                            with open(os.path.join(albums_dir, fname), "r", encoding="utf-8") as fp:
-                                albums.append(json.load(fp))
-                        except Exception:
-                            pass
+            _re_clean = re.compile(r'[^a-zA-Z0-9]+')
+            _stop_words = frozenset({'the', 'and', 'com', 'mp4', '1080p', '720p', '360p', '480p', 'video', 'videos', 'para', 'que', 'dos', 'uma', 'seu', 'sua'})
 
             def clean_words(s):
-                if not s: return set()
-                s = re.sub(r'[^a-zA-Z0-9]', ' ', s.lower())
-                stop = {'the', 'and', 'com', 'mp4', '1080p', '720p', '360p', '480p', 'video', 'videos', 'para', 'que', 'dos', 'uma', 'seu', 'sua'}
-                return {w for w in s.split() if len(w) > 3 and w not in stop}
+                if not s:
+                    return frozenset()
+                return frozenset(w for w in _re_clean.split(s.lower()) if len(w) > 3 and w not in _stop_words)
+
+            # Pre-load and pre-tokenize local albums ONCE
+            albums_dir = os.path.join(os.path.dirname(self.base_dir), "albums")
+            cached_albums = []
+            if os.path.exists(albums_dir):
+                for fname in os.listdir(albums_dir):
+                    if fname.endswith(".json") and not fname.startswith("vid_page_"):
+                        try:
+                            with open(os.path.join(albums_dir, fname), "r", encoding="utf-8") as fp:
+                                a_data = json.load(fp)
+                                a_words = clean_words(a_data.get("title") or "")
+                                has_source = bool(a_data.get("source_url") or a_data.get("source_domain") or a_data.get("source_page"))
+                                cached_albums.append((a_data, a_words, has_source))
+                        except Exception:
+                            pass
 
             for vid_id, entry in meta.items():
-                # 1. Recover/heal created_at
                 cur_created = entry.get("created_at")
+                needs_created = not cur_created or (cur_created.startswith(("2026-10-26 23:", "2026-10-27 00:")) and not entry.get("date_healed"))
+                curr = entry.get("source_origin")
+                needs_origin = not curr
+
+                # If entry already has valid timestamps and source_origin, skip directly
+                if not needs_created and not needs_origin and entry.get("updated_at"):
+                    continue
+
                 date_recovered = None
+                if needs_created:
+                    # Check local disk file
+                    rel_p = entry.get("rel_path")
+                    if rel_p:
+                        loc = os.path.join(self.base_dir, rel_p.replace("/", os.sep))
+                        if os.path.exists(loc):
+                            try:
+                                mtime = os.path.getmtime(loc)
+                                date_recovered = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+                            except Exception:
+                                pass
 
-                # Check local disk file
-                rel_p = entry.get("rel_path")
-                if rel_p:
-                    loc = os.path.join(self.base_dir, rel_p.replace("/", os.sep))
-                    if os.path.exists(loc):
-                        try:
-                            mtime = os.path.getmtime(loc)
-                            date_recovered = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
-                        except Exception:
-                            pass
+                    # Check 10-digit unix timestamp in filename or title (e.g. 1790477465)
+                    if not date_recovered:
+                        text_to_search = f"{entry.get('filename') or ''} {entry.get('title') or ''}"
+                        m = re.search(r'(\b17\d{8}\b)', text_to_search)
+                        if m:
+                            try:
+                                ts = int(m.group(1))
+                                if 1500000000 < ts < 2000000000:
+                                    date_recovered = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+                            except Exception:
+                                pass
 
-                # Check 10-digit unix timestamp in filename or title (e.g. 1790477465)
-                if not date_recovered:
-                    text_to_search = f"{entry.get('filename') or ''} {entry.get('title') or ''}"
-                    m = re.search(r'(\b17\d{8}\b)', text_to_search)
-                    if m:
-                        try:
-                            ts = int(m.group(1))
-                            if 1500000000 < ts < 2000000000:
-                                date_recovered = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-                        except Exception:
-                            pass
+                    # Check matching album
+                    if not date_recovered and cached_albums:
+                        v_words = clean_words(entry.get("title") or "") | clean_words(entry.get("folder") or "")
+                        best_alb = None
+                        best_overlap = 0
+                        if len(v_words) >= 2:
+                            for a_data, a_words, _ in cached_albums:
+                                overlap = len(v_words & a_words)
+                                if overlap > best_overlap:
+                                    best_overlap = overlap
+                                    best_alb = a_data
+                        if best_alb and best_overlap >= 2 and best_alb.get("created_at"):
+                            date_recovered = best_alb.get("created_at").replace(" UTC", "")
 
-                # Check matching album
-                if not date_recovered:
-                    v_words = clean_words(entry.get("title") or "") | clean_words(entry.get("folder") or "")
-                    best_alb = None
-                    best_overlap = 0
-                    if len(v_words) >= 2:
-                        for a in albums:
-                            a_words = clean_words(a.get("title") or "")
-                            overlap = len(v_words & a_words)
-                            if overlap > best_overlap:
-                                best_overlap = overlap
-                                best_alb = a
-                    if best_alb and best_overlap >= 2 and best_alb.get("created_at"):
-                        date_recovered = best_alb.get("created_at").replace(" UTC", "")
-
-                # If missing or it was generated with the dynamic fallback bug
-                if not cur_created or cur_created.startswith("2026-10-26 23:") or cur_created.startswith("2026-10-27 00:"):
                     if date_recovered:
                         entry["created_at"] = date_recovered
+                        entry["date_healed"] = True
                         modified = True
                     elif not cur_created:
                         entry["created_at"] = "2026-09-27 12:00:00"
+                        entry["date_healed"] = True
+                        modified = True
+                    else:
+                        entry["date_healed"] = True
                         modified = True
 
                 # 1.1 Ensure separate updated_at exists, defaulting to created_at
@@ -861,40 +894,38 @@ class VideoService:
                     modified = True
 
                 # 2. Fix source_origin ('web' vs 'pc')
-                curr = entry.get("source_origin")
-                surl = entry.get("source_url") or ""
-                sid = entry.get("source_id") or ""
-                folder = entry.get("folder") or ""
-                fn = entry.get("filename") or ""
-                title = entry.get("title") or ""
-                folder_norm = "".join(c for c in unicodedata.normalize("NFKD", folder) if not unicodedata.combining(c)).lower()
-                text_check = f"{title} {folder} {fn}".lower()
+                if needs_origin:
+                    surl = entry.get("source_url") or ""
+                    sid = entry.get("source_id") or ""
+                    folder = entry.get("folder") or ""
+                    fn = entry.get("filename") or ""
+                    title = entry.get("title") or ""
+                    folder_norm = "".join(c for c in unicodedata.normalize("NFKD", folder) if not unicodedata.combining(c)).lower()
+                    text_check = f"{title} {folder} {fn}".lower()
 
-                # Detect web extractions via streaming markers, web album matches, url signatures or resolution tags
-                is_web = bool(
-                    (surl and (surl.startswith("http://") or surl.startswith("https://"))) or
-                    sid or
-                    entry.get("custom_stream_url") or
-                    entry.get("storage_location") == "stream_url" or
-                    folder_norm.startswith("extra") or
-                    re.search(r'_\d{3,4}p(?:_\d+)?\.(?:mp4|webm|m4v)', fn.lower()) or
-                    re.search(r'\b17\d{8}\b', text_check)
-                )
+                    # Detect web extractions via streaming markers, web album matches, url signatures or resolution tags
+                    is_web = bool(
+                        (surl and (surl.startswith("http://") or surl.startswith("https://"))) or
+                        sid or
+                        entry.get("custom_stream_url") or
+                        entry.get("storage_location") == "stream_url" or
+                        folder_norm.startswith("extra") or
+                        re.search(r'_\d{3,4}p(?:_\d+)?\.(?:mp4|webm|m4v)', fn.lower()) or
+                        re.search(r'\b17\d{8}\b', text_check)
+                    )
 
-                if not is_web:
-                    v_words = clean_words(title) | clean_words(folder)
-                    if len(v_words) >= 2:
-                        for a in albums:
-                            a_words = clean_words(a.get("title") or "")
-                            if len(v_words & a_words) >= 2:
-                                if a.get("source_url") or a.get("source_domain") or a.get("source_page"):
+                    if not is_web and cached_albums:
+                        v_words = clean_words(title) | clean_words(folder)
+                        if len(v_words) >= 2:
+                            for _, a_words, has_source in cached_albums:
+                                if len(v_words & a_words) >= 2 and has_source:
                                     is_web = True
                                     break
 
-                new_origin = "web" if is_web else "pc"
-                if curr != new_origin:
-                    entry["source_origin"] = new_origin
-                    modified = True
+                    new_origin = "web" if is_web else "pc"
+                    if curr != new_origin:
+                        entry["source_origin"] = new_origin
+                        modified = True
 
             if modified:
                 self._save_metadata(meta)
@@ -912,6 +943,9 @@ class VideoService:
                 return 0
             with self._meta_lock:
                 local_meta = self._load_metadata()
+                if os.path.exists(self.metadata_file) and os.path.getsize(self.metadata_file) > 10000 and len(local_meta) == 0:
+                    logger.error("[VideoService] Local metadata file exists but loaded 0 items; aborting restore from HF to avoid wiping library.")
+                    return 0
                 modified = False
                 added = 0
                 for v_id, v_data in remote_meta.items():
@@ -998,20 +1032,66 @@ class VideoService:
                     pass
 
     def _load_metadata(self) -> Dict[str, Any]:
-        """Loads videos metadata JSON."""
+        """Loads videos metadata JSON with retry and fallback protection against accidental truncation."""
         with self._meta_lock:
             if not os.path.exists(self.metadata_file):
                 return {}
-            try:
-                with open(self.metadata_file, "r", encoding="utf-8") as fp:
-                    return json.load(fp)
-            except Exception:
-                return {}
+            # Try loading with retry (for concurrent file lock/access on Windows)
+            for attempt in range(5):
+                try:
+                    with open(self.metadata_file, "r", encoding="utf-8") as fp:
+                        data = json.load(fp)
+                    if isinstance(data, dict):
+                        return data
+                except (PermissionError, json.JSONDecodeError) as e:
+                    if attempt < 4:
+                        time.sleep(0.05 * (attempt + 1))
+                        continue
+                    logger.error(f"[VideoService] Error reading metadata file (attempt {attempt+1}): {e}")
+                except Exception as e:
+                    logger.error(f"[VideoService] Unexpected error reading metadata: {e}")
+                    break
 
-    def _save_metadata(self, data: Dict[str, Any]):
-        """Persists videos metadata to local disk AND mirrors to HF for persistence across restarts."""
+            # If primary file failed, check backup file before returning empty dict
+            bak_path = f"{self.metadata_file}.bak"
+            if os.path.exists(bak_path):
+                try:
+                    with open(bak_path, "r", encoding="utf-8") as fp:
+                        bak_data = json.load(fp)
+                    if isinstance(bak_data, dict) and len(bak_data) > 0:
+                        logger.warning(f"[VideoService] Recovered {len(bak_data)} records from {bak_path}")
+                        return bak_data
+                except Exception:
+                    pass
+            return {}
+
+    def _save_metadata(self, data: Dict[str, Any], allow_shrink: bool = False):
+        """Persists videos metadata to local disk with anti-truncation safety and rolling backups."""
+        if not isinstance(data, dict):
+            logger.error("[VideoService] Refusing to save non-dict metadata")
+            return False
+
         with self._meta_lock:
+            # SAFETY CHECK: Anti-truncation guard
+            if not allow_shrink and os.path.exists(self.metadata_file):
+                try:
+                    file_size = os.path.getsize(self.metadata_file)
+                    # If file on disk is substantial (>10KB) and incoming data is drastically smaller
+                    if file_size > 10000 and len(data) < 100:
+                        logger.error(f"[VideoService] BLOCKED ATTEMPT TO TRUNCATE METADATA! Current size: {file_size} bytes, new data count: {len(data)}")
+                        return False
+                except Exception:
+                    pass
+
             try:
+                # Keep rolling backup before overwriting
+                if os.path.exists(self.metadata_file) and os.path.getsize(self.metadata_file) > 1000:
+                    bak_path = f"{self.metadata_file}.bak"
+                    try:
+                        shutil.copy2(self.metadata_file, bak_path)
+                    except Exception:
+                        pass
+
                 tmp_path = f"{self.metadata_file}.{os.getpid()}.{threading.get_ident()}.tmp"
                 with open(tmp_path, "w", encoding="utf-8") as fp:
                     json.dump(data, fp, indent=2, ensure_ascii=False)
@@ -1025,7 +1105,7 @@ class VideoService:
                     except Exception:
                         pass
             except Exception as e:
-                print(f"Error saving videos metadata locally: {e}")
+                logger.error(f"Error saving videos metadata locally: {e}")
                 return False
 
         # Async-style: mirror to HF in background thread only if auto-sync is explicitly enabled
@@ -1040,7 +1120,7 @@ class VideoService:
                     t = threading.Thread(target=_sync, daemon=True)
                     t.start()
             except Exception as e:
-                print(f"[VideoService] Error starting metadata sync to HF: {e}")
+                logger.warning(f"[VideoService] Error starting metadata sync to HF: {e}")
         return True
 
     def _get_video_id(self, rel_path: str) -> str:
@@ -1273,7 +1353,7 @@ class VideoService:
         folders.sort(key=lambda x: (x["name"] != "Geral", x["name"]))
         return folders
 
-    def list_all_videos(self) -> List[Dict[str, Any]]:
+    def list_all_videos(self, *, _registration_only: bool = False) -> List[Dict[str, Any]]:
         """Scans all folders for video files and merges with saved metadata."""
         meta = self._load_metadata()
         videos = []
@@ -1310,6 +1390,17 @@ class VideoService:
                     storage_loc = entry_meta.get("storage_location", "local")
                     if storage_loc == "render_local":
                         storage_loc = "local"
+
+                    if _registration_only:
+                        videos.append({
+                            "id": vid_id, "title": clean_title, "filename": f,
+                            "folder": folder_name, "rel_path": rel_path,
+                            "storage_location": storage_loc, "created_at": created_at,
+                            "is_favorite": entry_meta.get("is_favorite", False),
+                            "source_url": entry_meta.get("source_url"),
+                            "source_id": entry_meta.get("source_id"),
+                        })
+                        continue
 
                     w = entry_meta.get("width") or 0
                     h = entry_meta.get("height") or 0
@@ -1359,6 +1450,18 @@ class VideoService:
                     continue
                 storage_loc = entry_meta.get("storage_location", "huggingface")
                 clean_title = entry_meta.get("title") or f"Vídeo Remoto {vid_id[:6]}"
+                if _registration_only:
+                    videos.append({
+                        "id": vid_id, "title": clean_title, "filename": f"{clean_title}.mp4",
+                        "folder": entry_meta.get("folder", "Geral"),
+                        "rel_path": entry_meta.get("rel_path", ""),
+                        "storage_location": storage_loc,
+                        "created_at": entry_meta.get("created_at") or "2026-09-27 12:00:00",
+                        "is_favorite": entry_meta.get("is_favorite", False),
+                        "source_url": entry_meta.get("source_url"),
+                        "source_id": entry_meta.get("source_id"),
+                    })
+                    continue
                 cloud_url = entry_meta.get("cloud_url")
                 custom_stream = entry_meta.get("custom_stream_url")
                 # IMPORTANT: stream_url ALWAYS goes through server proxy (browser has no HF token)

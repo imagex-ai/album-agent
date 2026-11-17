@@ -36,6 +36,7 @@ export const TeachingView: React.FC = () => {
     addAlbum
   } = useAppStore();
   const t = translations[settings.language].teaching;
+  const isEn = settings.language === 'en-US';
   const [teachUrl, setTeachUrl] = useState('');
   const [groundTruthUrl, setGroundTruthUrl] = useState('');
   const [candidatesList, setCandidatesList] = useState<SetOfMarkCandidate[]>([]);
@@ -117,8 +118,8 @@ export const TeachingView: React.FC = () => {
             setIsScanning(false);
             soundEffects.success(settings.soundEnabled);
             addNotification({
-              title: 'Candidatos Mapeados!',
-              message: `${mapped.length} elementos visuais identificados na página real.`,
+              title: isEn ? 'Candidates Mapped!' : 'Candidatos Mapeados!',
+              message: isEn ? `${mapped.length} visual elements identified on live page.` : `${mapped.length} elementos visuais identificados na página real.`,
               type: 'info'
             });
             return;
@@ -131,8 +132,8 @@ export const TeachingView: React.FC = () => {
 
     setIsScanning(false);
     addNotification({
-      title: 'Aviso de Conexão',
-      message: 'Não foi possível escanear candidatos para este link. Verifique a URL informada.',
+      title: isEn ? 'Connection Notice' : 'Aviso de Conexão',
+      message: isEn ? 'Could not scan candidates for this link. Please check the URL provided.' : 'Não foi possível escanear candidatos para este link. Verifique a URL informada.',
       type: 'warning'
     });
   };
@@ -166,7 +167,9 @@ export const TeachingView: React.FC = () => {
     addLog({
       level: 'ai',
       category: 'QWEN_INDUCTION',
-      message: `Induzindo padrão de domínio para ${domain} com ${selectedCards.length} amostras positivas e ground-truth...`
+      message: isEn
+        ? `Inducing domain pattern for ${domain} with ${selectedCards.length} positive samples and ground-truth...`
+        : `Induzindo padrão de domínio para ${domain} com ${selectedCards.length} amostras positivas e ground-truth...`
     });
 
     if (backendOnline && (teachUrl.startsWith('http://') || teachUrl.startsWith('https://')) && !teachUrl.includes('.mock')) {
@@ -236,7 +239,9 @@ export const TeachingView: React.FC = () => {
     addLog({
       level: 'ai',
       category: 'QWEN_INDUCTION',
-      message: `Induzindo regra e iniciando extração autônoma imediata para ${domain}...`
+      message: isEn
+        ? `Inducing rule and starting immediate autonomous extraction for ${domain}...`
+        : `Induzindo regra e iniciando extração autônoma imediata para ${domain}...`
     });
 
     if (backendOnline && (teachUrl.startsWith('http://') || teachUrl.startsWith('https://')) && !teachUrl.includes('.mock')) {
@@ -260,13 +265,15 @@ export const TeachingView: React.FC = () => {
           if (sessionId) {
             const newJob = {
               id: sessionId,
-              title: `Demonstração: ${domain}`,
+              title: `${isEn ? 'Demonstration' : 'Demonstração'}: ${domain}`,
               url: teachUrl,
               status: 'active' as const,
               mode: 'ai_react' as any,
               aiModel: settings.aiModel,
               progressPercent: 10,
-              currentStage: 'Iniciando raciocínio neural e indução de fórmula de resolução original...',
+              currentStage: isEn
+                ? 'Starting neural reasoning and original resolution formula induction...'
+                : 'Iniciando raciocínio neural e indução de fórmula de resolução original...',
               discoveredImagesCount: selectedCards.length,
               resolvedOriginalCount: 0,
               failedCount: 0,
@@ -325,7 +332,9 @@ export const TeachingView: React.FC = () => {
                   if (isPass) {
                     updateJob(sessionId, {
                       resolvedOriginalCount: (useAppStore.getState().activeJob?.resolvedOriginalCount || 0) + 1,
-                      currentStage: `Resolvida foto em resolução original #${pos} (${dims})`
+                      currentStage: isEn
+                        ? `Resolved original resolution photo #${pos} (${dims})`
+                        : `Resolvida foto em resolução original #${pos} (${dims})`
                     });
                   }
                 }
@@ -334,14 +343,18 @@ export const TeachingView: React.FC = () => {
                 updateJob(sessionId, {
                   status: 'completed',
                   progressPercent: 100,
-                  currentStage: 'Extração e aprendizado de regra concluídos!',
+                  currentStage: isEn
+                    ? 'Extraction and rule learning completed!'
+                    : 'Extração e aprendizado de regra concluídos!',
                   resultAlbumId: mappedAlbum.id
                 });
                 addAlbum(mappedAlbum);
                 soundEffects.success(settings.soundEnabled);
                 addNotification({
-                  title: 'Álbum e Regra Salvos!',
-                  message: `O álbum de ${domain} foi extraído e a regra foi salva permanentemente.`,
+                  title: isEn ? 'Album and Rule Saved!' : 'Álbum e Regra Salvos!',
+                  message: isEn
+                    ? `Album for ${domain} was extracted and rule saved permanently.`
+                    : `O álbum de ${domain} foi extraído e a regra foi salva permanentemente.`,
                   type: 'success'
                 });
                 useAppStore.getState().syncBackendData();
@@ -468,10 +481,10 @@ export const TeachingView: React.FC = () => {
             onClick={handleSaveRuleOnly}
             disabled={isSavingRule || isExtracting || selectedCards.length === 0}
             className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl bg-surface-elevated hover:bg-surface-hover border border-accent-purple/40 text-accent-purple hover:text-white text-xs font-bold transition-all flex items-center justify-center gap-2 active:scale-98 shadow-sm disabled:opacity-50"
-            title="Apenas induz a fórmula e salva a regra no Grafo de Conhecimento"
+            title={isEn ? "Only induce the formula and save rule in Knowledge Graph" : "Apenas induz a fórmula e salva a regra no Grafo de Conhecimento"}
           >
             <Save size={14} className={isSavingRule ? 'animate-spin' : ''} />
-            <span>{isSavingRule ? 'Induzindo Regra...' : t.saveRuleBtn}</span>
+            <span>{isSavingRule ? (isEn ? 'Inducing Rule...' : 'Induzindo Regra...') : t.saveRuleBtn}</span>
           </button>
 
           {/* Option B: Save Rule and Immediately Start Extraction */}
@@ -479,10 +492,10 @@ export const TeachingView: React.FC = () => {
             onClick={handleSaveRuleAndExtract}
             disabled={isSavingRule || isExtracting || selectedCards.length === 0}
             className="flex-1 sm:flex-none px-5 py-2.5 rounded-xl bg-gradient-to-r from-brand-600 to-accent-purple hover:from-brand-500 hover:to-accent-purple/90 text-white text-xs font-bold shadow-glow-brand transition-all flex items-center justify-center gap-2 active:scale-98 disabled:opacity-50"
-            title="Salva a regra e inicia a extração autônoma do álbum imediatamente"
+            title={isEn ? "Save rule and immediately start autonomous extraction of album" : "Salva a regra e inicia a extração autônoma do álbum imediatamente"}
           >
             <Zap size={14} className={isExtracting ? 'animate-bounce' : ''} />
-            <span>{isExtracting ? 'Iniciando Extração...' : t.extractBtn}</span>
+            <span>{isExtracting ? (isEn ? 'Starting Extraction...' : 'Iniciando Extração...') : t.extractBtn}</span>
           </button>
         </div>
       </div>
@@ -542,7 +555,9 @@ export const TeachingView: React.FC = () => {
                         isSelected ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'
                       }`}
                     >
-                      {isSelected ? (t.positiveSample || '+ Amostra Positiva') : (t.noiseSample || '- Ruído Rejeitado')}
+                      {isSelected
+                        ? (t.positiveSample || (isEn ? '+ Positive Sample' : '+ Amostra Positiva'))
+                        : (t.noiseSample || (isEn ? '- Rejected Noise' : '- Ruído Rejeitado'))}
                     </span>
                   </div>
 

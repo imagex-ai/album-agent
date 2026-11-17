@@ -1,3 +1,4 @@
+import { normalizePlayerHighlights } from '../video-player/engine/playerHighlights';
 import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
@@ -26,7 +27,10 @@ import { useAppStore } from '../../store/useAppStore';
 import { formatFileSize } from '../../utils/formatters';
 import { translations } from '../../i18n/translations';
 import { extractDominantColors } from '../../services/colorExtractor';
-import { getMediaCategory, getMediaExtension, isVideoMedia } from '../../utils/mediaClassification';
+import { getMediaCategory, getMediaExtension, isVideoMedia, getAnimationVideoUrl } from '../../utils/mediaClassification';
+import { resolvePhotoOriginal } from '../../services/profileHubApi';
+import { backendApi } from '../../services/realApi';
+import { UniversalVideoPlayer } from '../video-player/ui/UniversalVideoPlayer';
 
 export const LightboxModal: React.FC = () => {
   const {
@@ -36,9 +40,20 @@ export const LightboxModal: React.FC = () => {
     openLightbox,
     setSlideshowOpen,
     setAlbumCover,
+    addNotification,
     settings
   } = useAppStore();
   const t = translations[settings.language].lightbox;
+  const isEn = settings?.language === 'en-US';
+
+  const [downloadState, setDownloadState] = useState<'idle' | 'downloading' | 'completed'>('idle');
+  const downloadTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (downloadTimerRef.current) clearTimeout(downloadTimerRef.current);
+    };
+  }, []);
 
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -50,6 +65,10 @@ export const LightboxModal: React.FC = () => {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isCoverUpdating, setIsCoverUpdating] = useState(false);
   const [imagePalette, setImagePalette] = useState<string[]>(lightboxImage?.colorPalette || []);
+  const [brokenImageIds, setBrokenImageIds] = useState<Set<string>>(new Set());
+  const [gifQuality, setGifQuality] = useState<'ultrahq' | 'standard'>('ultrahq');
+  const [animVideoFailed, setAnimVideoFailed] = useState(false);
+  const [forceOriginalGif, setForceOriginalGif] = useState(false);
   const [glacierBg, setGlacierBg] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('imagex_lightbox_glacier');
@@ -64,7 +83,10 @@ export const LightboxModal: React.FC = () => {
     if (lightboxImage.colorPalette && lightboxImage.colorPalette.length > 0) {
       setImagePalette(lightboxImage.colorPalette);
     } else {
-      const url = lightboxImage.previewUrl || lightboxImage.originalUrl || lightboxImage.thumbnailUrl;
+      const isAnim = isVideoMedia(lightboxImage) || getMediaCategory(lightboxImage) === 'gif' || (lightboxImage as any).format === 'gif' || (lightboxImage as any).isAnimated === true;
+      const url = isAnim
+        ? (lightboxImage.thumbnailUrl || lightboxImage.rawThumbnailUrl)
+        : (lightboxImage.previewUrl || lightboxImage.originalUrl || lightboxImage.thumbnailUrl);
       if (url) {
         extractDominantColors(url).then(colors => {
           if (colors && colors.length > 0) {
@@ -74,6 +96,136 @@ export const LightboxModal: React.FC = () => {
       }
     }
   }, [lightboxImage?.id, lightboxImage?.colorPalette]);
+
+  // Dynamic HD Original Image Resolution & Progressive Upgrade
+  const [isResolvingOriginal, setIsResolvingOriginal] = useState(false);
+
+  useEffect(() => {
+    const isAnim = !lightboxImage || isVideoMedia(lightboxImage) || getMediaCategory(lightboxImage) === 'gif' || (lightboxImage as any).format === 'gif' || (lightboxImage as any).isAnimated === true;
+    if (isAnim) {
+      setIsResolvingOriginal(false);
+      return;
+    }
+
+    const isResizedThumb = Boolean(
+      lightboxImage.originalUrl &&
+      (/_\d+x\d+\./i.test(lightboxImage.originalUrl) ||
+       /[-_](?:thumb|small|preview|240|320)\./i.test(lightboxImage.originalUrl) ||
+       lightboxImage.originalUrl.includes('rs:fit:200:250') ||
+       lightboxImage.originalUrl.includes('rs:fit:150:188') ||
+       lightboxImage.originalUrl.includes('rs:fit:1920:1080'))
+    );
+
+    const isAlreadyResolved = Boolean(
+      lightboxImage.isResolvedOriginal ||
+      (!isResizedThumb &&
+       lightboxImage.width &&
+       lightboxImage.height &&
+       lightboxImage.fileSizeBytes &&
+       lightboxImage.originalUrl !== lightboxImage.thumbnailUrl)
+    );
+
+    if (isAlreadyResolved) {
+      setIsResolvingOriginal(false);
+      return;
+    }
+
+    const pageUrl = (lightboxImage as any).pageUrl || '';
+    const sourcePage = (lightboxImage as any).sourcePage || lightboxAlbum?.sourceUrl || '';
+    const thumbUrl = lightboxImage.rawThumbnailUrl || lightboxImage.thumbnailUrl || '';
+
+    if (!pageUrl && !thumbUrl) return;
+
+    setIsResolvingOriginal(true);
+    const controller = new AbortController();
+
+    resolvePhotoOriginal({
+      photoId: lightboxImage.id,
+      pageUrl,
+      thumbnailUrl: thumbUrl,
+      sourcePage,
+    }, controller.signal, 'high')
+      .then(res => {
+        if (controller.signal.aborted) return;
+        setIsResolvingOriginal(false);
+
+        if (res.success && res.is_resolved && res.original_url) {
+          const imgLoader = new Image();
+          imgLoader.onload = () => {
+            if (controller.signal.aborted) return;
+            useAppStore.setState(state => {
+            if (!state.lightboxImage || state.lightboxImage.id !== lightboxImage.id) return state;
+
+            const updatedImg = {
+              ...state.lightboxImage,
+              originalUrl: res.original_url,
+              rawOriginalUrl: res.original_url,
+              width: res.width || state.lightboxImage.width,
+              height: res.height || state.lightboxImage.height,
+              fileSizeBytes: res.file_size || state.lightboxImage.fileSizeBytes,
+              format: (res.format || state.lightboxImage.format) as any,
+              aspectRatio: res.width && res.height ? `${res.width}:${res.height}` : state.lightboxImage.aspectRatio,
+              megapixels: res.width && res.height ? Math.round(((res.width * res.height) / 1000000) * 10) / 10 : state.lightboxImage.megapixels,
+              isResolvedOriginal: true,
+              status: 'resolved' as const,
+            };
+
+            let updatedAlbum = state.lightboxAlbum;
+            if (updatedAlbum && updatedAlbum.images) {
+              updatedAlbum = {
+                ...updatedAlbum,
+                images: updatedAlbum.images.map(img => img.id === lightboxImage.id ? updatedImg : img),
+              };
+            }
+
+            return {
+              ...state,
+              lightboxImage: updatedImg,
+              lightboxAlbum: updatedAlbum,
+            };
+          });
+          };
+
+          imgLoader.onerror = () => {
+            console.warn('[LightboxModal] HD original failed to load in browser, retaining thumbnail');
+          };
+          imgLoader.src = res.original_url;
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setIsResolvingOriginal(false);
+        }
+      });
+
+    // Modern Web Guidance: deprioritize-background-fetches for adjacent photos
+    if (lightboxAlbum?.images && lightboxAlbum.images.length > 1) {
+      const curIdx = lightboxAlbum.images.findIndex(i => i.id === lightboxImage.id);
+      if (curIdx >= 0) {
+        const nextIdx = (curIdx + 1) % lightboxAlbum.images.length;
+        const prevIdx = (curIdx - 1 + lightboxAlbum.images.length) % lightboxAlbum.images.length;
+        for (const idx of [nextIdx, prevIdx]) {
+          const adj = lightboxAlbum.images[idx];
+          if (adj && !adj.isResolvedOriginal) {
+            const adjPage = (adj as any).pageUrl || '';
+            const adjThumb = adj.rawThumbnailUrl || adj.thumbnailUrl;
+            if (adjThumb) {
+              void resolvePhotoOriginal({
+                photoId: adj.id,
+                pageUrl: adjPage,
+                thumbnailUrl: adjThumb,
+                sourcePage: (adj as any).sourcePage || lightboxAlbum.sourceUrl || '',
+              }, undefined, 'low');
+            }
+          }
+        }
+      }
+    }
+
+    return () => {
+      controller.abort();
+    };
+  }, [lightboxImage?.id, lightboxAlbum?.id]);
 
   // Top Toolbar Drag & Wheel Controls
   const topToolbarRef = useRef<HTMLDivElement>(null);
@@ -185,7 +337,9 @@ export const LightboxModal: React.FC = () => {
   useEffect(() => {
     setZoom(1);
     setPan({ x: 0, y: 0 });
-  }, [lightboxImage]);
+    setAnimVideoFailed(false);
+    setForceOriginalGif(false);
+  }, [lightboxImage?.id, gifQuality]);
 
   // Exit native fullscreen on unmount if active
   useEffect(() => {
@@ -251,18 +405,33 @@ export const LightboxModal: React.FC = () => {
 
   if (!lightboxImage || !lightboxAlbum) return null;
 
-  const albumImages = lightboxAlbum.images || [];
+  const albumImages = (lightboxAlbum.images || []).filter(img => !brokenImageIds.has(img.id));
   const currentIndex = albumImages.findIndex(i => i.id === lightboxImage.id);
 
   const isVideoItem = isVideoMedia(lightboxImage);
 
-  const videoSrc = lightboxImage.videoUrl || (lightboxImage as any).videoStreamUrl || lightboxImage.originalUrl;
+  const rawVideoSrc = lightboxImage.videoUrl || (lightboxImage as any).videoStreamUrl || lightboxImage.originalUrl;
+  const isPhVideo = Boolean(rawVideoSrc && (rawVideoSrc.includes('phncdn.com') || lightboxAlbum?.sourceUrl?.includes('pornhub.com')) && !rawVideoSrc.startsWith('/api/'));
+  const videoSrc = isPhVideo
+    ? `/api/proxy-video-stream?url=${encodeURIComponent(rawVideoSrc)}&referer=https://www.pornhub.com/`
+    : rawVideoSrc;
 
-  const isGifItem = getMediaCategory(lightboxImage) === 'gif';
+  const isGifItem = getMediaCategory(lightboxImage) === 'gif' || (lightboxImage as any).format === 'gif' || (lightboxImage as any).isAnimated === true;
+  const animVideoSrc = getAnimationVideoUrl(
+    lightboxImage.originalUrl || lightboxImage.rawOriginalUrl || lightboxImage.thumbnailUrl,
+    gifQuality,
+    lightboxAlbum?.sourceUrl
+  );
 
-  const ambientBgUrl = isVideoItem
+  const rawImgSrc = lightboxImage.originalUrl || lightboxImage.rawOriginalUrl || lightboxImage.previewUrl || lightboxImage.thumbnailUrl;
+  const isPhImg = Boolean(rawImgSrc && (rawImgSrc.includes('phncdn.com') || lightboxAlbum?.sourceUrl?.includes('pornhub.com')) && !rawImgSrc.startsWith('/api/'));
+  const imgSrc = isPhImg
+    ? `/api/proxy-image?url=${encodeURIComponent(rawImgSrc)}&referer=https://www.pornhub.com/`
+    : rawImgSrc;
+
+  const ambientBgUrl = (isVideoItem || isGifItem)
     ? (lightboxImage.thumbnailUrl || lightboxImage.rawThumbnailUrl)
-    : (lightboxImage.previewUrl || lightboxImage.originalUrl || lightboxImage.rawOriginalUrl || lightboxImage.thumbnailUrl);
+    : (lightboxImage.previewUrl || imgSrc || lightboxImage.thumbnailUrl);
 
   const handleNext = () => {
     if (albumImages.length === 0) return;
@@ -363,13 +532,75 @@ export const LightboxModal: React.FC = () => {
     setTimeout(() => setCopiedHex(null), 1500);
   };
 
-  const handleDownload = () => {
-    const link = document.createElement('a');
+  const handleDownload = async () => {
+    if (downloadState === 'downloading') return;
+    if (downloadTimerRef.current) clearTimeout(downloadTimerRef.current);
+    setDownloadState('downloading');
+    let targetSrc = isVideoItem ? videoSrc : imgSrc;
     const fileExt = getMediaExtension(lightboxImage);
-    link.href = isVideoItem ? videoSrc : (lightboxImage.originalUrl || lightboxImage.rawOriginalUrl || lightboxImage.thumbnailUrl);
-    link.download = `${lightboxImage.title || (isVideoItem ? 'video' : isGifItem ? 'animacao' : 'original-image')}.${fileExt}`;
-    link.target = '_blank';
-    link.click();
+    const fname = `${lightboxImage.title || (isVideoItem ? 'video' : isGifItem ? 'animacao' : 'original-image')}.${fileExt}`;
+
+    addNotification({
+      type: 'info',
+      title: isEn ? 'Starting Download' : 'Iniciando Download',
+      message: isEn ? `Saving "${fname}" directly to Downloads folder...` : `Salvando "${fname}" diretamente na pasta Downloads...`
+    });
+
+    try {
+      if (!isVideoItem && !lightboxImage.isResolvedOriginal && (lightboxImage as any).pageUrl) {
+        try {
+          const res = await resolvePhotoOriginal({
+            photoId: lightboxImage.id,
+            pageUrl: (lightboxImage as any).pageUrl,
+            thumbnailUrl: lightboxImage.rawThumbnailUrl || lightboxImage.thumbnailUrl,
+            sourcePage: (lightboxImage as any).sourcePage || lightboxAlbum?.sourceUrl,
+          });
+          if (res.success && res.is_resolved && res.original_url) {
+            const resUrl = res.original_url;
+            targetSrc = (resUrl && (resUrl.includes('phncdn.com') || lightboxAlbum?.sourceUrl?.includes('pornhub.com')) && !resUrl.startsWith('/api/'))
+              ? `/api/proxy-image?url=${encodeURIComponent(resUrl)}&referer=https://www.pornhub.com/`
+              : resUrl;
+          }
+        } catch (_) {}
+      }
+
+      // 1. Host direct save to Downloads folder via local backend (guaranteed for WebView2 / .exe)
+      const res = await backendApi.downloadToDisk(targetSrc, fname, true);
+      if (res && res.success) {
+        setDownloadState('completed');
+        addNotification({
+          type: 'success',
+          title: isEn ? 'Download Finished' : 'Download Concluído',
+          message: isEn ? `File saved to Downloads: "${res.filename || fname}".` : `Arquivo salvo em Downloads: "${res.filename || fname}".`
+        });
+        downloadTimerRef.current = setTimeout(() => {
+          setDownloadState('idle');
+        }, 2500);
+      } else {
+        // Fallback to browser link trigger if backend returned failure
+        const link = document.createElement('a');
+        link.href = targetSrc;
+        link.download = fname;
+        link.target = '_blank';
+        link.click();
+        setDownloadState('completed');
+        addNotification({
+          type: 'info',
+          title: isEn ? 'Download Dispatched' : 'Download Disparado',
+          message: isEn ? `Dispatched "${fname}" to browser download manager.` : `Disparado "${fname}" no gerenciador de downloads.`
+        });
+        downloadTimerRef.current = setTimeout(() => {
+          setDownloadState('idle');
+        }, 2500);
+      }
+    } catch (err: any) {
+      setDownloadState('idle');
+      addNotification({
+        type: 'error',
+        title: isEn ? 'Download Failed' : 'Falha no Download',
+        message: err?.message || (isEn ? 'Failed to download file.' : 'Falha ao baixar arquivo.')
+      });
+    }
   };
 
   return (
@@ -403,6 +634,59 @@ export const LightboxModal: React.FC = () => {
         </button>
       )}
 
+      {/* Floating GIF Quality Selector in Fullscreen Mode */}
+      {isFullscreen && isGifItem && (
+        <div className="fixed top-4 left-4 z-[1000] flex items-center gap-1.5 bg-black/80 backdrop-blur-md border border-white/20 p-1 rounded-2xl shadow-2xl">
+          <div className="px-2.5 py-1 text-[11px] font-mono font-bold text-amber-400 flex items-center gap-1.5 border-r border-white/15 pr-3">
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+            <span>GIF</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setForceOriginalGif(false);
+              setGifQuality('ultrahq');
+              setAnimVideoFailed(false);
+            }}
+            className={`px-3 py-1 rounded-xl text-xs font-bold transition-all ${
+              !forceOriginalGif && gifQuality === 'ultrahq'
+                ? 'bg-amber-500 text-black shadow-sm'
+                : 'text-slate-300 hover:text-white'
+            }`}
+          >
+            Ultra HQ
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setForceOriginalGif(false);
+              setGifQuality('standard');
+              setAnimVideoFailed(false);
+            }}
+            className={`px-3 py-1 rounded-xl text-xs font-bold transition-all ${
+              !forceOriginalGif && gifQuality === 'standard'
+                ? 'bg-emerald-600 text-white shadow-sm'
+                : 'text-slate-300 hover:text-white'
+            }`}
+          >
+            {isEn ? 'Standard' : 'Padrão'}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setForceOriginalGif(true);
+            }}
+            className={`px-3 py-1 rounded-xl text-xs font-bold transition-all ${
+              forceOriginalGif
+                ? 'bg-violet-600 text-white shadow-sm'
+                : 'text-slate-300 hover:text-white'
+            }`}
+          >
+            Original
+          </button>
+        </div>
+      )}
+
 
       {/* Top Floating Toolbar with iOS Safe Area */}
       {!isFullscreen && (
@@ -422,7 +706,20 @@ export const LightboxModal: React.FC = () => {
                   {lightboxImage.title}
                 </h3>
                 <p className="text-[10px] sm:text-[11px] text-slate-400 font-mono truncate">
-                  {currentIndex + 1} de {(lightboxAlbum.images || []).length} • {lightboxImage.width && lightboxImage.height ? `${lightboxImage.width}×${lightboxImage.height}` : 'Dim. N/D'} ({lightboxImage.aspectRatio || 'auto'}) • {formatFileSize(lightboxImage.fileSizeBytes)} • <span className={isGifItem ? "text-amber-400 font-bold" : isVideoItem ? "text-violet-400 font-bold" : "text-emerald-400 font-bold"}>{isGifItem ? t.badgeGif : isVideoItem ? t.badgeVideo : t.badgeOriginal}</span>
+                  <span>{currentIndex + 1} de {(lightboxAlbum.images || []).length} • </span>
+                  {isResolvingOriginal ? (
+                    <span className="inline-flex items-center gap-1 text-cyan-400 font-semibold">
+                      <Loader2 size={11} className="animate-spin text-cyan-400 shrink-0" />
+                      Resolvendo HD...
+                    </span>
+                  ) : (
+                    <span>
+                      {lightboxImage.width && lightboxImage.height ? `${lightboxImage.width}×${lightboxImage.height}` : 'Dim. N/D'} ({lightboxImage.aspectRatio || 'auto'}) • {lightboxImage.fileSizeBytes ? formatFileSize(lightboxImage.fileSizeBytes) : 'Tam. N/D'} •{' '}
+                      <span className={isGifItem ? "text-amber-400 font-bold" : isVideoItem ? "text-violet-400 font-bold" : lightboxImage.isResolvedOriginal ? "text-cyan-400 font-bold" : "text-emerald-400 font-bold"}>
+                        {isGifItem ? t.badgeGif : isVideoItem ? t.badgeVideo : lightboxImage.isResolvedOriginal ? 'HD ORIGINAL' : t.badgeOriginal}
+                      </span>
+                    </span>
+                  )}
                 </p>
               </div>
             </div>
@@ -469,6 +766,58 @@ export const LightboxModal: React.FC = () => {
                 <ZoomIn size={14} />
               </button>
             </div>
+
+            {/* Quality Selector for Animated GIFs / WebP */}
+            {isGifItem && (
+              <div className="flex items-center bg-white/10 border border-white/15 p-0.5 rounded-xl shrink-0 shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setForceOriginalGif(false);
+                    setGifQuality('ultrahq');
+                    setAnimVideoFailed(false);
+                  }}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                    !forceOriginalGif && gifQuality === 'ultrahq'
+                      ? 'bg-amber-500 text-black shadow-sm'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                  title={isEn ? "Ultra HQ Quality (1080p Master)" : "Qualidade Ultra HQ (Master 1080p)"}
+                >
+                  Ultra HQ
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setForceOriginalGif(false);
+                    setGifQuality('standard');
+                    setAnimVideoFailed(false);
+                  }}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                    !forceOriginalGif && gifQuality === 'standard'
+                      ? 'bg-emerald-600 text-white shadow-sm'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                  title={isEn ? "Standard MP4 (Optimized Loop)" : "MP4 Padrão (Loop Otimizado)"}
+                >
+                  {isEn ? 'Standard' : 'Padrão'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setForceOriginalGif(true);
+                  }}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                    forceOriginalGif
+                      ? 'bg-violet-600 text-white shadow-sm'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                  title={isEn ? "Original Uncompressed GIF/WebP" : "GIF/WebP Original Sem Compressão"}
+                >
+                  {isEn ? 'Original' : 'Original'}
+                </button>
+              </div>
+            )}
 
             {/* Slideshow Mode Button */}
             <button
@@ -553,11 +902,37 @@ export const LightboxModal: React.FC = () => {
             {/* Download Original Button */}
             <button
               onClick={handleDownload}
-              className="px-3.5 py-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-glow-brand whitespace-nowrap shrink-0"
-              title={t.downloadOriginal}
+              disabled={downloadState === 'downloading'}
+              className={`px-3.5 py-1.5 rounded-xl text-white text-xs font-bold flex items-center gap-1.5 transition-all duration-300 ease-out whitespace-nowrap shrink-0 active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/80 cursor-pointer ${
+                downloadState === 'downloading'
+                  ? 'bg-brand-600/70 ring-2 ring-brand-400/50 shadow-glow-brand animate-pulse cursor-wait'
+                  : downloadState === 'completed'
+                  ? 'bg-emerald-600 hover:bg-emerald-500 ring-2 ring-emerald-400/50 shadow-lg shadow-emerald-500/30 scale-[1.02]'
+                  : 'bg-brand-600 hover:bg-brand-500 shadow-glow-brand hover:scale-[1.02]'
+              }`}
+              title={
+                downloadState === 'downloading'
+                  ? (isEn ? 'Downloading...' : 'Baixando...')
+                  : downloadState === 'completed'
+                  ? (isEn ? 'Saved to Downloads!' : 'Salvo em Downloads!')
+                  : t.downloadOriginal
+              }
+              aria-busy={downloadState === 'downloading'}
             >
-              <Download size={14} className="shrink-0" />
-              <span>{t.downloadOriginal}</span>
+              {downloadState === 'downloading' ? (
+                <Loader2 size={14} className="shrink-0 animate-spin motion-reduce:animate-none text-brand-200" />
+              ) : downloadState === 'completed' ? (
+                <Check size={14} className="shrink-0 text-emerald-200 animate-bounce motion-reduce:animate-none" />
+              ) : (
+                <Download size={14} className="shrink-0" />
+              )}
+              <span>
+                {downloadState === 'downloading'
+                  ? (isEn ? 'Downloading...' : 'Baixando...')
+                  : downloadState === 'completed'
+                  ? (isEn ? 'Saved!' : 'Salvo!')
+                  : t.downloadOriginal}
+              </span>
             </button>
 
             {/* Desktop Info Toggle */}
@@ -596,57 +971,124 @@ export const LightboxModal: React.FC = () => {
               } w-full h-full min-h-0 min-w-0 flex flex-col items-center justify-center relative overflow-hidden bg-black shadow-2xl`}
               onClick={(e) => e.stopPropagation()}
             >
-              <video
+              <UniversalVideoPlayer
                 key={lightboxImage.id || videoSrc}
-                src={videoSrc}
-                controls
-                autoPlay
-                playsInline
-                preload="auto"
+                density="compact"
+                aspectRatio="auto"
+                autoPlayOnActive
+                posterUrl={lightboxImage.thumbnailUrl || lightboxImage.rawThumbnailUrl}
+                source={{
+                  id: lightboxImage.id || videoSrc,
+                  highlights: normalizePlayerHighlights(lightboxImage),
+                  title: lightboxImage.title,
+                  streamUrl: videoSrc,
+                  posterUrl: lightboxImage.thumbnailUrl || lightboxImage.rawThumbnailUrl,
+                }}
+                onErrorFallback={() => {
+                  setBrokenImageIds((prev) => new Set(prev).add(lightboxImage.id));
+                }}
                 className={`${
                   isFullscreen
                     ? 'max-h-screen max-w-screen w-screen h-screen rounded-none'
-                    : 'max-h-full max-w-full w-auto h-auto rounded-2xl'
-                } object-contain`}
-              >
-                Seu navegador não suporta reprodução deste vídeo.
-              </video>
-              <div className={`absolute top-3 left-3 px-2.5 py-1 rounded-xl bg-black/80 backdrop-blur-md text-[10px] font-mono font-bold border shadow-lg pointer-events-none flex items-center gap-1.5 z-20 ${isGifItem ? 'text-amber-300 border-amber-500/40' : 'text-violet-300 border-violet-500/40'}`}>
-                <Play size={12} className={isGifItem ? 'fill-amber-400 text-amber-400' : 'fill-violet-400'} />
-                <span>{isGifItem ? t.badgeGif : t.badgeVideo} ({lightboxImage.width && lightboxImage.height ? `${lightboxImage.width}×${lightboxImage.height}` : 'HD'})</span>
+                    : 'max-h-full max-w-full w-full h-full rounded-2xl'
+                } object-contain border-0`}
+              />
+              <div className="absolute top-3 left-3 px-2.5 py-1 rounded-xl bg-black/80 backdrop-blur-md text-[10px] font-mono font-bold border shadow-lg pointer-events-none flex items-center gap-1.5 z-20 text-violet-300 border-violet-500/40">
+                <Play size={12} className="fill-violet-400" />
+                <span>{t.badgeVideo} ({lightboxImage.width && lightboxImage.height ? `${lightboxImage.width}×${lightboxImage.height}` : 'HD'})</span>
               </div>
             </div>
           ) : (
+            /* Visual Canvas: Fullscreen, Zoomable, Pannable for Images & Hardware-Accelerated High-Fidelity GIFs */
             <div
               className="relative w-full h-full min-h-0 min-w-0 flex items-center justify-center transition-transform duration-75"
               style={{
                 transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
               }}
             >
-              <img
-                src={lightboxImage.originalUrl || lightboxImage.rawOriginalUrl || lightboxImage.thumbnailUrl}
-                alt={lightboxImage.title}
-                className={`${
-                  isFullscreen
-                    ? 'max-h-screen max-w-screen w-screen h-screen rounded-none'
-                    : 'max-h-full max-w-full w-auto h-auto rounded-xl sm:rounded-2xl'
-                } object-contain shadow-2xl pointer-events-none select-none`}
-              />
-              {isGifItem && (
-                <div className="absolute top-3 left-3 px-3 py-1.5 rounded-xl bg-black/85 backdrop-blur-md text-[11px] font-mono text-amber-300 font-bold border border-amber-500/40 shadow-lg pointer-events-none flex items-center gap-2 z-20">
-                  <Play size={12} className="fill-amber-400 text-amber-400" />
-                  <span>GIF ANIMADO ({lightboxImage.width && lightboxImage.height ? `${lightboxImage.width}×${lightboxImage.height}` : 'HD'} • {formatFileSize(lightboxImage.fileSizeBytes)})</span>
-                </div>
+              {isGifItem ? (
+                forceOriginalGif ? (
+                  <img
+                    src={imgSrc}
+                    alt={lightboxImage.title}
+                    className={`${
+                      isFullscreen
+                        ? 'max-h-screen max-w-screen w-screen h-screen rounded-none'
+                        : 'max-h-full max-w-full w-full h-full rounded-xl sm:rounded-2xl'
+                    } object-contain shadow-2xl pointer-events-none select-none`}
+                  />
+                ) : !animVideoFailed ? (
+                  <video
+                    key={`gif-${lightboxImage.id}-${gifQuality}`}
+                    src={animVideoSrc}
+                    poster={lightboxImage.thumbnailUrl || lightboxImage.rawThumbnailUrl}
+                    autoPlay
+                    loop
+                    muted
+                    playsInline
+                    preload="auto"
+                    style={{ imageRendering: 'auto' }}
+                    onError={() => {
+                      setAnimVideoFailed(true);
+                    }}
+                    className={`${
+                      isFullscreen
+                        ? 'max-h-screen max-w-screen w-screen h-screen rounded-none'
+                        : 'max-h-full max-w-full w-full h-full rounded-xl sm:rounded-2xl'
+                    } object-contain shadow-2xl select-none`}
+                  />
+                ) : (
+                  <div className="relative w-full h-full min-h-0 min-w-0 flex items-center justify-center">
+                    <img
+                      src={imgSrc}
+                      alt={lightboxImage.title}
+                      className={`${
+                        isFullscreen
+                          ? 'max-h-screen max-w-screen w-screen h-screen rounded-none'
+                          : 'max-h-full max-w-full w-full h-full rounded-xl sm:rounded-2xl'
+                      } object-contain shadow-2xl select-none`}
+                    />
+                    <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 bg-black/80 backdrop-blur-md border border-white/10 px-3 py-1.5 rounded-2xl shadow-xl pointer-events-auto">
+                      <span className="text-[11px] font-medium text-slate-300">
+                        {isEn ? "Viewing original GIF" : "Exibindo GIF original"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setAnimVideoFailed(false)}
+                        className="px-2.5 py-1 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-semibold transition-all active:scale-95"
+                      >
+                        {isEn ? "Enable 60 FPS" : "Ativar 60 FPS"}
+                      </button>
+                    </div>
+                  </div>
+                )
+              ) : (
+                <img
+                  src={imgSrc}
+                  alt={lightboxImage.title}
+                  fetchPriority="high"
+                  decoding="async"
+                  onError={(e) => {
+                    const fallback = lightboxImage.thumbnailUrl || lightboxImage.rawThumbnailUrl;
+                    if (fallback && e.currentTarget.src !== fallback) {
+                      e.currentTarget.src = fallback;
+                    }
+                  }}
+                  className={`${
+                    isFullscreen
+                      ? 'max-h-screen max-w-screen w-screen h-screen rounded-none'
+                      : 'max-h-full max-w-full w-full h-full rounded-xl sm:rounded-2xl'
+                  } object-contain shadow-2xl pointer-events-none select-none`}
+                />
               )}
             </div>
-
           )}
 
           {/* Navigation Arrows */}
           <button
             onClick={handlePrev}
             className="absolute left-3 sm:left-4 p-2.5 sm:p-3 rounded-full bg-black/60 hover:bg-black/80 text-white border border-white/10 transition-all hover:scale-110 active:scale-95 shadow-xl"
-            title="Anterior (Seta Esquerda)"
+            title={isEn ? "Previous (Left Arrow)" : "Anterior (Seta Esquerda)"}
           >
             <ChevronLeft size={22} />
           </button>
@@ -654,7 +1096,7 @@ export const LightboxModal: React.FC = () => {
           <button
             onClick={handleNext}
             className="absolute right-3 sm:right-4 p-2.5 sm:p-3 rounded-full bg-black/60 hover:bg-black/80 text-white border border-white/10 transition-all hover:scale-110 active:scale-95 shadow-xl"
-            title="Próxima (Seta Direita)"
+            title={isEn ? "Next (Right Arrow)" : "Próxima (Seta Direita)"}
           >
             <ChevronRight size={22} />
           </button>
@@ -681,14 +1123,14 @@ export const LightboxModal: React.FC = () => {
               <div>
                 <h4 className="text-xs font-bold text-white uppercase tracking-wider mb-2 flex items-center gap-1.5">
                   <ExternalLink size={14} className="text-brand-400" />
-                  {t.albumSource || 'Origem do Álbum'}
+                  {t.albumSource || (isEn ? 'Album Source' : 'Origem do Álbum')}
                 </h4>
                 <a
                   href={lightboxAlbum.sourceUrl}
                   target="_blank"
                   rel="noreferrer"
                   className="flex items-center justify-between p-3 rounded-2xl bg-brand-600/10 border border-brand-500/30 hover:bg-brand-600/20 text-brand-300 hover:text-brand-200 transition-all group shadow-sm"
-                  title={t.openSourceWeb || 'Abrir página web de origem em nova aba'}
+                  title={t.openSourceWeb || (isEn ? 'Open original source webpage in new tab' : 'Abrir página web de origem em nova aba')}
                 >
                   <div className="min-w-0 pr-2">
                     <span className="font-bold text-xs block truncate text-slate-100 group-hover:text-brand-300">
@@ -707,35 +1149,59 @@ export const LightboxModal: React.FC = () => {
             <div className="grid grid-cols-2 gap-2 bg-surface/60 p-3 rounded-2xl border border-white/5 font-mono text-[11px]">
               <div>
                 <span className="text-slate-500 block">{t.resolution}</span>
-                <span className="text-emerald-400 font-bold">{lightboxImage.width} × {lightboxImage.height}</span>
+                <span className="text-emerald-400 font-bold">
+                  {lightboxImage.width && lightboxImage.height ? `${lightboxImage.width} × ${lightboxImage.height}` : isResolvingOriginal ? (isEn ? 'Seeking...' : 'Buscando...') : (isEn ? 'N/A' : 'N/D')}
+                </span>
               </div>
               <div>
                 <span className="text-slate-500 block">Megapixels</span>
-                <span className="text-slate-200 font-bold">{lightboxImage.megapixels} MP</span>
+                <span className="text-slate-200 font-bold">
+                  {lightboxImage.megapixels ? `${lightboxImage.megapixels} MP` : isResolvingOriginal ? '...' : (isEn ? 'N/A' : 'N/D')}
+                </span>
               </div>
               <div>
-                <span className="text-slate-500 block">Proporção</span>
-                <span className="text-slate-200">{lightboxImage.aspectRatio}</span>
+                <span className="text-slate-500 block">{isEn ? 'Aspect Ratio' : 'Proporção'}</span>
+                <span className="text-slate-200">{lightboxImage.aspectRatio || 'auto'}</span>
               </div>
               <div>
                 <span className="text-slate-500 block">{t.filesize}</span>
-                <span className="text-slate-200 font-mono">{formatFileSize(lightboxImage.fileSizeBytes, 'Não informado')}</span>
+                <span className="text-slate-200 font-mono">
+                  {lightboxImage.fileSizeBytes ? formatFileSize(lightboxImage.fileSizeBytes) : isResolvingOriginal ? (isEn ? 'Calculating...' : 'Calculando...') : (isEn ? 'Not specified' : 'Não informado')}
+                </span>
               </div>
+            </div>
+
+            {/* HD Resolution Status */}
+            <div className="p-2.5 rounded-xl bg-surface/40 border border-white/5 text-[11px] flex items-center justify-between">
+              <span className="text-slate-400">{isEn ? 'HD Source:' : 'Origem HD:'}</span>
+              {lightboxImage.isResolvedOriginal ? (
+                <span className="text-cyan-300 font-bold flex items-center gap-1 font-mono text-[10px] bg-cyan-950/60 border border-cyan-700/50 px-2 py-0.5 rounded-lg">
+                  <Check size={11} className="text-cyan-400" /> {isEn ? 'Original HD Resolved' : 'Original HD Resolvido'}
+                </span>
+              ) : isResolvingOriginal ? (
+                <span className="text-amber-300 font-medium flex items-center gap-1 font-mono text-[10px] bg-amber-950/60 border border-amber-700/50 px-2 py-0.5 rounded-lg animate-pulse">
+                  <Loader2 size={11} className="animate-spin text-amber-400" /> {isEn ? 'Resolving Dynamic HD...' : 'Resolvendo HD Dinâmico...'}
+                </span>
+              ) : (
+                <span className="text-slate-400 font-mono text-[10px] bg-white/5 px-2 py-0.5 rounded-lg">
+                  {isEn ? 'Direct CDN' : 'CDN Direto'}
+                </span>
+              )}
             </div>
 
             {/* Quality & Aesthetic Scores */}
             <div>
               <h4 className="text-xs font-bold text-white uppercase tracking-wider mb-2 flex items-center gap-1.5">
                 <Star size={14} className="text-amber-400" />
-                {t.aiQualityScore || 'Avaliação de Qualidade IA'}
+                {t.aiQualityScore || (isEn ? 'AI Quality Assessment' : 'Avaliação de Qualidade IA')}
               </h4>
               <div className="space-y-2 bg-surface/60 p-3 rounded-2xl border border-white/5">
                 <div className="flex justify-between items-center text-[11px]">
-                  <span className="text-slate-400">{t.aestheticScore || 'Score Estético:'}</span>
+                  <span className="text-slate-400">{t.aestheticScore || (isEn ? 'Aesthetic Score:' : 'Score Estético:')}</span>
                   <span className="font-bold text-amber-400 font-mono">{lightboxImage.aestheticScore} / 10</span>
                 </div>
                 <div className="flex justify-between items-center text-[11px]">
-                  <span className="text-slate-400">{t.sharpness || 'Nitidez / Sharpness:'}</span>
+                  <span className="text-slate-400">{t.sharpness || (isEn ? 'Sharpness:' : 'Nitidez / Sharpness:')}</span>
                   <span className="font-bold text-emerald-400 font-mono">{lightboxImage.sharpnessScore}%</span>
                 </div>
               </div>
@@ -753,7 +1219,7 @@ export const LightboxModal: React.FC = () => {
                 </h4>
                 {copiedHex && (
                   <span className="text-[10px] text-emerald-400 font-medium animate-fade-in flex items-center gap-1">
-                    <Check size={11} /> {t.copied || 'Copiado'}: {copiedHex}
+                    <Check size={11} /> {t.copied || (isEn ? 'Copied' : 'Copiado')}: {copiedHex}
                   </span>
                 )}
               </div>
@@ -761,12 +1227,12 @@ export const LightboxModal: React.FC = () => {
               {/* Sub-group 1: Internas / Centro (1 a 4) */}
               <div className="mb-2.5">
                 <div className="text-[10px] font-semibold text-slate-300 mb-1 flex items-center justify-between">
-                  <span>{t.samplingInnerTitle || 'Centro / Internas (1 a 4)'}</span>
+                  <span>{t.samplingInnerTitle || (isEn ? 'Center / Inner (1 to 4)' : 'Centro / Internas (1 a 4)')}</span>
                 </div>
                 <div className="grid grid-cols-4 gap-1.5">
                   {imagePalette.slice(0, 4).map((hex, idx) => {
                     const regionKey = `region${idx + 1}` as keyof typeof t;
-                    const regionLabel = (t as any)[regionKey] || `${idx + 1}. Região`;
+                    const regionLabel = (t as any)[regionKey] || `${idx + 1}. ${isEn ? 'Region' : 'Região'}`;
                     return (
                       <button
                         key={`${hex}-${idx}`}
@@ -774,7 +1240,7 @@ export const LightboxModal: React.FC = () => {
                         onClick={() => handleCopyHex(hex)}
                         className="h-9 rounded-xl border border-white/10 relative group transition-transform hover:scale-105 active:scale-95 shadow-sm overflow-hidden cursor-pointer"
                         style={{ backgroundColor: hex }}
-                        title={`${regionLabel}: ${hex} (${t.copyHex || 'Copiar Hex'})`}
+                        title={`${regionLabel}: ${hex} (${t.copyHex || (isEn ? 'Copy Hex' : 'Copiar Hex')})`}
                       >
                         <span className="absolute top-1 left-1.5 text-[9px] font-bold font-mono px-1 py-0.2 rounded bg-black/60 text-white/90">
                           {idx + 1}
@@ -791,13 +1257,13 @@ export const LightboxModal: React.FC = () => {
               {/* Sub-group 2: Externas / Periferia (5 a 8) */}
               <div>
                 <div className="text-[10px] font-semibold text-slate-300 mb-1 flex items-center justify-between">
-                  <span>{t.samplingOuterTitle || 'Periferia / Externas (5 a 8)'}</span>
+                  <span>{t.samplingOuterTitle || (isEn ? 'Periphery / Outer (5 to 8)' : 'Periferia / Externas (5 a 8)')}</span>
                 </div>
                 <div className="grid grid-cols-4 gap-1.5">
                   {imagePalette.slice(4, 8).map((hex, idx) => {
                     const actualIdx = idx + 4;
                     const regionKey = `region${actualIdx + 1}` as keyof typeof t;
-                    const regionLabel = (t as any)[regionKey] || `${actualIdx + 1}. Região`;
+                    const regionLabel = (t as any)[regionKey] || `${actualIdx + 1}. ${isEn ? 'Region' : 'Região'}`;
                     return (
                       <button
                         key={`${hex}-${actualIdx}`}
@@ -805,7 +1271,7 @@ export const LightboxModal: React.FC = () => {
                         onClick={() => handleCopyHex(hex)}
                         className="h-9 rounded-xl border border-white/10 relative group transition-transform hover:scale-105 active:scale-95 shadow-sm overflow-hidden cursor-pointer"
                         style={{ backgroundColor: hex }}
-                        title={`${regionLabel}: ${hex} (${t.copyHex || 'Copiar Hex'})`}
+                        title={`${regionLabel}: ${hex} (${t.copyHex || (isEn ? 'Copy Hex' : 'Copiar Hex')})`}
                       >
                         <span className="absolute top-1 left-1.5 text-[9px] font-bold font-mono px-1 py-0.2 rounded bg-black/60 text-white/90">
                           {actualIdx + 1}
@@ -825,7 +1291,7 @@ export const LightboxModal: React.FC = () => {
               <div>
                 <h4 className="text-xs font-bold text-white uppercase tracking-wider mb-2 flex items-center gap-1.5">
                   <MapPin size={14} className="text-rose-400" />
-                  Localização GPS
+                  {isEn ? 'GPS Location' : 'Localização GPS'}
                 </h4>
                 <div className="bg-surface/60 p-3 rounded-2xl border border-white/5 text-[11px]">
                   <div className="font-semibold text-slate-100">{lightboxImage.gps.locationName}</div>
@@ -841,7 +1307,7 @@ export const LightboxModal: React.FC = () => {
               <div>
                 <h4 className="text-xs font-bold text-white uppercase tracking-wider mb-2 flex items-center gap-1.5">
                   <FileText size={14} className="text-brand-400" />
-                  Texto Detectado (OCR)
+                  {isEn ? 'Detected Text (OCR)' : 'Texto Detectado (OCR)'}
                 </h4>
                 <div className="bg-surface/60 p-3 rounded-2xl border border-white/5 text-[11px] font-mono text-slate-300">
                   "{lightboxImage.inImageText}"
@@ -861,7 +1327,7 @@ export const LightboxModal: React.FC = () => {
           <button
             onClick={() => scrollFilmstrip('left')}
             className="h-10 w-7 sm:w-8 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-all shrink-0 active:scale-95 z-10"
-            title="Rolar miniaturas para esquerda"
+            title={isEn ? "Scroll thumbnails left" : "Rolar miniaturas para esquerda"}
           >
             <ChevronLeft size={18} />
           </button>
@@ -890,7 +1356,7 @@ export const LightboxModal: React.FC = () => {
                       ? 'border-brand-400 scale-105 shadow-glow-brand ring-2 ring-brand-500/50 opacity-100 z-10'
                       : 'border-white/10 opacity-50 hover:opacity-90 hover:border-white/30'
                   }`}
-                  title={`Foto #${idx + 1} - ${img.title || 'Sem título'}`}
+                  title={`${isEn ? 'Photo' : 'Foto'} #${idx + 1} - ${img.title || (isEn ? 'Untitled' : 'Sem título')}`}
                 >
                   <img
                     src={img.thumbnailUrl}
@@ -899,6 +1365,9 @@ export const LightboxModal: React.FC = () => {
                     onError={(e) => {
                       if (img.rawThumbnailUrl && e.currentTarget.src !== img.rawThumbnailUrl) {
                         e.currentTarget.src = img.rawThumbnailUrl;
+                      } else {
+                        setBrokenImageIds(prev => new Set(prev).add(img.id));
+                        (e.currentTarget.parentElement as HTMLElement)?.style.setProperty('display', 'none');
                       }
                     }}
                   />

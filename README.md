@@ -1,4 +1,4 @@
-# ⚡ IMAGEX.AI v5.6.1
+# ⚡ IMAGEX v5.6.1
 
 Autonomous platform for intelligent extraction, organization, and inspection of web albums and videos in their original maximum resolution. 🚀🔍
 
@@ -124,9 +124,9 @@ python -m src.main "https://example.com/gallery" --headed
 ---
 
 #### 4. Portable Executable (No Python Required) 📦
-1. Download `IMAGEX.AI-v5.2-Windows.zip` from the GitHub **Releases** tab.
+1. Download `IMAGEX-Windows.zip` from the GitHub **Releases** tab.
 2. Extract the archive anywhere on Windows.
-3. Double-click `main.exe` to run.
+3. Double-click `IMAGEX.exe` to run.
 
 ---
 
@@ -224,9 +224,9 @@ python -m src.main "https://exemplo.com/galeria" --headed
 ---
 
 #### 4. Executável Portátil (Sem precisar de Python) 📦
-1. Baixe o arquivo `IMAGEX.AI-v5.2-Windows.zip` na aba de **Releases** do GitHub.
+1. Baixe o arquivo `IMAGEX-Windows.zip` na aba de **Releases** do GitHub.
 2. Extraia a pasta em qualquer lugar do Windows.
-3. Dê dois cliques em `main.exe` para rodar.
+3. Dê dois cliques em `IMAGEX.exe` para rodar.
 
 ---
 
@@ -274,3 +274,16 @@ Todas as mídias e dados baixados são persistidos dinamicamente na raiz:
 * 📁 `data/albums/` — Galerias e imagens baixadas em alta resolução.
 * 📁 `data/videos/` — Vídeos capturados pelo extrator.
 * 📁 `data/trash/` — Lixeira e mídias descartadas.
+
+---
+
+### ⚖️ Licença e Direitos Autorais / License
+
+**Copyright © 2026 IMAGEX. Todos os direitos reservados. / All rights reserved.**
+
+**[PT-BR]** Este software é proprietário (*Source-Available*). O código-fonte presente neste repositório é disponibilizado publicamente para fins de auditoria, transparência e estudo pessoal. É estritamente proibida qualquer reprodução, cópia, distribuição, comercialização ou criação de obras derivadas sem autorização prévia expressa por escrito de **IMAGEX**.
+
+**[EN]** This software is proprietary (*Source-Available*). The source code in this repository is made publicly available strictly for inspection, audit, transparency, and personal study purposes. Any unauthorized reproduction, copying, distribution, commercial exploitation, or creation of derivative works without prior express written permission from **IMAGEX** is strictly prohibited.
+
+Para mais detalhes / For full terms, see [LICENSE](LICENSE).
+

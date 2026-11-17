@@ -144,7 +144,7 @@ class DuplicateVideoScanner:
         eligible = set()
         for index, (duration, video_id, _, _) in enumerate(durations):
             for other_duration, other_id, _, _ in durations[index + 1:]:
-                if other_duration - duration > max(2.0, other_duration * .025):
+                if other_duration - duration > max(2.0, other_duration * .25):
                     break
                 eligible.update((video_id, other_id))
         fingerprints = []
@@ -153,12 +153,12 @@ class DuplicateVideoScanner:
                 job['status'] = 'cancelled'
                 return
             if video_id in eligible:
-                frames = [frame_hash(exe, path, duration * fraction, job['cancel']) for fraction in (.2, .5, .8)]
+                frames = [frame_hash(exe, path, duration * fraction, job['cancel']) for fraction in (.08, .2, .32, .44, .56, .68, .8)]
                 try:
                     unchanged = self._signature(path) == signature
                 except OSError:
                     unchanged = False
-                if all(frame is not None for frame in frames) and unchanged:
+                if sum(frame is not None for frame in frames) >= 4 and unchanged:
                     fingerprints.append((duration, video_id, frames))
                     job['files'][video_id] = (path, signature)
                 else:
@@ -172,7 +172,7 @@ class DuplicateVideoScanner:
                 job['status'] = 'cancelled'
                 return
             for other_duration, other_id, other_frames in fingerprints[index + 1:]:
-                if other_duration - duration > max(2.0, other_duration * .025):
+                if other_duration - duration > max(2.0, other_duration * .25):
                     break
                 if fingerprints_close(frames, other_frames):
                     group_id = hashlib.sha256(json.dumps(sorted([video_id, other_id])).encode()).hexdigest()
@@ -186,8 +186,8 @@ class DuplicateVideoScanner:
             job = self.jobs.get(scan_id)
             if not job or job["status"] != "completed":
                 return False
-            group = next((g for g in job["groups"] if video_id in g["videoIds"]), None)
-            if not group:
+            groups = [g for g in job["groups"] if video_id in g["videoIds"]]
+            if not groups:
                 return False
             try:
                 target_path, target_signature = job["files"][video_id]
@@ -195,7 +195,16 @@ class DuplicateVideoScanner:
                     return False
                 if self._signature(target_path) != target_signature:
                     return False
-                return any(other != video_id and self._signature(job["files"][other][0]) == job["files"][other][1]
-                           for other in group["videoIds"])
             except (OSError, KeyError):
                 return False
+            for group in groups:
+                for other in group['videoIds']:
+                    if other == video_id:
+                        continue
+                    try:
+                        path, signature = job['files'][other]
+                        if self._signature(path) == signature:
+                            return True
+                    except (OSError, KeyError):
+                        continue
+            return False

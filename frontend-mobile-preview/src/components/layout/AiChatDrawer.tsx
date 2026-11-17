@@ -63,6 +63,7 @@ export const AiChatDrawer: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const t = translations[settings.language]?.aiChat || translations['en-US'].aiChat;
+  const isEn = settings.language === 'en-US';
   const quickPrompts: string[] = (t.prompts as string[]) || [];
 
   const activeProvider = settings.aiChatProvider || 'gemini';
@@ -195,7 +196,7 @@ export const AiChatDrawer: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setDrawerWidth('standard')}
-                      title="Largura Padrão (440px)"
+                      title={isEn ? "Standard Width (440px)" : "Largura Padrão (440px)"}
                       className={`p-1 rounded text-xs transition-colors ${drawerWidth === 'standard' ? 'bg-brand-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
                     >
                       <PanelRight size={14} />
@@ -203,7 +204,7 @@ export const AiChatDrawer: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setDrawerWidth('wide')}
-                      title="Largura Expandida (768px)"
+                      title={isEn ? "Wide Width (768px)" : "Largura Expandida (768px)"}
                       className={`p-1 rounded text-xs transition-colors ${drawerWidth === 'wide' ? 'bg-brand-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
                     >
                       <Columns size={14} />
@@ -211,7 +212,7 @@ export const AiChatDrawer: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setDrawerWidth('fullscreen')}
-                      title="Área de Trabalho em Tela Cheia"
+                      title={isEn ? "Fullscreen Workspace" : "Área de Trabalho em Tela Cheia"}
                       className={`p-1 rounded text-xs transition-colors ${drawerWidth === 'fullscreen' ? 'bg-brand-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
                     >
                       <Maximize2 size={14} />
@@ -383,7 +384,7 @@ export const AiChatDrawer: React.FC = () => {
                           <div className="flex items-center justify-between text-[11px] font-semibold text-slate-300">
                             <span className="flex items-center gap-1">
                               <Film size={12} className="text-amber-400" />
-                              Vídeos ({videos.length})
+                              {isEn ? `Videos (${videos.length})` : `Vídeos (${videos.length})`}
                             </span>
                           </div>
                           <div
@@ -402,7 +403,7 @@ export const AiChatDrawer: React.FC = () => {
                                   <div className="flex items-center gap-1.5 min-w-0">
                                     <Film size={13} className="text-amber-400 shrink-0" />
                                     <span className="text-xs font-semibold text-slate-200 truncate">
-                                      {vid.title || 'Vídeo'}
+                                      {vid.title || (isEn ? 'Video' : 'Vídeo')}
                                     </span>
                                   </div>
                                   {vid.folder && (
@@ -435,7 +436,7 @@ export const AiChatDrawer: React.FC = () => {
                           <div className="flex items-center justify-between text-[11px] font-semibold text-slate-300">
                             <span className="flex items-center gap-1">
                               <Folder size={12} className="text-brand-400" />
-                              Álbuns Relacionados ({albums.length})
+                              {isEn ? `Related Albums (${albums.length})` : `Álbuns Relacionados (${albums.length})`}
                             </span>
                           </div>
                           <div
@@ -500,9 +501,9 @@ export const AiChatDrawer: React.FC = () => {
                             <Wrench size={11} className="text-emerald-400" />
                             <span>
                               {msg.executedTools.length}{' '}
-                              {msg.executedTools.length === 1
-                                ? 'ação autônoma executada'
-                                : 'ações autônomas executadas'}
+                              {isEn
+                                ? (msg.executedTools.length === 1 ? 'autonomous action executed' : 'autonomous actions executed')
+                                : (msg.executedTools.length === 1 ? 'ação autônoma executada' : 'ações autônomas executadas')}
                             </span>
                             {expandedTools[msg.id] ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
                           </button>
@@ -644,8 +645,8 @@ export const AiChatDrawer: React.FC = () => {
                 }}
                 placeholder={
                   activeProvider === 'gemini'
-                    ? 'Peça qualquer ação ou comando ao Co-Pilot Gemini Cloud...'
-                    : 'Fale com o Co-Pilot Ollama Local...'
+                    ? (isEn ? 'Ask Gemini Cloud Co-Pilot for any action or command...' : 'Peça qualquer ação ou comando ao Co-Pilot Gemini Cloud...')
+                    : (isEn ? 'Chat with Local Ollama Co-Pilot...' : 'Fale com o Co-Pilot Ollama Local...')
                 }
                 className="flex-1 px-3.5 py-2 rounded-xl bg-surface-elevated border border-border text-slate-100 placeholder-slate-500 text-xs outline-none focus:border-brand-500"
               />
@@ -673,7 +674,7 @@ export const AiChatDrawer: React.FC = () => {
           >
             <div className="p-3 border-b border-border flex items-center justify-between bg-surface-elevated">
               <span className="text-xs font-bold text-slate-100 truncate pr-4">
-                {lightboxMedia.title || 'Visualização em Alta Resolução'}
+                {lightboxMedia.title || (isEn ? 'High Resolution Preview' : 'Visualização em Alta Resolução')}
               </span>
               <div className="flex items-center gap-2">
                 <a
@@ -681,7 +682,7 @@ export const AiChatDrawer: React.FC = () => {
                   target="_blank"
                   rel="noopener noreferrer"
                   className="p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-surface transition-colors"
-                  title="Abrir imagem original"
+                  title={isEn ? "Open original image" : "Abrir imagem original"}
                 >
                   <ExternalLink size={16} />
                 </a>

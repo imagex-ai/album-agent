@@ -173,6 +173,7 @@ export const ShortsView: React.FC = () => {
     setShortsActiveIndex,
   } = useAppStore();
   const t = translations[settings.language];
+  const isEn = settings?.language === 'en-US';
 
   const handleExitShorts = useCallback(() => {
     const prev = openTabs.find(t => t.viewId !== 'shorts');
@@ -254,7 +255,7 @@ export const ShortsView: React.FC = () => {
     const list = (item.highlights && item.highlights.length > 0)
       ? item.highlights
       : (item.startTime && item.startTime > 0)
-      ? [{ rank: 1, label: 'Clímax #1 (Ouro)', start: item.startTime, end: item.endTime || item.startTime + 30, score: item.highlightScore || 85, duration: 30 }]
+      ? [{ rank: 1, label: isEn ? 'Climax #1 (Gold)' : 'Clímax #1 (Ouro)', start: item.startTime, end: item.endTime || item.startTime + 30, score: item.highlightScore || 85, duration: 30 }]
       : [];
 
     if (list.length === 0) return;
@@ -385,8 +386,8 @@ export const ShortsView: React.FC = () => {
       items.push({
         id: `vid-${v.id}`,
         kind: 'video',
-        title: v.title || v.filename || 'Vídeo',
-        subtitle: v.folder || 'Biblioteca de Vídeos',
+        title: v.title || v.filename || (isEn ? 'Video' : 'Vídeo'),
+        subtitle: v.folder || (isEn ? 'Video Library' : 'Biblioteca de Vídeos'),
         folder: v.folder || '',
         mediaUrl: streamUrl,
         posterUrl: resolveSafeImageUrl(v.thumbnailUrl),
@@ -407,7 +408,7 @@ export const ShortsView: React.FC = () => {
           ? v.highlights
           : (highlightStart > 0 ? [{
               rank: 1,
-              label: 'Clímax #1 (Ouro)',
+              label: isEn ? 'Climax #1 (Gold)' : 'Clímax #1 (Ouro)',
               start: highlightStart,
               end: highlightEnd,
               score: v.highlightScore || 85,
@@ -447,8 +448,8 @@ export const ShortsView: React.FC = () => {
           items.push({
             id: `img-${album.id}-${img.id || imgIdx}`,
             kind: 'video',
-            title: img.title || album.title || 'Vídeo',
-            subtitle: album.title || 'Galeria',
+            title: img.title || album.title || (isEn ? 'Video' : 'Vídeo'),
+            subtitle: album.title || (isEn ? 'Gallery' : 'Galeria'),
             folder: album.folder || '',
             mediaUrl: url,
             posterUrl: resolveSafeImageUrl(img.thumbnailUrl || img.previewUrl || ''),
@@ -473,8 +474,8 @@ export const ShortsView: React.FC = () => {
         items.push({
           id: `img-${album.id}-${img.id}`,
           kind: isGif ? 'gif' : 'photo',
-          title: img.title || album.title || 'Imagem',
-          subtitle: album.title || 'Galeria',
+          title: img.title || album.title || (isEn ? 'Image' : 'Imagem'),
+          subtitle: album.title || (isEn ? 'Gallery' : 'Galeria'),
           folder: album.folder || '',
           mediaUrl: resolveSafeImageUrl(url),
           posterUrl: resolveSafeImageUrl(img.thumbnailUrl || img.previewUrl || url),
@@ -525,10 +526,7 @@ export const ShortsView: React.FC = () => {
     }
 
     if (sequenceMode === 'favorites') {
-      const favs = list.filter(i => i.isFavorite);
-      if (favs.length > 0) {
-        list = favs;
-      }
+      list = list.filter(i => i.isFavorite);
     } else if (sequenceMode === 'recent') {
       list.sort((a, b) => b.createdAtTs - a.createdAtTs);
     } else if (sequenceMode === 'alphabetical') {
@@ -707,28 +705,11 @@ export const ShortsView: React.FC = () => {
     // Apply user's current mute preference directly to DOM element
     vid.muted = isMutedRef.current;
 
-    const currentItem = feedItems[activeIndexRef.current];
-    const target = currentItem ? getEffectiveHighlightStart(currentItem, highlightIndexMap[currentItem.id]) : 0;
-
-    const doSeekToClimax = () => {
-      if (target > 0 && Math.abs(vid.currentTime - target) > 1.0) {
-        try {
-          vid.currentTime = target;
-        } catch (_) {}
-      }
-    };
-
-    // Pre-seek if target is already known
-    if (target > 0 && Math.abs(vid.currentTime - target) > 1.0) {
-      try {
-        vid.currentTime = target;
-      } catch (_) {}
-    }
-
+    // Initial positioning belongs to metadata loading and explicit highlight changes.
+    // Resuming playback (including after buffering or seeking) preserves currentTime.
     const p = vid.play();
     if (p !== undefined) {
       p.then(() => {
-        doSeekToClimax();
         // If user wants audio, guarantee unmuted state on the actively playing element
         if (!isMutedRef.current && vid.muted) {
           vid.muted = false;
@@ -739,7 +720,6 @@ export const ShortsView: React.FC = () => {
         if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
           vid.muted = true;
           vid.play().then(() => {
-            doSeekToClimax();
             // Once playback stream is active, restore unmuted audio if user previously unmuted
             if (!isMutedRef.current) {
               setTimeout(() => {
@@ -752,7 +732,7 @@ export const ShortsView: React.FC = () => {
         }
       });
     }
-  }, [feedItems, highlightIndexMap]);
+  }, []);
 
   // Synchronize live video element audio whenever isMuted changes
   useEffect(() => {
@@ -794,12 +774,6 @@ export const ShortsView: React.FC = () => {
     if (isPaused) {
       vid.pause();
     } else {
-      const target = getEffectiveHighlightStart(currentItem, highlightIndexMap[currentItem.id]);
-      if (target > 0 && Math.abs(vid.currentTime - target) > 1.0) {
-        try {
-          vid.currentTime = target;
-        } catch (_) {}
-      }
       playVideoSafely(vid);
     }
   }, [activeIndex, isPaused, feedItems, highlightIndexMap, playVideoSafely, teardownVideoElement]);
@@ -1740,7 +1714,7 @@ export const ShortsView: React.FC = () => {
             {/* 5. Highlight Climax Duration */}
             <div className="space-y-1.5 pt-1">
               <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center justify-between">
-                <span>Duração do Clímax</span>
+                <span>{isEn ? 'Climax Duration' : 'Duração do Clímax'}</span>
                 <span className="text-amber-400 font-mono text-[10px]">{highlightDuration}s</span>
               </label>
               <div className="grid grid-cols-3 gap-1.5">
@@ -1897,7 +1871,13 @@ export const ShortsView: React.FC = () => {
                             if (!isActive) return;
                             const v = e.currentTarget;
                             const code = v.error?.code;
-                            const msg = code === 2 ? 'Erro de rede ao carregar vídeo' : code === 3 ? 'Falha na decodificação do vídeo' : code === 4 ? 'Formato não suportado ou link expirado' : 'Falha ao carregar stream';
+                            const msg = code === 2
+                              ? (isEn ? 'Network error loading video' : 'Erro de rede ao carregar vídeo')
+                              : code === 3
+                              ? (isEn ? 'Video decode failure' : 'Falha na decodificação do vídeo')
+                              : code === 4
+                              ? (isEn ? 'Unsupported format or expired link' : 'Formato não suportado ou link expirado')
+                              : (isEn ? 'Failed to load stream' : 'Falha ao carregar stream');
                             setVideoErrorMap(prev => ({ ...prev, [item.id]: msg }));
                             if (autoAdvance) {
                               if (errorSkipTimerRef.current) clearTimeout(errorSkipTimerRef.current);
@@ -2028,7 +2008,7 @@ export const ShortsView: React.FC = () => {
                           <div className="space-y-1 max-w-[260px]">
                             <p className="text-white text-xs font-bold">{videoErrorMap[item.id]}</p>
                             <p className="text-slate-400 text-[11px] leading-relaxed">
-                              {autoAdvance ? 'Avançando automaticamente para o próximo...' : 'Passe para o próximo vídeo no feed'}
+                              {autoAdvance ? (isEn ? 'Auto-advancing to next...' : 'Avançando automaticamente para o próximo...') : (isEn ? 'Swipe to next video in feed' : 'Passe para o próximo vídeo no feed')}
                             </p>
                           </div>
                           <button
@@ -2039,7 +2019,7 @@ export const ShortsView: React.FC = () => {
                             }}
                             className="px-4 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-white text-xs font-bold transition-all cursor-pointer shadow-md"
                           >
-                            Próximo Short
+                            {isEn ? 'Next Short' : 'Próximo Short'}
                           </button>
                         </div>
                       )}
@@ -2113,12 +2093,12 @@ export const ShortsView: React.FC = () => {
                         {isAnalyzingActive && item.id === feedItems[activeIndex]?.id ? (
                           <div className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 backdrop-blur-md text-[10px] font-semibold tracking-wide flex items-center gap-1 animate-pulse shadow-sm shrink-0">
                             <Zap size={10} className="fill-amber-400 text-amber-400 animate-spin shrink-0" />
-                            <span className="hidden sm:inline">⚡ Buscando Clímax...</span>
-                            <span className="sm:hidden font-mono text-[9.5px]">⚡ Clímax...</span>
+                            <span className="hidden sm:inline">{isEn ? '⚡ Seeking Climax...' : '⚡ Buscando Clímax...'}</span>
+                            <span className="sm:hidden font-mono text-[9.5px]">{isEn ? '⚡ Seeking...' : '⚡ Clímax...'}</span>
                           </div>
                         ) : item.kind === 'video' && ((item.highlights && item.highlights.length > 0) || (item.startTime && item.startTime > 0)) ? (() => {
                           const hls = item.highlights && item.highlights.length > 0 ? item.highlights : [
-                            { rank: 1, label: 'Clímax #1 (Ouro)', start: item.startTime || 0, end: item.endTime || (item.startTime || 0) + 30, score: item.highlightScore || 85, duration: 30 }
+                            { rank: 1, label: isEn ? 'Climax #1 (Gold)' : 'Clímax #1 (Ouro)', start: item.startTime || 0, end: item.endTime || (item.startTime || 0) + 30, score: item.highlightScore || 85, duration: 30 }
                           ];
                           const activeHlIdx = highlightIndexMap[item.id] !== undefined ? highlightIndexMap[item.id] : 0;
                           
@@ -2128,7 +2108,7 @@ export const ShortsView: React.FC = () => {
                           let badgeIcon = <Zap size={10} className="fill-amber-400 text-amber-400 shrink-0" />;
                           
                           if (activeHlIdx === -1) {
-                            badgeText = '▶️ Início (0:00)';
+                            badgeText = isEn ? '▶️ Start (0:00)' : '▶️ Início (0:00)';
                             mobileBadgeText = '▶️ 0:00';
                             badgeStyle = 'bg-slate-700/60 hover:bg-slate-700/80 text-slate-200 border-white/15';
                             badgeIcon = <RotateCcw size={10} className="text-slate-300 shrink-0" />;
@@ -2138,7 +2118,7 @@ export const ShortsView: React.FC = () => {
                             const isGold = r === 'gold' || r === 1 || activeHlIdx === 0;
                             const isSilver = r === 'silver' || r === 2 || activeHlIdx === 1;
 
-                            const defaultLabel = isGold ? 'Clímax Principal' : isSilver ? 'Destaque Secundário' : 'Gancho Dinâmico';
+                            const defaultLabel = isGold ? (isEn ? 'Main Climax' : 'Clímax Principal') : isSilver ? (isEn ? 'Secondary Highlight' : 'Destaque Secundário') : (isEn ? 'Dynamic Hook' : 'Gancho Dinâmico');
                             const cleanLabel = sanitizeHighlightLabel(curHl.label, defaultLabel);
 
                             if (isGold) {
@@ -2167,7 +2147,7 @@ export const ShortsView: React.FC = () => {
                                 handleCycleHighlight(item);
                               }}
                               className={`px-1.5 sm:px-2 py-0.5 rounded-full backdrop-blur-md text-[10px] font-semibold tracking-wide flex items-center gap-1 shadow-sm transition-all cursor-pointer border shrink-0 ${badgeStyle}`}
-                              title={hls.length > 1 ? `Alternar entre ${hls.length} destaques e o início do vídeo` : "Alternar entre o clímax e o início (0:00)"}
+                              title={hls.length > 1 ? (isEn ? `Cycle between ${hls.length} highlights and video start` : `Alternar entre ${hls.length} destaques e o início do vídeo`) : (isEn ? "Switch between climax and start (0:00)" : "Alternar entre o clímax e o início (0:00)")}
                             >
                               {badgeIcon}
                               <span className="hidden sm:inline">{badgeText}</span>

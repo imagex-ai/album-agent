@@ -100,7 +100,7 @@ export const UpdateModal: React.FC = () => {
 
   const currentVersion = updateInfo?.current_version || '5.6.1';
   const latestVersion = updateInfo?.latest_version || '5.6.1';
-  const releaseName = updateInfo?.release_name || `IMAGEX.AI ${latestVersion}`;
+  const releaseName = updateInfo?.release_name || `IMAGEX ${latestVersion}`;
   const releaseNotes = updateInfo?.release_notes || '';
   const publishedDate = updateInfo?.published_at
     ? new Date(updateInfo.published_at).toLocaleDateString(isEn ? 'en-US' : 'pt-BR', {

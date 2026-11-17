@@ -20,6 +20,7 @@ from src.core.network_profiles import (
     extract_canonical_target_page,
     resolve_anti_hotlink_headers,
     load_cookie_string_into_cookiejar,
+    normalize_ytdlp_video_info,
 )
 
 logger = logging.getLogger("resilient_downloader")
@@ -218,10 +219,14 @@ async def download_video_resilient(
                 load_cookie_string_into_cookiejar(ydl.cookiejar, cookie_str, canonical_url)
             try:
                 info = ydl.extract_info(canonical_url, download=True)
+                info = normalize_ytdlp_video_info(info, canonical_url)
                 if info and isinstance(info, dict):
                     info_dict_holder["heatmap"] = info.get("heatmap")
                     info_dict_holder["title"] = info.get("title")
                     info_dict_holder["duration"] = info.get("duration")
+                    info_dict_holder["width"] = info.get("width")
+                    info_dict_holder["height"] = info.get("height")
+                    info_dict_holder["thumbnail"] = info.get("thumbnail")
             except Exception as e_extract:
                 logger.debug(f"[ResilientDownloader] extract_info fallback to download: {e_extract}")
                 ydl.download([canonical_url])

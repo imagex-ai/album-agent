@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { AlbumImage, SliderSequenceMode, SliderMediaFilter, SliderOrientationFilter } from '../../types';
+import { getMediaCategory, isVideoMedia } from '../../utils/mediaClassification';
 import { translations } from '../../i18n/translations';
 import { isDesktopApp, toggleAppFullscreen, exitAllFullscreen } from '../../services/desktopService';
 import {
@@ -100,7 +101,7 @@ function detectArtistFromAlbum(title: string, tags?: string[], sourceUrl?: strin
       // ignore invalid URL
     }
   }
-  return title ? title.slice(0, 24).trim() : 'Geral';
+  return title ? title.slice(0, 24).trim() : 'General';
 }
 
 export const SlideshowModal: React.FC = () => {
@@ -108,6 +109,7 @@ export const SlideshowModal: React.FC = () => {
     slideshowOpen,
     slideshowInitialIndex,
     slideshowMode,
+    slideshowTransientAlbum,
     globalSliderConfig,
     setGlobalSliderConfig,
     setSlideshowOpen,
@@ -120,6 +122,8 @@ export const SlideshowModal: React.FC = () => {
     albumFolders,
   } = useAppStore();
   const t = translations[settings.language];
+  const isPt = settings?.language === 'pt-BR';
+  const isEn = settings?.language === 'en-US';
 
   const [currentIndex, setCurrentIndex] = useState(slideshowInitialIndex || 0);
   const [isPlaying, setIsPlaying] = useState(true);
@@ -208,10 +212,16 @@ export const SlideshowModal: React.FC = () => {
     }, HIDE_TIMEOUT_MS);
   };
 
-  // Restore desktop window state when closing slideshow
+  // Release only the fullscreen entered by this slideshow.
+  const wasSlideshowOpenRef = useRef(false);
+  useEffect(() => {
+    if (wasSlideshowOpenRef.current && !slideshowOpen) void exitAllFullscreen(setIsFullscreen);
+    wasSlideshowOpenRef.current = slideshowOpen;
+  }, [slideshowOpen]);
+
   useEffect(() => {
     return () => {
-      exitAllFullscreen();
+      exitAllFullscreen(setIsFullscreen);
     };
   }, []);
 
@@ -274,15 +284,17 @@ export const SlideshowModal: React.FC = () => {
   }, [slideshowOpen]);
 
   const activeAlbumObj = useMemo(
-    () => albums.find(a => a.id === activeAlbumId) || albums[0],
-    [albums, activeAlbumId]
+    () => slideshowTransientAlbum || albums.find(a => a.id === activeAlbumId) || albums[0],
+    [albums, activeAlbumId, slideshowTransientAlbum]
   );
 
   // Build full pool of enriched images across either current album or entire app
   const rawPool = useMemo<EnrichedSlideImage[]>(() => {
     if (!slideshowOpen) return [];
     const sourceAlbums =
-      globalSliderConfig.scope === 'all_app'
+      slideshowTransientAlbum
+        ? [slideshowTransientAlbum]
+        : globalSliderConfig.scope === 'all_app'
         ? albums
         : activeAlbumObj
         ? [activeAlbumObj]
@@ -307,7 +319,7 @@ export const SlideshowModal: React.FC = () => {
       const recencyRank = rankMap.get(album.id) ?? 0;
 
       (album.images || []).forEach((img, imgIdx) => {
-        if (img.mediaType === 'video' || Boolean(img.videoUrl)) {
+        if ((img.mediaType === 'video' || Boolean(img.videoUrl)) && !(slideshowTransientAlbum && getMediaCategory(img) === 'gif')) {
           return;
         }
         const urlLower = `${img.originalUrl || ''} ${img.rawOriginalUrl || ''} ${img.title || ''} ${img.format || ''}`.toLowerCase();
@@ -324,7 +336,7 @@ export const SlideshowModal: React.FC = () => {
         list.push({
           ...img,
           _albumId: album.id,
-          _albumTitle: album.title || 'Álbum',
+          _albumTitle: album.title || (isPt ? 'Álbum' : 'Album'),
           _albumFolder: folder,
           _albumCreatedAt: createdTs + (album.images.length - imgIdx),
           _albumRecencyRank: recencyRank,
@@ -337,7 +349,7 @@ export const SlideshowModal: React.FC = () => {
       });
     });
     return list;
-  }, [slideshowOpen, albums, activeAlbumObj, globalSliderConfig.scope]);
+  }, [slideshowOpen, albums, activeAlbumObj, globalSliderConfig.scope, slideshowTransientAlbum]);
 
   // Extract available artists & folders for filter pills
   const availableArtists = useMemo(() => {
@@ -367,6 +379,9 @@ export const SlideshowModal: React.FC = () => {
   // Apply Dopamine Filters & Sequence Organization
   const images = useMemo<EnrichedSlideImage[]>(() => {
     let filtered = [...rawPool];
+    // A preview slideshow has an explicit, in-memory collection and must not
+    // inherit library-wide filters or ordering from a previous session.
+    if (slideshowTransientAlbum) return filtered;
 
     // 1. Media type filter (All / Photos / GIFs)
     if (globalSliderConfig.mediaFilter === 'photos') {
@@ -460,7 +475,7 @@ export const SlideshowModal: React.FC = () => {
     }
 
     return filtered;
-  }, [rawPool, globalSliderConfig]);
+  }, [rawPool, globalSliderConfig, slideshowTransientAlbum]);
 
   // Keep currentIndex within bounds when filters change
   useEffect(() => {
@@ -674,7 +689,7 @@ export const SlideshowModal: React.FC = () => {
   }, []);
 
   const triggerHeartBurst = () => {
-    if (!currentImage) return;
+    if (!currentImage || slideshowTransientAlbum) return;
     toggleFavoriteImage(currentImage._albumId, currentImage.id);
     setHeartBurst(true);
     setTimeout(() => setHeartBurst(false), 750);
@@ -711,17 +726,20 @@ export const SlideshowModal: React.FC = () => {
           resetHideTimer();
           return;
         }
-        exitAllFullscreen(setIsFullscreen);
-        setSlideshowOpen(false);
+        if (isFullscreenRef.current) {
+          void exitAllFullscreen(setIsFullscreen);
+        } else {
+          setSlideshowOpen(false);
+        }
       } else if (e.key.toLowerCase() === 'l') {
         setIsLocked(prev => {
           if (prev) resetHideTimer();
           return !prev;
         });
-      } else if (e.key.toLowerCase() === 'd') {
+      } else if (e.key.toLowerCase() === 'd' && !slideshowTransientAlbum) {
         e.preventDefault();
         setShowDopaminePanel(prev => !prev);
-      } else if (e.key.toLowerCase() === 'r' || e.key.toLowerCase() === 's') {
+      } else if ((e.key.toLowerCase() === 'r' || e.key.toLowerCase() === 's') && !slideshowTransientAlbum) {
         e.preventDefault();
         triggerReshuffle();
       } else if (e.key.toLowerCase() === 'h') {
@@ -739,7 +757,7 @@ export const SlideshowModal: React.FC = () => {
       } else if (e.key.toLowerCase() === 'p' || e.key.toLowerCase() === 'a') {
         e.preventDefault();
         setFitMode(m => (m === 'contain' ? 'cover' : 'contain'));
-      } else if (e.key.toLowerCase() === 'f' || e.key === 'F11') {
+      } else if (e.key.toLowerCase() === 'f' || (e.key === 'F11' && !isDesktopApp())) {
         e.preventDefault();
         toggleFullscreen();
       }
@@ -747,7 +765,7 @@ export const SlideshowModal: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [slideshowOpen, images.length, isFullscreen, isImmersive, isLocked, showDopaminePanel, currentImage]);
+  }, [slideshowOpen, images.length, isFullscreen, isImmersive, isLocked, showDopaminePanel, currentImage, slideshowTransientAlbum]);
 
   if (!slideshowOpen || rawPool.length === 0) return null;
 
@@ -778,8 +796,6 @@ export const SlideshowModal: React.FC = () => {
   const normalizedCenterColor = normalizeHex(centerColor, normalizedColor);
   const normalizedLateralColor = normalizeHex(lateralColor, normalizedSecColor);
 
-  const isPt = settings?.language === 'pt-BR';
-  const isEn = settings?.language === 'en-US';
   const backdropOptions = [
     {
       key: 'mirror' as SlideshowBackdropMode,
@@ -1000,7 +1016,7 @@ export const SlideshowModal: React.FC = () => {
       >
         <div className="flex items-center gap-2 min-w-0">
           {/* Scope Switcher Pill (Global App vs Current Album) */}
-          <button
+          {!slideshowTransientAlbum && <button
             onClick={() => {
               const nextScope = globalSliderConfig.scope === 'all_app' ? 'current_album' : 'all_app';
               setGlobalSliderConfig({ scope: nextScope });
@@ -1018,7 +1034,7 @@ export const SlideshowModal: React.FC = () => {
             <span className="hidden sm:inline">
               {globalSliderConfig.scope === 'all_app' ? t.globalSlider.scopeAllApp : t.globalSlider.scopeCurrentAlbum}
             </span>
-          </button>
+          </button>}
 
           {/* Current Slide Info & Source Album Pill */}
           <div className="text-white text-xs font-semibold bg-black/65 px-3.5 py-1.5 rounded-full backdrop-blur-md border border-white/10 flex items-center gap-2 max-w-[240px] sm:max-w-md truncate shadow-2xl">
@@ -1034,7 +1050,7 @@ export const SlideshowModal: React.FC = () => {
           </div>
 
           {/* Open Source Album button when browsing in Global All-App mode */}
-          {globalSliderConfig.scope === 'all_app' && currentImage && (
+          {!slideshowTransientAlbum && globalSliderConfig.scope === 'all_app' && currentImage && (
             <button
               onClick={() => {
                 setSlideshowOpen(false);
@@ -1051,7 +1067,7 @@ export const SlideshowModal: React.FC = () => {
 
         <div className="flex items-center gap-1.5 sm:gap-2">
           {/* Quick Shuffle Now Button */}
-          <button
+          {!slideshowTransientAlbum && <button
             onClick={triggerReshuffle}
             className={`px-3 py-2 rounded-full text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-2xl ${
               globalSliderConfig.sequenceMode === 'random'
@@ -1062,10 +1078,10 @@ export const SlideshowModal: React.FC = () => {
           >
             <Shuffle size={14} />
             <span className="hidden lg:inline">{t.globalSlider.reshuffle}</span>
-          </button>
+          </button>}
 
           {/* Dopamine Filter & Sequence Control Drawer Button */}
-          <button
+          {!slideshowTransientAlbum && <button
             onClick={() => {
               setShowDopaminePanel(prev => !prev);
               setShowSpeedMenu(false);
@@ -1080,7 +1096,7 @@ export const SlideshowModal: React.FC = () => {
           >
             <SlidersHorizontal size={14} className="text-brand-300" />
             <span className="hidden sm:inline">{isPt ? 'Sequência & Filtros' : 'Sequence & Filters'}</span>
-          </button>
+          </button>}
 
           {/* Fit / Fill Toggle Button */}
           <button
@@ -1103,7 +1119,7 @@ export const SlideshowModal: React.FC = () => {
                 ? 'bg-brand-600 text-white border-brand-400 shadow-glow-brand'
                 : 'bg-black/60 text-white hover:bg-black/90 border-white/10'
             }`}
-            title={isImmersive || isFullscreen ? 'Sair do Modo Imersivo' : 'Tela Cheia / Modo Imersivo'}
+            title={isImmersive || isFullscreen ? (isPt ? 'Sair do Modo Imersivo' : 'Exit Immersive Mode') : (isPt ? 'Tela Cheia / Modo Imersivo' : 'Fullscreen / Immersive Mode')}
           >
             {isImmersive || isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
           </button>
@@ -1125,7 +1141,7 @@ export const SlideshowModal: React.FC = () => {
       </div>
 
       {/* Dopamine Command Center Drawer (Sequence, Media, Orientation, Artist, Folder, Size, Recent) */}
-      {showDopaminePanel && !isLocked && (
+      {!slideshowTransientAlbum && showDopaminePanel && !isLocked && (
         <div
           onClick={e => e.stopPropagation()}
           className="absolute top-16 sm:top-20 right-4 sm:right-6 z-40 w-[calc(100vw-2rem)] sm:w-[440px] max-h-[calc(100vh-8.5rem)] overflow-y-auto bg-slate-950/90 backdrop-blur-2xl border border-white/15 rounded-3xl p-4 sm:p-5 shadow-2xl text-white space-y-4 animate-scale-up"
@@ -1522,7 +1538,13 @@ export const SlideshowModal: React.FC = () => {
             )}
 
           {/* Camada 2: Imagem Principal em Alta Resolução */}
-          <img
+          {slideshowTransientAlbum && isVideoMedia(currentImage) ? <video
+            key={`slide-video-${currentImage.id}`}
+            src={currentImage.videoUrl || currentImage.videoStreamUrl || currentImage.originalUrl}
+            autoPlay muted loop playsInline
+            onLoadedData={() => setSlideHighResLoaded(true)}
+            className="relative z-10 max-h-[80vh] max-w-[90vw] object-contain rounded-2xl"
+          /> : <img
             ref={slideImgRef}
             key={`slide-hd-${currentImage.id}-${slideshowAnimClass}`}
             src={currentImage.originalUrl}
@@ -1564,7 +1586,7 @@ export const SlideshowModal: React.FC = () => {
                     ? (fitMode === 'cover' ? 'w-full h-full object-cover rounded-2xl shadow-2xl' : 'max-h-[96vh] max-w-[96vw] object-contain rounded-2xl shadow-2xl')
                     : (fitMode === 'cover' ? 'w-full h-full object-cover rounded-2xl shadow-2xl' : 'max-h-[80vh] max-w-[90vw] object-contain rounded-2xl shadow-2xl'))
             }`}
-          />
+          />}
         </div>
       )}
 
@@ -1596,7 +1618,7 @@ export const SlideshowModal: React.FC = () => {
             resetHideTimer();
           }}
           className="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-brand-600 hover:bg-brand-500 text-white flex items-center justify-center shadow-glow-brand transition-all active:scale-95 shrink-0 cursor-pointer"
-          title={isPlaying ? 'Pausar' : 'Reproduzir'}
+          title={isPlaying ? (isPt ? 'Pausar' : 'Pause') : (isPt ? 'Reproduzir' : 'Play')}
         >
           {isPlaying ? <Pause size={15} className="sm:w-[18px] sm:h-[18px]" /> : <Play size={15} className="ml-0.5 sm:w-[18px] sm:h-[18px]" />}
         </button>
@@ -1663,7 +1685,7 @@ export const SlideshowModal: React.FC = () => {
         <div className="h-4 sm:h-5 w-px bg-white/20 mx-0.5 sm:mx-1 shrink-0"></div>
 
         {/* Favoritar Imagem Atual */}
-        <button
+        {!slideshowTransientAlbum && <button
           onClick={() => {
             if (currentImage) {
               toggleFavoriteImage(currentImage._albumId, currentImage.id);
@@ -1678,11 +1700,11 @@ export const SlideshowModal: React.FC = () => {
           title={isImageFav ? (isPt ? 'Remover imagem dos Favoritos' : 'Remove image from Favorites') : (isPt ? 'Favoritar Imagem Atual (H)' : 'Favorite Current Image (H)')}
         >
           <Heart size={13} className={isImageFav ? 'fill-white text-white' : 'text-slate-300'} />
-          <span className="font-semibold hidden xl:inline">{isImageFav ? 'Favoritada' : 'Favoritar'}</span>
-        </button>
+          <span className="font-semibold hidden xl:inline">{isImageFav ? (isPt ? 'Favoritada' : 'Favorited') : (isPt ? 'Favoritar' : 'Favorite')}</span>
+        </button>}
 
         {/* Favoritar Álbum */}
-        <button
+        {!slideshowTransientAlbum && <button
           onClick={() => {
             if (currentAlbum) {
               toggleFavoriteAlbum(currentAlbum.id);
@@ -1698,7 +1720,7 @@ export const SlideshowModal: React.FC = () => {
         >
           <FolderHeart size={13} className={isAlbumFav ? 'fill-rose-400 text-rose-400' : 'text-slate-300'} />
           <span className="font-semibold hidden xl:inline">{isAlbumFav ? (isPt ? 'Álbum Favorito' : 'Favorite Album') : (isPt ? 'Favoritar Álbum' : 'Favorite Album')}</span>
-        </button>
+        </button>}
 
         <div className="h-4 sm:h-5 w-px bg-white/20 mx-0.5 sm:mx-1 shrink-0"></div>
 
@@ -1715,7 +1737,7 @@ export const SlideshowModal: React.FC = () => {
           title={isEn ? "Lock Controls (Pure Immersive Mode • Press 'L' to toggle)" : "Travar Controles (Modo Imersivo Puro • Pressione 'L' para alternar)"}
         >
           <Lock size={13} className="text-amber-400" />
-          <span className="font-semibold hidden xl:inline">Travar</span>
+          <span className="font-semibold hidden xl:inline">{isPt ? 'Travar' : 'Lock'}</span>
         </button>
 
         {/* Backdrop Lighting Mode Selector */}

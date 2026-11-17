@@ -43,6 +43,7 @@ import { backendApi } from '../../services/realApi';
 import { VideoItem, Album } from '../../types';
 import { formatFileSize } from '../../utils/formatters';
 import { translations } from '../../i18n/translations';
+import { UniversalVideoPlayer } from '../video-player/ui/UniversalVideoPlayer';
 import { IconBadge } from '../common/IconBadge';
 import { ModalPortal } from '../common/ModalPortal';
 import { VirtualCollection } from '../common/VirtualCollection';
@@ -50,32 +51,34 @@ import { VirtualCollection } from '../common/VirtualCollection';
 const getVideoResolutionLabel = (video?: Partial<VideoItem>, title?: string, filename?: string) => {
   const h = video?.height || 0;
   const w = video?.width || 0;
+  const shortSide = (w > 0 && h > 0) ? Math.min(w, h) : h;
+  const longSide = (w > 0 && h > 0) ? Math.max(w, h) : w;
   const fps = video?.fps || 0;
   const t = ((title || video?.title || '') + ' ' + (filename || video?.filename || '')).toLowerCase();
   const is60 = fps >= 50 || /\b60fps\b|1080p60|720p60|\b60\s*fps\b/i.test(t);
 
   // 1. 4K UHD (3840x2160 / 2160p / 4K)
-  if (h >= 2160 || w >= 3840 || /(2160p|4k|uhd)/i.test(t)) {
+  if (shortSide >= 2160 || longSide >= 3840 || /(2160p|4k|uhd)/i.test(t)) {
     return { label: is60 ? '4K 60fps' : '4K UHD', badgeClass: 'bg-amber-500/25 text-amber-300 border-amber-500/50 shadow-sm' };
   }
   // 2. 2K QHD (2560x1440 / 1440p / 2K)
-  if (h >= 1440 || w >= 2560 || /(1440p|2k|qhd)/i.test(t)) {
+  if (shortSide >= 1440 || longSide >= 2560 || /(1440p|2k|qhd)/i.test(t)) {
     return { label: is60 ? '2K 60fps' : '2K QHD', badgeClass: 'bg-indigo-500/25 text-indigo-300 border-indigo-500/50 shadow-sm' };
   }
   // 3. 1080p FHD (1920x1080 / 1080p)
-  if (h >= 1080 || w >= 1920 || /(1080p|1080|fhd)/i.test(t)) {
+  if (shortSide >= 1080 || longSide >= 1920 || /(1080p|1080|fhd)/i.test(t)) {
     return { label: is60 ? '1080p60' : '1080p FHD', badgeClass: 'bg-violet-900/90 text-violet-200 border-violet-400/50 shadow-sm' };
   }
   // 4. 720p HD (1280x720 / 720p)
-  if (h >= 720 || w >= 1280 || /(720p|720)/i.test(t) || (/\bhd\b/i.test(t) && !t.includes('1080') && !t.includes('2160') && !t.includes('4k'))) {
+  if (shortSide >= 720 || longSide >= 1280 || /(720p|720)/i.test(t) || (/\bhd\b/i.test(t) && !t.includes('1080') && !t.includes('2160') && !t.includes('4k'))) {
     return { label: is60 ? '720p60' : '720p HD', badgeClass: 'bg-blue-900/80 text-blue-200 border-blue-400/40' };
   }
   // 5. 480p SD
-  if (h >= 480 || /(480p|480)/i.test(t)) {
+  if (shortSide >= 480 || /(480p|480)/i.test(t)) {
     return { label: '480p SD', badgeClass: 'bg-slate-800 text-slate-300 border-slate-600/40' };
   }
   // 6. 360p
-  if (h >= 360 || /(360p|360)/i.test(t)) {
+  if (shortSide >= 360 || /(360p|360)/i.test(t)) {
     return { label: '360p', badgeClass: 'bg-slate-800 text-slate-300 border-slate-600/40' };
   }
   // 7. 240p
@@ -114,6 +117,7 @@ export const VideosView: React.FC = () => {
     openVideosFolder,
     syncVideos,
     isRenewingVideoStreams,
+    videoRenewProgress,
     renewVideoStreams,
     saveExtractedVideoToGallery,
     navigateToView,
@@ -149,6 +153,7 @@ export const VideosView: React.FC = () => {
     openVideosFolder: state.openVideosFolder,
     syncVideos: state.syncVideos,
     isRenewingVideoStreams: state.isRenewingVideoStreams,
+    videoRenewProgress: state.videoRenewProgress,
     renewVideoStreams: state.renewVideoStreams,
     saveExtractedVideoToGallery: state.saveExtractedVideoToGallery,
     navigateToView: state.navigateToView,
@@ -567,11 +572,15 @@ export const VideosView: React.FC = () => {
               <RefreshCw size={13} className={isRenewingVideoStreams ? 'animate-spin text-violet-400' : 'text-violet-400'} />
               <span>
                 {isRenewingVideoStreams
-                  ? (isEn ? 'Renewing...' : 'Renovando...')
+                  ? (videoRenewProgress
+                      ? `${isEn ? 'Renewing' : 'Renovando'} (${videoRenewProgress.current}/${videoRenewProgress.total})...`
+                      : (isEn ? 'Renewing...' : 'Renovando...'))
                   : (t.renewStreams || (isEn ? 'Renew Streams' : 'Renovar Streams'))}
               </span>
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-violet-950/60 text-violet-300 border border-violet-500/30">
-                {streamVideosInList.length}
+                {videoRenewProgress
+                  ? `${videoRenewProgress.current}/${videoRenewProgress.total}`
+                  : streamVideosInList.length}
               </span>
             </button>
           )}
@@ -728,7 +737,9 @@ export const VideosView: React.FC = () => {
                 <RefreshCw size={13} className={isRenewingVideoStreams ? 'animate-spin text-violet-400' : 'text-violet-400'} />
                 <span>
                   {isRenewingVideoStreams
-                    ? (isEn ? 'Renewing...' : 'Renovando...')
+                    ? (videoRenewProgress
+                        ? `${isEn ? 'Renewing' : 'Renovando'} (${videoRenewProgress.current}/${videoRenewProgress.total})...`
+                        : (isEn ? 'Renewing...' : 'Renovando...'))
                     : (t.renewStreams || (isEn ? 'Renew Streams' : 'Renovar Streams'))} ({selectedStreamVideos.length})
                 </span>
               </button>
@@ -1256,22 +1267,27 @@ export const VideosView: React.FC = () => {
                       const effectiveStream = (!rawStream.startsWith('/api/') && rawStream.startsWith('http'))
                         ? `/api/proxy-video-stream?url=${encodeURIComponent(rawStream)}&referer=${encodeURIComponent(video.sourceUrl || defaultRef)}`
                         : rawStream;
+                      const inlinePoster = video.thumbnailUrl
+                        ? `${video.thumbnailUrl}${video.thumbnailUrl.includes('?') ? '&' : '?'}_k=${thumbRefreshKey}&v=${encodeURIComponent(video.createdAt || 'now')}`
+                        : undefined;
                       return (
-                        <video
-                          src={effectiveStream}
-                          controls
-                          autoPlay
-                          playsInline
-                          {...({ 'webkit-playsinline': 'true', 'x5-playsinline': 'true' } as any)}
-                          preload="auto"
-                          poster={video.thumbnailUrl ? `${video.thumbnailUrl}${video.thumbnailUrl.includes('?') ? '&' : '?'}_k=${thumbRefreshKey}&v=${encodeURIComponent(video.createdAt || 'now')}` : undefined}
-                          className="w-full h-full object-contain"
-                          onError={(e) => {
-                            console.warn('VideosView inline error:', e);
+                        <UniversalVideoPlayer
+                          density="compact"
+                          autoPlayOnActive
+                          posterUrl={inlinePoster}
+                          source={{
+                            id: video.id,
+                            highlightVideoId: video.id,
+                            highlights: video.highlights,
+                            highlightStart: video.highlightStart,
+                            highlightEnd: video.highlightEnd,
+                            title: video.title,
+                            streamUrl: effectiveStream,
+                            sourceUrl: video.sourceUrl || effectiveStream,
+                            posterUrl: inlinePoster,
                           }}
-                        >
-                          {t.browserNoVideo || (isEn ? 'Your browser does not support this video.' : 'Seu navegador não suporta este vídeo.')}
-                        </video>
+                          className="w-full h-full object-contain rounded-none border-0"
+                        />
                       );
                     })()}
                     {/* Expand Button to Open Modal */}
@@ -1467,9 +1483,11 @@ export const VideosView: React.FC = () => {
                         )
                       )}
                     </div>
-                    <span className="px-1.5 py-0.5 rounded bg-black/70 border border-white/10 text-slate-300 whitespace-nowrap ml-1">
-                      {video.storageLocation === 'stream_url' ? 'Web Stream' : (video.fileSizeBytes > 0 ? formatFileSize(video.fileSizeBytes) : (isEn ? 'Size N/A' : 'Tam. N/D'))}
-                    </span>
+                    {(video.fileSizeBytes > 0 || video.storageLocation !== 'stream_url') && (
+                      <span className="px-1.5 py-0.5 rounded bg-black/70 border border-white/10 text-slate-300 whitespace-nowrap ml-1">
+                        {video.fileSizeBytes > 0 ? formatFileSize(video.fileSizeBytes) : (isEn ? 'Size N/A' : 'Tam. N/D')}
+                      </span>
+                    )}
                   </div>
                 </div>
               )}
@@ -1665,7 +1683,7 @@ export const VideosView: React.FC = () => {
                       }
                       const effectiveDl = (!(video.downloadUrl || '').startsWith('/api/proxy-video-stream') && rawDl.startsWith('http'))
                         ? `/api/proxy-video-stream?url=${encodeURIComponent(rawDl)}&referer=${encodeURIComponent(video.sourceUrl || defaultDlRef)}&download=true&filename=${encodeURIComponent(video.filename)}`
-                        : video.downloadUrl;
+                        : (video.downloadUrl || `/api/videos/${video.id}/download`);
                       return (
                         <button
                           type="button"
@@ -1677,6 +1695,21 @@ export const VideosView: React.FC = () => {
                                 title: 'Iniciando Download',
                                 message: isEn ? `Saving "${video.title || video.filename}" directly to Downloads folder...` : `Salvando "${video.title || video.filename}" diretamente na pasta Downloads...`,
                               });
+
+                              // 1. Immediately trigger native browser file download
+                              try {
+                                const bUrl = effectiveDl.startsWith('/') ? effectiveDl : `/api/videos/${video.id}/download`;
+                                const link = document.createElement('a');
+                                link.href = bUrl;
+                                link.setAttribute('download', video.filename);
+                                document.body.appendChild(link);
+                                link.click();
+                                document.body.removeChild(link);
+                              } catch (eDl) {
+                                console.warn('Browser video download dispatch error:', eDl);
+                              }
+
+                              // 2. Also execute host background download for local library disk mirroring
                               const res = await backendApi.downloadToDisk(effectiveDl || video.streamUrl || '', video.filename, true);
                               if (res && res.success) {
                                 addNotification({
@@ -1880,7 +1913,7 @@ export const VideosView: React.FC = () => {
                     onClick={() => setIsUrlModalOpen(false)}
                     className="px-4 py-2 rounded-xl bg-surface hover:bg-surface-hover text-slate-300 text-xs font-semibold"
                   >
-                    Cancelar
+                    {isEn ? 'Cancel' : 'Cancelar'}
                   </button>
                   <button
                     type="submit"
@@ -2186,7 +2219,7 @@ export const VideosView: React.FC = () => {
                 onClick={() => setActiveFolderMenuName(null)}
                 className="w-full py-2 rounded-xl bg-surface hover:bg-surface-elevated text-slate-400 hover:text-white text-xs font-semibold transition-colors mt-2"
               >
-                Fechar
+                {isEn ? 'Close' : 'Fechar'}
               </button>
             </div>
           </div>
@@ -2260,7 +2293,7 @@ export const VideosView: React.FC = () => {
                   {t.deleteSelectedFolders.replace('{count}', String(selectedFolderNames.length))}?
                 </h4>
                 <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
-                  {(t.confirmBatchDeleteFolders || 'Deseja excluir as seguintes pastas: {folders}? Todos os vídeos serão transferidos com segurança para Geral.').replace('{folders}', selectedFolderNames.join(', '))}
+                  {(t.confirmBatchDeleteFolders || (isEn ? 'Do you want to delete the following folders: {folders}? All videos will be safely moved to General.' : 'Deseja excluir as seguintes pastas: {folders}? Todos os vídeos serão transferidos com segurança para Geral.')).replace('{folders}', selectedFolderNames.join(', '))}
                 </p>
               </div>
               <div className="flex items-center gap-2.5 pt-2">
@@ -2369,7 +2402,7 @@ export const VideosView: React.FC = () => {
                   <input
                     type="text"
                     required
-                    placeholder={isEn ? "Ex: C:\\Users\\user\\Videos\\myvideo.mp4 or D:\\Movies" : "Ex: C:\\Users\\jardi\\Videos\\meuvideo.mp4 ou D:\\Filmes"}
+                    placeholder={isEn ? "Ex: C:\\Users\\user\\Videos\\myvideo.mp4 or D:\\Movies" : "Ex: C:\\Users\\usuario\\Videos\\meuvideo.mp4 ou D:\\Filmes"}
                     value={localPathInput}
                     onChange={(e) => setLocalPathInput(e.target.value)}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-surface border border-border text-slate-100 text-xs focus:border-emerald-500 focus:outline-none"
@@ -2456,8 +2489,8 @@ export const VideosView: React.FC = () => {
               <Upload size={48} className="text-brand-400 animate-bounce mb-3" />
               <h3 className="text-lg font-bold text-white mb-1">{isEn ? "Drop your videos here" : "Solte seus vídeos aqui"}</h3>
               <p className="text-xs text-slate-400">
-                Os arquivos serão importados com streaming acelerado para a pasta{' '}
-                <strong className="text-brand-300">{activeVideoFolder || 'Geral'}</strong>
+                {isEn ? 'Files will be imported with accelerated streaming to folder ' : 'Os arquivos serão importados com streaming acelerado para a pasta '}
+                <strong className="text-brand-300">{activeVideoFolder || (isEn ? 'General' : 'Geral')}</strong>
               </p>
             </div>
           </div>

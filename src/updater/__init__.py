@@ -1,5 +1,5 @@
 """
-IMAGEX.AI Auto-Update Engine Package
+IMAGEX Auto-Update Engine Package
 """
 from src.updater.updater import (
     check_for_updates,

@@ -1,3 +1,4 @@
+import { normalizePlayerHighlights } from '../video-player/engine/playerHighlights';
 import { useShallow } from 'zustand/react/shallow';
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
@@ -38,6 +39,7 @@ import { getProxiedStreamUrl } from './AlbumDetailView';
 import { translations } from '../../i18n/translations';
 import { IconBadge } from '../common/IconBadge';
 import { ModalPortal } from '../common/ModalPortal';
+import { UniversalVideoPlayer } from '../video-player/ui/UniversalVideoPlayer';
 
 export const WebVideoScraperView: React.FC = () => {
   const {
@@ -76,6 +78,7 @@ export const WebVideoScraperView: React.FC = () => {
 
   const t = translations[settings.language].webVideoScraper || translations['en-US'].webVideoScraper;
   const isEn = settings.language === 'en-US';
+  const defaultFallbackFolder = isEn ? 'Extracted' : 'Extraídos';
 
   const { url, scanResult, selectedIds, targetFolder, errorMsg } = webScraperState;
   const saveLocally = Boolean(webScraperState.saveLocally);
@@ -372,7 +375,7 @@ export const WebVideoScraperView: React.FC = () => {
 
       let currentVideos: ScannedVideoItem[] = [];
       let pageTitle = cleanUrl;
-      let targetFolder = 'Extraídos';
+      let targetFolder = defaultFallbackFolder;
 
       const res = await backendApi.scanPageForVideosStream(
         cleanUrl,
@@ -443,7 +446,7 @@ export const WebVideoScraperView: React.FC = () => {
 
       // Final synchronization
       if (res && res.videos && res.videos.length > 0) {
-        const folder = res.suggested_folder || targetFolder || 'Extraídos';
+        const folder = res.suggested_folder || targetFolder || defaultFallbackFolder;
         const primaryVids = res.videos.filter((v: ScannedVideoItem) => v.is_primary !== false && v.section !== 'recommended');
         const targetVids = primaryVids.length > 0 ? primaryVids : res.videos;
         const unsavedTargetIds = targetVids
@@ -513,7 +516,7 @@ export const WebVideoScraperView: React.FC = () => {
           title: res.page_title || item.title || pageUrl,
           url: pageUrl,
           thumbnailUrl: item.thumbnail_url || res.videos[0]?.thumbnail_url || '',
-          suggestedFolder: res.suggested_folder || targetFolder || 'Extraídos',
+          suggestedFolder: res.suggested_folder || targetFolder || defaultFallbackFolder,
           videos: res.videos,
           selectedVideoIds: unsavedIds.length > 0 ? unsavedIds : res.videos.map((v: ScannedVideoItem) => v.id),
           sourceType: 'sub_album',
@@ -533,7 +536,7 @@ export const WebVideoScraperView: React.FC = () => {
           title: item.title || pageUrl,
           url: pageUrl,
           thumbnailUrl: item.thumbnail_url || '',
-          suggestedFolder: targetFolder || 'Extraídos',
+          suggestedFolder: targetFolder || defaultFallbackFolder,
           videos: [item],
           selectedVideoIds: [item.id],
           sourceType: 'sub_album',
@@ -655,7 +658,7 @@ export const WebVideoScraperView: React.FC = () => {
       executeBatchSave(
         selectedVideosFromSelectedAlbums,
         true,
-        prefilledFolder || settings.defaultVideoFolder || 'Extraídos'
+        prefilledFolder || settings.defaultVideoFolder || defaultFallbackFolder
       );
     }
   };
@@ -676,7 +679,7 @@ export const WebVideoScraperView: React.FC = () => {
       executeBatchSave(
         videosToDownload,
         true,
-        prefilledFolder || settings.defaultVideoFolder || 'Extraídos'
+        prefilledFolder || settings.defaultVideoFolder || defaultFallbackFolder
       );
     }
   };
@@ -722,7 +725,7 @@ export const WebVideoScraperView: React.FC = () => {
         mode: 'batch'
       });
     } else {
-      executeBatchSave(selectedVideos, true, prefilledFolder || settings.defaultVideoFolder || 'Extraídos');
+      executeBatchSave(selectedVideos, true, prefilledFolder || settings.defaultVideoFolder || defaultFallbackFolder);
     }
   };
 
@@ -731,7 +734,7 @@ export const WebVideoScraperView: React.FC = () => {
       setShowDuplicateModal(false);
       return;
     }
-    const folderToUse = (customFolder || targetFolder).trim() || 'Extraídos';
+    const folderToUse = (customFolder || targetFolder).trim() || defaultFallbackFolder;
     setIsBatchSaving(true);
     setShowDuplicateModal(false);
     soundEffects.click(settings.soundEnabled);
@@ -837,14 +840,14 @@ export const WebVideoScraperView: React.FC = () => {
         targetVideo: item
       });
     } else {
-      handleSaveSingleVideo(item, prefilledFolder || settings.defaultVideoFolder || 'Extraídos');
+      handleSaveSingleVideo(item, prefilledFolder || settings.defaultVideoFolder || defaultFallbackFolder);
     }
   };
 
   const handleSaveSingleVideo = async (item: ScannedVideoItem, customFolder?: string) => {
     if (isVideoSaving(item)) return;
     setSavingSingleId(item.id);
-    const folderToUse = (customFolder || targetFolder).trim() || 'Extraídos';
+    const folderToUse = (customFolder || targetFolder).trim() || defaultFallbackFolder;
 
     soundEffects.click(settings.soundEnabled);
     try {
@@ -1020,7 +1023,7 @@ export const WebVideoScraperView: React.FC = () => {
             <button
               onClick={() => handleScanPage(false)}
               disabled={isScanning || !url.trim()}
-              className="flex-1 h-12 px-4 rounded-2xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-violet-600/20 disabled:opacity-50 transition-all cursor-pointer"
+              className="flex-1 h-12 px-4 rounded-2xl bg-gradient-to-r from-primary-violet-600 to-primary-end-600 hover:from-primary-violet-500 hover:to-primary-end-500 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-violet-600/20 disabled:opacity-50 transition-all cursor-pointer"
             >
               {isScanning ? (
                 <>
@@ -1115,7 +1118,7 @@ export const WebVideoScraperView: React.FC = () => {
                   onClick={() => setWebScraperState({ viewLayout: 'albums' })}
                   className={`px-3 py-1 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
                     viewLayout === 'albums'
-                      ? 'bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow'
+                      ? 'bg-gradient-to-r from-primary-violet-600 to-primary-end-600 text-white shadow'
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
@@ -1127,7 +1130,7 @@ export const WebVideoScraperView: React.FC = () => {
                   onClick={() => setWebScraperState({ viewLayout: 'videos' })}
                   className={`px-3 py-1 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer ${
                     viewLayout === 'videos'
-                      ? 'bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow'
+                      ? 'bg-gradient-to-r from-primary-violet-600 to-primary-end-600 text-white shadow'
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
@@ -1294,7 +1297,7 @@ export const WebVideoScraperView: React.FC = () => {
                   }}
                   className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm ${
                     activeTab === 'main'
-                      ? 'bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-violet-600/30 ring-1 ring-violet-400/40'
+                      ? 'bg-gradient-to-r from-primary-violet-600 to-primary-end-600 text-white shadow-violet-600/30 ring-1 ring-violet-400/40'
                       : 'bg-surface-elevated hover:bg-surface-hover text-slate-300 border border-border'
                   }`}
                 >
@@ -1594,12 +1597,19 @@ export const WebVideoScraperView: React.FC = () => {
                       className="w-full h-full relative"
                       onClick={e => e.stopPropagation()}
                     >
-                      <video
-                        src={getProxiedStreamUrl(item.stream_url || item.url, item.url)}
-                        controls
-                        autoPlay
-                        playsInline
-                        className="w-full h-full object-contain"
+                      <UniversalVideoPlayer
+                        density="compact"
+                        autoPlayOnActive
+                        posterUrl={item.thumbnail_url}
+                        source={{
+                          id: item.id,
+                          highlights: normalizePlayerHighlights(item),
+                          title: item.title,
+                          streamUrl: getProxiedStreamUrl(item.stream_url || item.url, item.url),
+                          sourceUrl: item.url,
+                          posterUrl: item.thumbnail_url,
+                        }}
+                        className="w-full h-full object-contain rounded-none border-0"
                       />
                     </div>
                   ) : (
@@ -1973,12 +1983,19 @@ export const WebVideoScraperView: React.FC = () => {
                           <div className="relative aspect-video bg-black overflow-hidden">
                             {isPlaying ? (
                               <div className="w-full h-full" onClick={e => e.stopPropagation()}>
-                                <video
-                                  src={getProxiedStreamUrl(vItem.stream_url || vItem.url, vItem.url)}
-                                  controls
-                                  autoPlay
-                                  playsInline
-                                  className="w-full h-full object-contain"
+                                <UniversalVideoPlayer
+                                  density="compact"
+                                  autoPlayOnActive
+                                  posterUrl={vItem.thumbnail_url}
+                                  source={{
+                                    id: vItem.id,
+                                    highlights: normalizePlayerHighlights(vItem),
+                                    title: vItem.title,
+                                    streamUrl: getProxiedStreamUrl(vItem.stream_url || vItem.url, vItem.url),
+                                    sourceUrl: vItem.url,
+                                    posterUrl: vItem.thumbnail_url,
+                                  }}
+                                  className="w-full h-full object-contain rounded-none border-0"
                                 />
                               </div>
                             ) : (
@@ -2242,7 +2259,7 @@ export const WebVideoScraperView: React.FC = () => {
         }
         subtitle={t.folderModalSubtitle}
         existingFolders={videoFolders.map(f => f.name)}
-        defaultFolder={targetFolder.trim() || settings.defaultVideoFolder || 'Extraídos'}
+        defaultFolder={targetFolder.trim() || settings.defaultVideoFolder || defaultFallbackFolder}
         type="video"
         onConfirm={(selectedFolder: string) => {
           setWebScraperState({ targetFolder: selectedFolder });

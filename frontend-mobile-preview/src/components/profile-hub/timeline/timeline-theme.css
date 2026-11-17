@@ -1,0 +1,149 @@
+/* ============================================================
+   Timeline & Profile Library Theme Tokens
+   Derives surface/text tokens from global app preset themes in
+   index.css (:root dark-slate, deep-oled, clean-light,
+   cyber-studio, hub-violet) and provides theme-matched accents.
+   ============================================================ */
+
+:root {
+  --tl-bg: var(--bg-main);
+  --tl-surface: var(--bg-surface);
+  --tl-surface-elevated: var(--bg-surface-elevated);
+  --tl-surface-hover: var(--bg-surface-hover);
+  --tl-surface-glass: rgba(17, 24, 39, 0.92);
+  --tl-hero-via: rgba(17, 24, 39, 0.65);
+  --tl-border: var(--border-color);
+  --tl-border-strong: #273549;
+  --tl-text-primary: var(--text-primary);
+  --tl-text-secondary: var(--text-secondary);
+  --tl-text-muted: #7c8ba1;
+  --tl-accent: #2563eb;
+  --tl-accent-hover: #3b82f6;
+  --tl-accent-contrast: #ffffff;
+  --tl-accent-text: #60a5fa;
+  --tl-accent-text-strong: #93c5fd;
+  --tl-accent-soft: rgba(59, 130, 246, 0.14);
+  --tl-accent-soft-hover: rgba(59, 130, 246, 0.24);
+  --tl-accent-border: rgba(59, 130, 246, 0.35);
+  --tl-accent-ring: rgba(59, 130, 246, 0.55);
+  --tl-accent-shadow: rgba(37, 99, 235, 0.28);
+  --tl-gradient-from: #3b82f6;
+  --tl-gradient-to: #1d4ed8;
+  --tl-scrim: rgba(0, 0, 0, 0.68);
+}
+
+.theme-deep-oled {
+  --tl-surface-glass: rgba(10, 10, 10, 0.92);
+  --tl-hero-via: rgba(10, 10, 10, 0.65);
+  --tl-border-strong: #262626;
+  --tl-text-muted: #8a8a96;
+}
+
+.theme-clean-light {
+  --tl-surface-glass: rgba(255, 255, 255, 0.92);
+  --tl-hero-via: rgba(255, 255, 255, 0.72);
+  --tl-border-strong: #cbd5e1;
+  --tl-text-muted: #64748b;
+  --tl-accent: #2563eb;
+  --tl-accent-hover: #1d4ed8;
+  --tl-accent-contrast: #ffffff;
+  --tl-accent-text: #2563eb;
+  --tl-accent-text-strong: #1d4ed8;
+  --tl-accent-soft: rgba(37, 99, 235, 0.1);
+  --tl-accent-soft-hover: rgba(37, 99, 235, 0.18);
+  --tl-accent-border: rgba(37, 99, 235, 0.32);
+  --tl-accent-ring: rgba(37, 99, 235, 0.45);
+  --tl-accent-shadow: rgba(37, 99, 235, 0.2);
+  --tl-gradient-from: #3b82f6;
+  --tl-gradient-to: #1d4ed8;
+  --tl-scrim: rgba(15, 23, 42, 0.48);
+}
+
+.theme-cyber-studio {
+  --tl-surface-glass: rgba(14, 11, 32, 0.92);
+  --tl-hero-via: rgba(14, 11, 32, 0.65);
+  --tl-border-strong: rgba(168, 85, 247, 0.38);
+  --tl-text-muted: #8b82ad;
+  --tl-accent: #9333ea;
+  --tl-accent-hover: #a855f7;
+  --tl-accent-contrast: #ffffff;
+  --tl-accent-text: #c084fc;
+  --tl-accent-text-strong: #e9d5ff;
+  --tl-accent-soft: rgba(168, 85, 247, 0.16);
+  --tl-accent-soft-hover: rgba(168, 85, 247, 0.26);
+  --tl-accent-border: rgba(168, 85, 247, 0.38);
+  --tl-accent-ring: rgba(168, 85, 247, 0.55);
+  --tl-accent-shadow: rgba(147, 51, 234, 0.3);
+  --tl-gradient-from: #a855f7;
+  --tl-gradient-to: #6366f1;
+}
+
+.theme-hub-violet {
+  --tl-surface-glass: rgba(25, 21, 31, 0.92);
+  --tl-hero-via: rgba(25, 21, 31, 0.65);
+  --tl-border-strong: #4d3a5d;
+  --tl-text-muted: var(--text-muted);
+  --tl-accent: #8d30e8;
+  --tl-accent-hover: #a04df3;
+  --tl-accent-contrast: #ffffff;
+  --tl-accent-text: #c58af1;
+  --tl-accent-text-strong: #e2c4fb;
+  --tl-accent-soft: rgba(141, 48, 232, 0.18);
+  --tl-accent-soft-hover: rgba(141, 48, 232, 0.28);
+  --tl-accent-border: rgba(197, 138, 241, 0.38);
+  --tl-accent-ring: rgba(141, 48, 232, 0.55);
+  --tl-accent-shadow: rgba(141, 48, 232, 0.3);
+  --tl-gradient-from: #8d30e8;
+  --tl-gradient-to: #6b21a8;
+}
+
+/* Prevent Profile Directory's --pd-bg (#0c0a13) from painting behind Timeline views
+   when sharing scroll-container selectors (.profile-hub-scroll). */
+.timeline-scroll-surface.profile-hub-scroll {
+  background: var(--tl-bg);
+  color: var(--tl-text-primary);
+}
+
+/* Theme-adaptive story active ring (overrides hardcoded purple keyframes in index.css) */
+@keyframes story-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 var(--tl-accent-ring);
+  }
+  50% {
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+
+/* Light-theme readability adjustments for status tones inside Timeline views */
+.theme-clean-light .tl-themed .text-emerald-200,
+.theme-clean-light .tl-themed .text-emerald-300,
+.theme-clean-light .tl-themed .text-emerald-400 {
+  color: #047857;
+}
+
+.theme-clean-light .tl-themed .text-rose-200,
+.theme-clean-light .tl-themed .text-rose-300,
+.theme-clean-light .tl-themed .text-rose-400 {
+  color: #be123c;
+}
+
+.theme-clean-light .tl-themed .text-red-300 {
+  color: #b91c1c;
+}
+
+.theme-clean-light .tl-themed .text-amber-200,
+.theme-clean-light .tl-themed .text-amber-300,
+.theme-clean-light .tl-themed .text-amber-400 {
+  color: #b45309;
+}
+
+.theme-clean-light .tl-themed .text-sky-200,
+.theme-clean-light .tl-themed .text-sky-300,
+.theme-clean-light .tl-themed .text-sky-400 {
+  color: #0369a1;
+}
+
+.theme-clean-light .tl-themed .text-blue-300,
+.theme-clean-light .tl-themed .text-blue-400 {
+  color: #1d4ed8;
+}

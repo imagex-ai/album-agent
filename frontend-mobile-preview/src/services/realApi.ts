@@ -25,6 +25,18 @@ import { Album, AlbumFolder, ExtractionJob, ImageItem, DomainPattern, VideoItem,
 import { colorPaletteCache } from './colorExtractor';
 import { cacheAlbumVideoTransport, getAlbumMediaSummary, getMediaCategory, inferMediaFormat, isVideoMedia, normalizeAlbumMediaTags, unwrapMediaSource } from '../utils/mediaClassification';
 
+const getIsEn = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  try {
+    const s = localStorage.getItem('imagex_settings');
+    if (s) {
+      const parsed = JSON.parse(s);
+      return parsed.language === 'en-US';
+    }
+  } catch {}
+  return false;
+};
+
 export class BackendApiClient {
   private inFlight = new Map<string, Promise<any>>();
   private jobsEtag: string | null = null;
@@ -744,13 +756,17 @@ export class BackendApiClient {
   /**
    * Fetches all videos and folders from data/videos/ on disk.
    */
-  async fetchVideos(healThumbnails: boolean = false): Promise<{ videos: VideoItem[]; folders: VideoFolder[] }> {
-    return this.coalesce(`videos:${healThumbnails}`, async () => {
+  async fetchVideos(healThumbnails: boolean = false, strict: boolean = false): Promise<{ videos: VideoItem[]; folders: VideoFolder[] }> {
+    return this.coalesce(`videos:${healThumbnails}:${strict}`, async () => {
       try {
         const url = healThumbnails ? '/api/videos?heal=true' : '/api/videos';
         const res = await fetch(url, { cache: 'no-store' });
-        if (!res.ok) return { videos: [], folders: [] };
+        if (!res.ok) {
+          if (strict) throw new Error(`Video library request failed (${res.status})`);
+          return { videos: [], folders: [] };
+        }
         const data = await res.json();
+        if (strict && (!Array.isArray(data.videos) || !Array.isArray(data.folders))) throw new Error('Invalid video library response');
         return {
           videos: (data.videos || []).map((v: any) => {
             const effFolder = (v.folder || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
@@ -790,9 +806,9 @@ export class BackendApiClient {
               fps: v.fps || 0,
               durationSeconds: v.duration_seconds || 0,
               introEnd: v.intro_end || 0,
-              highlightStart: v.highlight_start || 0,
-              highlightEnd: v.highlight_end || 0,
-              highlightScore: v.highlight_score || 0,
+              highlightStart: v.highlight_start ?? undefined,
+              highlightEnd: v.highlight_end ?? undefined,
+              highlightScore: v.highlight_score ?? undefined,
               highlights: v.highlights || [],
               streamStatus: v.stream_status,
               streamError: v.stream_error
@@ -807,6 +823,7 @@ export class BackendApiClient {
         };
       } catch (err) {
         console.warn('Backend API not available for videos:', err);
+        if (strict) throw err;
         return { videos: [], folders: [] };
       }
     });
@@ -1047,16 +1064,43 @@ export class BackendApiClient {
     }
   }
 
-  async toggleVideoFavorite(videoId: string): Promise<boolean> {
+  async toggleVideoFavorite(videoId: string, videoPayload?: any): Promise<boolean> {
     try {
-      const res = await fetch(`/api/videos/${videoId}/favorite`, {
-        method: 'POST'
+      const res = await fetch(`/api/videos/${encodeURIComponent(videoId)}/favorite`, {
+        method: 'POST',
+        headers: videoPayload ? { 'Content-Type': 'application/json' } : undefined,
+        body: videoPayload ? JSON.stringify(videoPayload) : undefined
       });
       if (!res.ok) return false;
       const data = await res.json();
       return !!data.is_favorite;
     } catch {
       return false;
+    }
+  }
+
+  async getProfileVideoFavorites(performer?: string): Promise<{ favorites: any[]; favorite_ids: string[] }> {
+    try {
+      const qs = performer ? `?performer=${encodeURIComponent(performer)}` : '';
+      const res = await fetch(`/api/profile-hub/video-favorites${qs}`);
+      if (!res.ok) return { favorites: [], favorite_ids: [] };
+      return await res.json();
+    } catch {
+      return { favorites: [], favorite_ids: [] };
+    }
+  }
+
+  async toggleProfileVideoFavorite(video: any): Promise<{ favorited: boolean; video: any; total: number }> {
+    try {
+      const res = await fetch('/api/profile-hub/video-favorites', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(video)
+      });
+      if (!res.ok) return { favorited: false, video: null, total: 0 };
+      return await res.json();
+    } catch {
+      return { favorited: false, video: null, total: 0 };
     }
   }
 
@@ -1126,11 +1170,11 @@ export class BackendApiClient {
       });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.detail || data.message || 'Erro ao enviar para Hugging Face');
+        throw new Error(data.detail || data.message || (getIsEn() ? 'Failed to upload to Hugging Face' : 'Erro ao enviar para Hugging Face'));
       }
       return data;
     } catch (err: any) {
-      return { success: false, message: err?.message || 'Falha na conexão com o servidor' };
+      return { success: false, message: err?.message || (getIsEn() ? 'Failed to connect to server' : 'Falha na conexão com o servidor') };
     }
   }
 
@@ -1141,11 +1185,11 @@ export class BackendApiClient {
       });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.detail || data.message || 'Erro ao sincronizar com Hugging Face');
+        throw new Error(data.detail || data.message || (getIsEn() ? 'Failed to sync with Hugging Face' : 'Erro ao sincronizar com Hugging Face'));
       }
       return data;
     } catch (err: any) {
-      return { success: false, message: err?.message || 'Falha na conexão com o servidor' };
+      return { success: false, message: err?.message || (getIsEn() ? 'Failed to connect to server' : 'Falha na conexão com o servidor') };
     }
   }
 
@@ -1272,9 +1316,26 @@ export class BackendApiClient {
       let orig = img.original_url || img.src || img.thumbnail_url;
       let thumb = img.thumbnail_url || img.src || img.original_url;
 
-      // Se a thumbnail for o pixel falso de lazy-load (ex: 1px.png), usa a imagem original
-      if (thumb && (thumb.includes('1px.png') || thumb.includes('1px.gif') || thumb.includes('blank.gif'))) {
-        thumb = orig || thumb;
+      const isPlaceholderThumb = (u?: string) => {
+        if (!u) return true;
+        const low = u.toLowerCase().trim();
+        if (low.startsWith('blob:')) return true;
+        return low.includes('1px.png') || low.includes('1px.gif') || low.includes('blank.gif') || low.includes('spacer.gif');
+      };
+
+      // Se a thumbnail for pixel falso de lazy-load ou blob:, recupera poster, original ou fallback
+      if (isPlaceholderThumb(thumb)) {
+        if (!isPlaceholderThumb(img.poster_url)) {
+          thumb = img.poster_url;
+        } else if (!isPlaceholderThumb(orig) && img.media_type !== 'video') {
+          thumb = orig;
+        } else {
+          const pageRef = (img as any).source_page || raw.source_page || (raw as any).url || '';
+          const ytMatch = pageRef.match(/(?:v=|\/embed\/|\/watch\?v=|youtu\.be\/|\/v\/)([a-zA-Z0-9_-]{11})/);
+          if (ytMatch) {
+            thumb = `https://i.ytimg.com/vi/${ytMatch[1]}/hqdefault.jpg`;
+          }
+        }
       }
 
       let w = img.width || 0;
@@ -1343,7 +1404,7 @@ export class BackendApiClient {
       const isAnimated = category === 'gif';
       const rawStream = img.video_stream_url || (transportIsVideo ? unwrapMediaSource(orig) : undefined);
       const videoUrl = rawStream ? getSafeVideoUrl(unwrapMediaSource(rawStream)) : undefined;
-      const posterUrl = img.poster_url ? getSafeUrl(img.poster_url) : (thumb && mediaType === 'video' ? getSafeUrl(thumb) : undefined);
+      const posterUrl = (!isPlaceholderThumb(img.poster_url)) ? getSafeUrl(img.poster_url) : (thumb && !isPlaceholderThumb(thumb) && mediaType === 'video' ? getSafeUrl(thumb) : undefined);
       const durationSecs = img.duration_seconds || undefined;
 
       const safeOrigUrl = mediaType === 'video' ? (videoUrl || orig) : getSafeUrl(orig);
@@ -1358,11 +1419,13 @@ export class BackendApiClient {
       if (img.title && !/^(vídeo|video|foto|photo|imagem|image|gif)\s*#?\d+$/i.test(img.title.trim())) {
         resolvedTitle = img.title.trim();
       } else {
-        const qualitySuffix = (w >= 3840 || h >= 2160) ? '4K UHD' :
-          (w >= 2560 || h >= 1440) ? '1440p' :
-          (w >= 1920 || h >= 1080) ? '1080p FHD' :
-          (w >= 1280 || h >= 720) ? '720p HD' :
-          (h >= 480) ? '480p' : '';
+        const shortSide = (w > 0 && h > 0) ? Math.min(w, h) : h;
+        const longSide = (w > 0 && h > 0) ? Math.max(w, h) : w;
+        const qualitySuffix = (longSide >= 3840 || shortSide >= 2160) ? '4K UHD' :
+          (longSide >= 2560 || shortSide >= 1440) ? '1440p' :
+          (longSide >= 1920 || shortSide >= 1080) ? '1080p FHD' :
+          (longSide >= 1280 || shortSide >= 720) ? '720p HD' :
+          (shortSide >= 480) ? '480p' : '';
 
         if (mediaType === 'video') {
           const partLabel = (raw.images && raw.images.length > 1) ? ` - #${idx + 1}` : '';
@@ -1430,7 +1493,8 @@ export class BackendApiClient {
 
     const isPlaceholder = (u?: string) => {
       if (!u) return true;
-      const lower = u.toLowerCase();
+      const lower = u.toLowerCase().trim();
+      if (lower.startsWith('blob:')) return true;
       return lower.includes('1px.png') || lower.includes('1px.gif') || lower.includes('blank.gif') || lower.includes('spacer.gif');
     };
 
@@ -1533,7 +1597,7 @@ export class BackendApiClient {
   /**
    * Scans a web page to extract all listed video cards across current and subsequent pagination pages.
    */
-  async scanPageForVideos(url: string, maxItems: number = 2000, maxPages?: number): Promise<ScanPageVideosResponse & { error?: string }> {
+  async scanPageForVideos(url: string, maxItems: number = 2000, maxPages?: number, abortSignal?: AbortSignal): Promise<ScanPageVideosResponse & { error?: string }> {
     try {
       const payload: any = { url, max_items: maxItems };
       if (typeof maxPages === 'number' && maxPages > 0) {
@@ -1542,12 +1606,14 @@ export class BackendApiClient {
       const res = await fetch('/api/video-scraper/scan-page', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: abortSignal
       });
       const data = await res.json();
       if (!res.ok) return { success: false, error: data.detail || 'Error scanning page', page_title: '', suggested_folder: '', total_found: 0, album_id: '', videos: [] };
       return data;
     } catch (err: any) {
+      if (err?.name === 'AbortError') throw err;
       return { success: false, error: err?.message || 'Failed to connect to server to scan page', page_title: '', suggested_folder: '', total_found: 0, album_id: '', videos: [] };
     }
   }
@@ -1591,7 +1657,7 @@ export class BackendApiClient {
 
       if (!response.ok || !response.body) {
         // Fallback to standard endpoint
-        return this.scanPageForVideos(url, maxItems, maxPages);
+        return this.scanPageForVideos(url, maxItems, maxPages, abortSignal);
       }
 
       const reader = response.body.getReader();
@@ -1656,13 +1722,13 @@ export class BackendApiClient {
           videos: accumulatedVideos
         };
       }
-      return this.scanPageForVideos(url, maxItems, maxPages);
+      return this.scanPageForVideos(url, maxItems, maxPages, abortSignal);
     } catch (err: any) {
       if (err.name === 'AbortError') {
         throw err;
       }
       console.warn('Stream encountered issue, falling back to standard scan:', err);
-      return this.scanPageForVideos(url, maxItems, maxPages);
+      return this.scanPageForVideos(url, maxItems, maxPages, abortSignal);
     }
   }
 
@@ -1756,11 +1822,11 @@ export class BackendApiClient {
       const res = await fetch('/api/settings/hf/sync', { method: 'POST' });
       const data = await res.json();
       if (!res.ok) {
-        return { success: false, message: data.detail || 'Erro na sincronização', error: data.detail };
+        return { success: false, message: data.detail || (getIsEn() ? 'Sync error' : 'Erro na sincronização'), error: data.detail };
       }
       return data;
     } catch (err: any) {
-      return { success: false, message: err.message || 'Erro de conexão', error: err.message };
+      return { success: false, message: err.message || (getIsEn() ? 'Connection error' : 'Erro de conexão'), error: err.message };
     }
   }
 
@@ -1768,7 +1834,8 @@ export class BackendApiClient {
    * Pré-visualiza as imagens de um álbum específico no Multi-Album antes do salvamento/download.
    */
   async previewMultiAlbum(
-    album: { title: string; url: string; thumbnail_url?: string | null; source_type?: string }
+    album: { title: string; url: string; thumbnail_url?: string | null; source_type?: string },
+    abortSignal?: AbortSignal
   ): Promise<{
     success: boolean;
     title: string;
@@ -1782,6 +1849,7 @@ export class BackendApiClient {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(album),
+        signal: abortSignal,
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -1805,13 +1873,20 @@ export class BackendApiClient {
         width: img.width || 0,
         height: img.height || 0,
         file_size_bytes: img.file_size_bytes || 0,
+        file_size: img.file_size ?? img.file_size_bytes ?? 0,
+        format: (img.format || '').toLowerCase(),
+        source_media_type: ['image', 'video', 'gif'].includes(img.media_type) ? img.media_type : undefined,
+        is_animated: img.is_animated === true,
+        animation_checked: img.animation_checked,
+        video_stream_url: img.video_stream_url,
+        title: img.title || album.title,
         media_type: getMediaCategory({
           mediaType: img.media_type,
           isAnimated: !!img.is_animated,
           animationChecked: !!img.animation_checked,
           rawOriginalUrl: img.original_url,
           format: (img.format || '').toLowerCase() as ImageItem['format']
-        }) === 'gif' ? 'gif' : 'photo',
+        }) === 'gif' ? 'gif' : img.media_type === 'video' ? 'video' : 'image',
         filename: img.filename || `image_${idx + 1}.jpg`,
       }));
       return {
@@ -1822,6 +1897,7 @@ export class BackendApiClient {
         images: mappedImages,
       };
     } catch (err: any) {
+      if (err?.name === 'AbortError') throw err;
       return {
         success: false,
         title: album.title,

@@ -316,6 +316,7 @@ export const SettingsView: React.FC = () => {
   };
 
   const themes: { id: ThemeMode; label: string; desc: string }[] = [
+    { id: 'hub-violet', label: t.hubVioletTheme, desc: t.hubVioletThemeDescription },
     { id: 'dark-slate', label: 'Dark Slate Studio', desc: isEn ? 'Sophisticated dark studio with high contrast' : 'Padrão escuro sofisticado com alto contraste' },
     { id: 'deep-oled', label: 'Deep OLED Black', desc: isEn ? 'Pure black for OLED screens and energy savings' : 'Preto puro para telas OLED e economia de energia' },
     { id: 'clean-light', label: 'Clean Light', desc: isEn ? 'Clean light theme for daylight studio' : 'Tema claro de alta legibilidade para estúdio diurno' },
@@ -350,19 +351,19 @@ export const SettingsView: React.FC = () => {
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="font-extrabold text-sm text-slate-100">
-                  {updaterT.systemSectionTitle || 'Atualizações do Sistema'}
+                  {updaterT.systemSectionTitle || (isEn ? 'System Updates' : 'Atualizações do Sistema')}
                 </h3>
                 <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-brand-500/20 text-brand-300 border border-brand-500/30">
                   v5.5
                 </span>
                 {updateInfo?.update_available && (
                   <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse">
-                    {updaterT.newVersionBadge || 'NOVA VERSÃO'}
+                    {updaterT.newVersionBadge || (isEn ? 'NEW VERSION' : 'NOVA VERSÃO')}
                   </span>
                 )}
               </div>
               <p className="text-[11px] text-slate-400 mt-0.5">
-                {updaterT.systemSectionDesc || 'Detecção e instalação autônoma de novas versões diretamente do GitHub.'}
+                {updaterT.systemSectionDesc || (isEn ? 'Autonomous detection and installation of new releases directly from GitHub.' : 'Detecção e instalação autônoma de novas versões diretamente do GitHub.')}
               </p>
             </div>
           </div>
@@ -1202,6 +1203,8 @@ export const SettingsView: React.FC = () => {
             {themes.map(thm => (
               <button
                 key={thm.id}
+                type="button"
+                aria-pressed={settings.theme === thm.id}
                 onClick={() => updateSettings({ theme: thm.id })}
                 className={`p-4 rounded-2xl border text-left transition-all ${
                   settings.theme === thm.id
@@ -1263,7 +1266,7 @@ export const SettingsView: React.FC = () => {
         <div className="space-y-4">
           <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
             <Gauge size={13} className="text-purple-400" />
-            <span>Controles Globais de Ritmo & Movimento</span>
+            <span>{isEn ? 'Global Rhythm & Motion Controls' : 'Controles Globais de Ritmo & Movimento'}</span>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
@@ -1277,7 +1280,7 @@ export const SettingsView: React.FC = () => {
               </label>
               <div className="grid grid-cols-2 gap-2">
                 {[
-                  { id: 'ultra-fast', label: t.animSpeedUltraFast, desc: '180ms • Foco em Agilidade' },
+                  { id: 'ultra-fast', label: t.animSpeedUltraFast, desc: isEn ? '180ms • Focus on Agility' : '180ms • Foco em Agilidade' },
                   { id: 'fast', label: t.animSpeedFast, desc: isEn ? '250ms • Agile Response' : '250ms • Resposta Ágil' },
                   { id: 'normal', label: t.animSpeedNormal, desc: isEn ? '350ms • Balanced Standard' : '350ms • Padrão Equilibrado' },
                   { id: 'slow', label: t.animSpeedSlow, desc: isEn ? '500ms • Cinematic' : '500ms • Cinematográfico' }
@@ -1312,7 +1315,7 @@ export const SettingsView: React.FC = () => {
                   <span>{t.animDistanceLabel}</span>
                 </span>
                 <span className="text-indigo-300 font-mono text-[11px] font-bold">
-                  {getDistanceLabel(settings.animationDistance || 'normal')}
+                  {getDistanceLabel(settings.animationDistance || 'normal', isEn)}
                 </span>
               </label>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
@@ -1795,7 +1798,7 @@ export const SettingsView: React.FC = () => {
                 {isEn ? 'Speed:' : 'Velocidade:'} {getSpeedMs(settings.animationSpeed || 'normal')}ms
               </span>
               <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 border border-indigo-500/30 text-indigo-300">
-                {isEn ? 'Distance:' : 'Amplitude:'} {getDistanceLabel(settings.animationDistance || 'normal')}
+                {isEn ? 'Distance:' : 'Amplitude:'} {getDistanceLabel(settings.animationDistance || 'normal', isEn)}
               </span>
               {settings.disableAllAnimations && (
                 <span className="px-2 py-0.5 rounded-full bg-rose-500/20 border border-rose-500/30 text-rose-300 font-bold">

@@ -1,3 +1,4 @@
+import { useProfileHubStore } from './useProfileHubStore';
 const getIsEn = () => {
   if (typeof window !== 'undefined') {
     try {
@@ -38,13 +39,6 @@ import {
   MultiAlbumCustomSelection,
   GlobalSliderConfig
 } from '../types';
-import {
-  INITIAL_ALBUMS,
-  INITIAL_JOBS,
-  INITIAL_LOGS,
-  INITIAL_PATTERNS,
-  INITIAL_SET_OF_MARKS
-} from '../services/mockData';
 import { soundEffects } from '../services/soundEffects';
 import { ambientAudio } from '../services/ambientAudio';
 import { backendApi, UpdateCheckResponse, UpdateStatusResponse } from '../services/realApi';
@@ -150,6 +144,7 @@ interface AppState {
   slideshowOpen: boolean;
   slideshowInitialIndex: number;
   slideshowMode: 'album' | 'global';
+  slideshowTransientAlbum: Album | null;
   globalSliderConfig: GlobalSliderConfig;
   contactSheetOpen: boolean;
   coPilotOpen: boolean;
@@ -195,6 +190,7 @@ interface AppState {
 
   // Video Actions
   isRenewingVideoStreams: boolean;
+  videoRenewProgress: { current: number; total: number; succeeded: number; failed: number } | null;
   renewVideoStreams: (videoIds?: string[], folder?: string) => Promise<{ succeeded: number; failed: number }>;
   syncVideos: (healThumbnails?: boolean) => Promise<void>;
   uploadVideo: (file: File, folder?: string, fileIndex?: number, totalFiles?: number) => Promise<boolean>;
@@ -300,7 +296,7 @@ interface AppState {
   openLightbox: (image: ImageItem, album?: Album, originRect?: { x: number; y: number; width: number; height: number } | null) => void;
   closeLightbox: () => void;
   setLightboxFullscreen: (fullscreen: boolean) => void;
-  setSlideshowOpen: (open: boolean, initialIndex?: number, mode?: 'album' | 'global') => void;
+  setSlideshowOpen: (open: boolean, initialIndex?: number, mode?: 'album' | 'global', transientAlbum?: Album | null) => void;
   setGlobalSliderConfig: (partial: Partial<GlobalSliderConfig>) => void;
   setContactSheetOpen: (open: boolean) => void;
   setCoPilotOpen: (open: boolean) => void;
@@ -841,6 +837,7 @@ export const useAppStore = create<AppState>((set, get) => {
     slideshowOpen: false,
     slideshowInitialIndex: 0,
     slideshowMode: 'album',
+    slideshowTransientAlbum: null,
     globalSliderConfig: {
       scope: 'all_app',
       mediaFilter: 'all',
@@ -887,6 +884,7 @@ export const useAppStore = create<AppState>((set, get) => {
     videoSearchQuery: '',
     videoFilterFavoritesOnly: false,
     isRenewingVideoStreams: false,
+    videoRenewProgress: null,
     activePlayingVideo: null,
     activeFolderModal: null,
     selectedVideoIds: [],
@@ -908,9 +906,13 @@ export const useAppStore = create<AppState>((set, get) => {
       {
         id: 'msg-1',
         sender: 'agent',
-        text: 'Olá! Sou o **Agente Co-Pilot IMAGEX.AI** com suporte a **Google Gemini Cloud** e **Ollama Local**. Posso executar ações na sua galeria, tirar dúvidas técnicas, sugerir filtros e acompanhar suas extrações.',
+        text: getIsEn()
+          ? 'Hello! I am the **IMAGEX Co-Pilot Agent** with **Google Gemini Cloud** and **Local Ollama** support. I can execute actions in your gallery, answer questions, suggest filters, and track your extractions.'
+          : 'Olá! Sou o **Agente Co-Pilot IMAGEX** com suporte a **Google Gemini Cloud** e **Ollama Local**. Posso executar ações na sua galeria, tirar dúvidas técnicas, sugerir filtros e acompanhar suas extrações.',
         timestamp: '12:00',
-        reasoning: 'Co-Pilot conversacional pronto com suporte dual-engine.'
+        reasoning: getIsEn()
+          ? 'Conversational Co-Pilot ready with dual-engine support.'
+          : 'Co-Pilot conversacional pronto com suporte dual-engine.'
       }
     ],
 
@@ -1035,7 +1037,9 @@ export const useAppStore = create<AppState>((set, get) => {
                     get().addLog({
                       level: isPass ? 'ai' : 'warning',
                       category: isPass ? 'Original_RESOLVED' : 'INSPECTING',
-                      message: `Foto #${pos} ${isPass ? 'validada em alta resolução' : 'sendo analisada'} (${dims})`
+                      message: getIsEn()
+                        ? `Photo #${pos} ${isPass ? 'validated in high resolution' : 'being analyzed'} (${dims})`
+                        : `Foto #${pos} ${isPass ? 'validada em alta resolução' : 'sendo analisada'} (${dims})`
                     });
 
                     // Only update setOfMarks if this job is the currently active one being inspected
@@ -1044,7 +1048,9 @@ export const useAppStore = create<AppState>((set, get) => {
                         id: pos,
                         thumbnailUrl: safeThumb,
                         resolvedOriginalUrl: rawOrig,
-                        label: isPass ? `Foto #${pos} (${dims})` : (isNoise ? `Banner Rejeitado #${pos}` : `Candidato #${pos}`),
+                        label: isPass
+                          ? `${getIsEn() ? 'Photo' : 'Foto'} #${pos} (${dims})`
+                          : (isNoise ? `${getIsEn() ? 'Rejected Banner' : 'Banner Rejeitado'} #${pos}` : `${getIsEn() ? 'Candidate' : 'Candidato'} #${pos}`),
                         type: isPass ? 'album_item' : (isNoise ? 'banner_noise' : 'unresolved'),
                         confidence: 0.98,
                         box: { top: 0, left: 0, width: 200, height: 200 }
@@ -1756,9 +1762,9 @@ export const useAppStore = create<AppState>((set, get) => {
         const errorMsg: ChatMessage = {
           id: `msg-a-${Date.now()}`,
           sender: 'agent',
-          text: `Erro ao comunicar com a IA: ${err?.message || err}`,
+          text: isPt ? `Erro ao comunicar com a IA: ${err?.message || err}` : `Error communicating with AI: ${err?.message || err}`,
           timestamp: new Date().toLocaleTimeString().slice(0, 5),
-          reasoning: 'Exceção de rede',
+          reasoning: isPt ? 'Exceção de rede' : 'Network exception',
           provider: activeProvider,
           model: activeModel,
           errorType: 'network_exception',
@@ -1779,16 +1785,21 @@ export const useAppStore = create<AppState>((set, get) => {
       const isPt = settings.language === 'pt-BR';
       if (viewId === 'home') tabTitle = isPt ? 'Início' : 'Home';
       else if (viewId === 'extractor') tabTitle = isPt ? 'Extrator de Mídia' : 'Media Extractor';
+      else if (viewId === 'profile-hub') tabTitle = isPt ? 'Hub de Perfil' : 'Profile Hub';
       else if (viewId === 'multi-album') tabTitle = isPt ? 'Extrator de Multi-album' : 'Multi-Album Extractor';
       else if (viewId === 'web-video-scraper') tabTitle = isPt ? 'Extrator de Vídeos Web' : 'Web Video Extractor';
       else if (viewId === 'gallery') tabTitle = isPt ? 'Galeria de Álbuns' : 'Album Library';
       else if (viewId === 'videos') tabTitle = isPt ? 'Galeria de Vídeos' : 'Video Gallery';
-      else if (viewId === 'shorts') tabTitle = isPt ? 'Shorts & Reels' : 'Shorts & Reels';
+      else if (viewId === 'shorts') tabTitle = 'Shorts';
       else if (viewId === 'live-monitor') tabTitle = isPt ? 'Monitor da IA' : 'AI Live Monitor';
-      else if (viewId === 'job-history') tabTitle = isPt ? 'Gestão de Tarefas' : 'Task Management';
+      else if (viewId === 'job-history') tabTitle = 'Jobs';
       else if (viewId === 'duplicates') tabTitle = isPt ? 'Detector de Duplicatas' : 'Duplicates Finder';
       else if (viewId === 'trash') tabTitle = isPt ? 'Lixeira' : 'Trash';
       else if (viewId === 'batch-queue') tabTitle = isPt ? 'Processador em Lote' : 'Batch Processor';
+      else if (viewId === 'timeline-history') tabTitle = isPt ? 'Histórico' : 'History';
+      else if (viewId === 'timeline-playlists') tabTitle = 'Playlists';
+      else if (viewId === 'timeline-favorites') tabTitle = isPt ? 'Favoritos' : 'Favorites';
+      else if (viewId === 'timeline-liked') tabTitle = isPt ? 'Curtidos' : 'Liked';
       else if (viewId === 'album-detail' && albumId) {
         const album = get().albums.find(a => a.id === albumId);
         tabTitle = album
@@ -2376,10 +2387,12 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     retryJob: async (job: ExtractionJob) => {
+      const { settings, activeAiEngine } = get();
+      const isEn = settings?.language === 'en-US';
       const isVideoSave = (job.mode as string) === 'video_save' || (job.mode as string) === 'video_downloader';
       const stageMsg = isVideoSave
-        ? (getIsEn() ? 'Connecting & resolving Full HD stream...' : 'Conectando e resolvendo stream Full HD...')
-        : (getIsEn() ? 'Re-running extraction in background...' : 'Re-executando extração em segundo plano...');
+        ? (isEn ? 'Connecting & resolving Full HD stream...' : 'Conectando e resolvendo stream Full HD...')
+        : (isEn ? 'Re-running extraction in background...' : 'Re-executando extração em segundo plano...');
       const nowIso = new Date().toISOString();
       const shouldResetStale99 = job.progressPercent >= 99;
 
@@ -2431,8 +2444,8 @@ export const useAppStore = create<AppState>((set, get) => {
             get().syncJobs();
           }, 400);
           get().addNotification({
-            title: getIsEn() ? 'Re-execution Started' : 'Re-execução Iniciada',
-            message: getIsEn()
+            title: isEn ? 'Re-execution Started' : 'Re-execução Iniciada',
+            message: isEn
               ? `Task "${job.title || job.url}" restarted in background.`
               : `A tarefa "${job.title || job.url}" foi reiniciada em segundo plano.`,
             type: 'info'
@@ -2448,11 +2461,10 @@ export const useAppStore = create<AppState>((set, get) => {
         return await get().saveExtractedVideoToGallery(
           job.url,
           cleanTitle,
-          job.folder || 'Extraídos'
+          job.folder || (isEn ? 'Extracted' : 'Extraídos')
         );
       }
 
-      const { settings, activeAiEngine } = get();
       try {
         const isVid = (job.mode as string) === 'video_save' || (job.mode as string) === 'video_downloader';
         const res = await backendApi.startExtraction(
@@ -2464,7 +2476,7 @@ export const useAppStore = create<AppState>((set, get) => {
           settings.maxConcurrency || 3,
           settings.antiBotDelayMs || 500,
           isVid ? 'videos' : 'all',
-          job.folder || 'Geral'
+          job.folder || (isEn ? 'General' : 'Geral')
         );
 
         if (res && res.session_id) {
@@ -2482,7 +2494,7 @@ export const useAppStore = create<AppState>((set, get) => {
             mode: (job.mode as any) || 'ai_react',
             aiModel: job.aiModel || `${settings.geminiModel || 'gemini-3.7-flash'} + ${settings.aiModel}`,
             progressPercent: 5,
-            currentStage: getIsEn() ? 'Starting extraction in background...' : 'Iniciando extração em segundo plano...',
+            currentStage: isEn ? 'Starting extraction in background...' : 'Iniciando extração em segundo plano...',
             discoveredImagesCount: 0,
             resolvedOriginalCount: 0,
             failedCount: 0,
@@ -2490,15 +2502,15 @@ export const useAppStore = create<AppState>((set, get) => {
             durationSeconds: 0,
             throughputMbps: 0,
             fps: 60,
-            folder: job.folder || 'Geral'
+            folder: job.folder || (isEn ? 'General' : 'Geral')
           };
 
           get().addJob(newJob);
           get().subscribeToJob(res.session_id, job.url);
           triggerJobsPollingLoop();
           get().addNotification({
-            title: get().settings?.language === 'en-US' ? 'Re-execution Started' : 'Re-execução Iniciada',
-            message: get().settings?.language === 'en-US' ? `Extraction for "${job.title || job.url}" restarted in background.` : `Extração para "${job.title || job.url}" reiniciada automaticamente em segundo plano.`,
+            title: isEn ? 'Re-execution Started' : 'Re-execução Iniciada',
+            message: isEn ? `Extraction for "${job.title || job.url}" restarted in background.` : `Extração para "${job.title || job.url}" reiniciada automaticamente em segundo plano.`,
             type: 'info'
           });
           return true;
@@ -2507,8 +2519,8 @@ export const useAppStore = create<AppState>((set, get) => {
       } catch (err: any) {
         console.error('Failed to retry extraction job:', err);
         get().addNotification({
-          title: 'Falha ao Re-executar',
-          message: err?.message || (get().settings?.language === 'en-US' ? 'Server connection error while restarting task.' : 'Erro de conexão com o servidor ao re-executar tarefa.'),
+          title: isEn ? 'Failed to Re-execute' : 'Falha ao Re-executar',
+          message: err?.message || (isEn ? 'Server connection error while restarting task.' : 'Erro de conexão com o servidor ao re-executar tarefa.'),
           type: 'error'
         });
         return false;
@@ -2892,12 +2904,13 @@ export const useAppStore = create<AppState>((set, get) => {
       });
     },
 
-    setSlideshowOpen: (open, initialIndex = 0, mode = 'album') => {
+    setSlideshowOpen: (open, initialIndex = 0, mode = 'album', transientAlbum = null) => {
       if (!open) exitAllFullscreen();
       set(state => ({
         slideshowOpen: open,
         slideshowInitialIndex: Math.max(0, initialIndex),
         slideshowMode: mode,
+        slideshowTransientAlbum: open ? transientAlbum : null,
         globalSliderConfig: {
           ...state.globalSliderConfig,
           scope: mode === 'global' ? 'all_app' : 'current_album',
@@ -2978,7 +2991,15 @@ export const useAppStore = create<AppState>((set, get) => {
     syncVideos: async (healThumbnails: boolean = false) => {
       try {
         const { videos, folders } = await backendApi.fetchVideos(healThumbnails);
-        set({ videos, videoFolders: folders });
+        if (videos && videos.length > 0) {
+          set({ videos, videoFolders: folders });
+        } else {
+          // Guard: Preserve existing library if server returned empty (e.g. during restart or network hiccup)
+          const currentVideos = get().videos;
+          if (!currentVideos || currentVideos.length === 0) {
+            set({ videos: [], videoFolders: folders });
+          }
+        }
       } catch (err) {
         console.warn('Failed to sync videos:', err);
       }
@@ -2990,50 +3011,104 @@ export const useAppStore = create<AppState>((set, get) => {
       const lang = state.settings?.language || 'pt-BR';
       const isEn = lang === 'en-US';
       const tVid = translations[lang]?.videos || translations['en-US'].videos;
-      set({ isRenewingVideoStreams: true });
+
+      // Determine target IDs to renew
+      let targetIds: string[] = [];
+      if (videoIds && videoIds.length > 0) {
+        targetIds = videoIds;
+      } else {
+        targetIds = (get().videos || [])
+          .filter(v => (!folder || v.folder === folder) && (v.storageLocation === 'stream_url' || v.sourceOrigin === 'web' || Boolean(v.cloudUrl)))
+          .map(v => v.id);
+      }
+
+      if (targetIds.length === 0) {
+        return { succeeded: 0, failed: 0 };
+      }
+
+      set({
+        isRenewingVideoStreams: true,
+        videoRenewProgress: { current: 0, total: targetIds.length, succeeded: 0, failed: 0 }
+      });
+
       get().addNotification({
         title: tVid.renewStartedTitle || (isEn ? 'Renewing Video Streams' : 'Renovando Streams'),
-        message: tVid.renewStartedMsg || (isEn
-          ? 'Starting renewal of video stream links in background...'
-          : 'Iniciando renovação dos links de stream em segundo plano...'),
+        message: (tVid.renewStartedMsg || (isEn
+          ? 'Starting renewal of {count} video stream links in background...'
+          : 'Iniciando renovação de {count} links de stream em segundo plano...'))
+          .replace('{count}', String(targetIds.length)),
         type: 'info'
       });
+
+      let totalRefreshed = 0;
+      let totalFailed = 0;
+      let totalDeletedOnSource = 0;
+
+      // Process in small controlled batches (4 per batch)
+      // to provide immediate, progressive UI loading updates and prevent proxy/HTTP timeouts.
+      const CHUNK_SIZE = 4;
       try {
-        const res = await backendApi.renewVideoStreams(videoIds, folder);
+        for (let i = 0; i < targetIds.length; i += CHUNK_SIZE) {
+          const chunk = targetIds.slice(i, i + CHUNK_SIZE);
+          try {
+            const res = await backendApi.renewVideoStreams(chunk, folder);
+            totalRefreshed += (res.refreshed || 0);
+            totalFailed += (res.failed || 0);
+            if (res.deletedOnSource) {
+              totalDeletedOnSource += res.deletedOnSource;
+            }
+          } catch (chunkErr) {
+            console.error('Error renewing chunk of video streams:', chunkErr);
+            totalFailed += chunk.length;
+          }
+
+          const currentDone = Math.min(i + chunk.length, targetIds.length);
+          set({
+            videoRenewProgress: {
+              current: currentDone,
+              total: targetIds.length,
+              succeeded: totalRefreshed,
+              failed: totalFailed
+            }
+          });
+        }
+
+        // Resync videos in library with the fresh URLs and updated stream statuses
         await get().syncVideos();
-        if (res.refreshed > 0) {
+
+        if (totalRefreshed > 0) {
           const successMsg = (tVid.renewSuccess || (isEn
             ? '{count} video streams renewed successfully!'
             : '{count} streams de vídeo renovados com sucesso!'))
-            .replace('{count}', String(res.refreshed));
+            .replace('{count}', String(totalRefreshed));
           const warningMsg = (tVid.renewWarning || (isEn
             ? '{succeeded} of {total} streams renewed ({failed} failed).'
             : '{succeeded} de {total} streams renovados ({failed} falharam).'))
-            .replace('{succeeded}', String(res.refreshed))
-            .replace('{total}', String(res.refreshed + res.failed))
-            .replace('{failed}', String(res.failed));
+            .replace('{succeeded}', String(totalRefreshed))
+            .replace('{total}', String(targetIds.length))
+            .replace('{failed}', String(totalFailed));
 
           get().addNotification({
             title: tVid.renewCompletedTitle || (isEn ? 'Streams Renewal Completed' : 'Renovação Concluída'),
-            message: res.failed > 0 ? warningMsg : successMsg,
-            type: res.failed > 0 ? 'warning' : 'success'
+            message: totalFailed > 0 ? warningMsg : successMsg,
+            type: totalFailed > 0 ? 'warning' : 'success'
           });
-          if (res.deletedOnSource && res.deletedOnSource > 0) {
+          if (totalDeletedOnSource > 0) {
             get().addNotification({
               title: isEn ? 'Removed on Source Website' : 'Removido no Site de Origem',
               message: isEn
-                ? `${res.deletedOnSource} video(s) are no longer available on the source website (link expired or removed) and marked with a warning badge.`
-                : `${res.deletedOnSource} vídeo(s) não estão mais disponíveis no site de origem (link expirado ou removido) e marcados com selo de aviso.`,
+                ? `${totalDeletedOnSource} video(s) are no longer available on the source website (link expired or removed) and marked with a warning badge.`
+                : `${totalDeletedOnSource} vídeo(s) não estão mais disponíveis no site de origem (link expirado ou removido) e marcados com selo de aviso.`,
               type: 'warning'
             });
           }
         } else {
-          if (res.deletedOnSource && res.deletedOnSource > 0) {
+          if (totalDeletedOnSource > 0) {
             get().addNotification({
               title: isEn ? 'Removed on Source Website' : 'Removido no Site de Origem',
               message: isEn
-                ? `All ${res.deletedOnSource} selected video(s) are no longer available on the source website (link expired or removed).`
-                : `Todos os ${res.deletedOnSource} vídeo(s) selecionados não estão mais disponíveis no site de origem (link expirado ou removido).`,
+                ? `All ${totalDeletedOnSource} selected video(s) are no longer available on the source website (link expired or removed).`
+                : `Todos os ${totalDeletedOnSource} vídeo(s) selecionados não estão mais disponíveis no site de origem (link expirado ou removido).`,
               type: 'warning'
             });
           } else {
@@ -3046,12 +3121,15 @@ export const useAppStore = create<AppState>((set, get) => {
             });
           }
         }
-        return { succeeded: res.refreshed, failed: res.failed };
+        return { succeeded: totalRefreshed, failed: totalFailed };
       } catch (err) {
         console.error('Error renewing video streams:', err);
-        return { succeeded: 0, failed: videoIds?.length || 1 };
+        return { succeeded: totalRefreshed, failed: totalFailed || targetIds.length };
       } finally {
-        set({ isRenewingVideoStreams: false });
+        set({
+          isRenewingVideoStreams: false,
+          videoRenewProgress: null
+        });
       }
     },
 
@@ -3144,17 +3222,19 @@ export const useAppStore = create<AppState>((set, get) => {
       return false;
     },
 
-    addVideoByUrl: async (url: string, folder: string = 'Geral', title?: string, streamOnly: boolean = false) => {
+    addVideoByUrl: async (url: string, folder?: string, title?: string, streamOnly: boolean = false) => {
       const { settings } = get();
       soundEffects.click(settings.soundEnabled);
-      const res = await backendApi.addVideoUrl(url, folder, title, streamOnly);
+      const isEn = settings?.language === 'en-US';
+      const targetFolder = (folder || (isEn ? 'General' : 'Geral')).trim() || (isEn ? 'General' : 'Geral');
+      const res = await backendApi.addVideoUrl(url, targetFolder, title, streamOnly);
       if (res) {
         await get().syncVideos();
         get().addNotification({
-          title: get().settings?.language === 'en-US' ? (streamOnly ? 'Remote Stream Added' : 'Video Downloaded') : (streamOnly ? 'Stream Remoto Adicionado' : 'Vídeo Baixado'),
-          message: streamOnly
-            ? `Vídeo remoto "${res.title}" adicionado para reprodução sem ocupar espaço local.`
-            : `Vídeo "${res.title}" salvo na pasta ${res.folder}.`,
+          title: isEn ? (streamOnly ? 'Remote Stream Added' : 'Video Downloaded') : (streamOnly ? 'Stream Remoto Adicionado' : 'Vídeo Baixado'),
+          message: isEn
+            ? (streamOnly ? `Remote video "${res.title}" added to gallery without using disk space.` : `Video "${res.title}" saved to folder ${res.folder}.`)
+            : (streamOnly ? `Vídeo remoto "${res.title}" adicionado para reprodução sem ocupar espaço local.` : `Vídeo "${res.title}" salvo na pasta ${res.folder}.`),
           type: 'success'
         });
         return true;
@@ -3165,7 +3245,8 @@ export const useAppStore = create<AppState>((set, get) => {
     uploadPhotoAlbum: async (title: string, files: File[], folder?: string) => {
       const { settings } = get();
       soundEffects.click(settings.soundEnabled);
-      const targetFolder = (folder || 'Geral').trim() || 'Geral';
+      const isEn = settings?.language === 'en-US';
+      const targetFolder = (folder || (isEn ? 'General' : 'Geral')).trim() || (isEn ? 'General' : 'Geral');
       const res = await backendApi.uploadPhotoAlbum(title, files, targetFolder);
       if (res && res.success) {
         await get().syncAlbums();
@@ -3174,7 +3255,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const tStore = translations[curLang]?.store || translations['pt-BR']?.store;
         get().addNotification({
           title: tStore?.albumCreatedTitle || (curLang === 'en-US' ? 'Album Created!' : 'Álbum Criado!'),
-          message: (tStore?.albumCreatedMsg || 'O álbum "{title}" com {count} fotos foi adicionado na pasta "{folder}".')
+          message: (tStore?.albumCreatedMsg || (curLang === 'en-US' ? 'Album "{title}" with {count} photos added to folder "{folder}".' : 'O álbum "{title}" com {count} fotos foi adicionado na pasta "{folder}".'))
             .replace('{title}', title)
             .replace('{count}', String(files.length))
             .replace('{folder}', targetFolder),
@@ -3184,7 +3265,7 @@ export const useAppStore = create<AppState>((set, get) => {
       } else {
         get().addNotification({
           title: get().settings?.language === 'en-US' ? 'Error Creating Album' : 'Erro ao Criar Álbum',
-          message: res?.error || 'Falha no envio das imagens.',
+          message: res?.error || (get().settings?.language === 'en-US' ? 'Failed to upload images.' : 'Falha no envio das imagens.'),
           type: 'error'
         });
         return false;
@@ -3194,12 +3275,13 @@ export const useAppStore = create<AppState>((set, get) => {
     createVideoFolder: async (name: string) => {
       const { settings } = get();
       soundEffects.click(settings.soundEnabled);
+      const isEn = settings?.language === 'en-US';
       const ok = await backendApi.createVideoFolder(name);
       if (ok) {
         await get().syncVideos();
         get().addNotification({
-          title: 'Pasta Criada',
-          message: `A pasta "${name}" foi criada com sucesso no armazenamento.`,
+          title: isEn ? 'Folder Created' : 'Pasta Criada',
+          message: isEn ? `Folder "${name}" created successfully in storage.` : `A pasta "${name}" foi criada com sucesso no armazenamento.`,
           type: 'success'
         });
         return true;
@@ -3210,6 +3292,7 @@ export const useAppStore = create<AppState>((set, get) => {
     renameVideoFolder: async (oldName: string, newName: string) => {
       const { settings } = get();
       soundEffects.click(settings.soundEnabled);
+      const isEn = settings?.language === 'en-US';
       const ok = await backendApi.renameVideoFolder(oldName, newName);
       if (ok) {
         await get().syncVideos();
@@ -3217,8 +3300,8 @@ export const useAppStore = create<AppState>((set, get) => {
           set({ activeVideoFolder: newName });
         }
         get().addNotification({
-          title: 'Pasta Renomeada',
-          message: `Pasta renomeada de "${oldName}" para "${newName}".`,
+          title: isEn ? 'Folder Renamed' : 'Pasta Renomeada',
+          message: isEn ? `Folder renamed from "${oldName}" to "${newName}".` : `Pasta renomeada de "${oldName}" para "${newName}".`,
           type: 'success'
         });
         return true;
@@ -3229,6 +3312,7 @@ export const useAppStore = create<AppState>((set, get) => {
     deleteVideoFolder: async (folderName: string) => {
       const { settings } = get();
       soundEffects.click(settings.soundEnabled);
+      const isEn = settings?.language === 'en-US';
       const ok = await backendApi.deleteVideoFolder(folderName);
       if (ok) {
         if (get().activeVideoFolder === folderName) {
@@ -3236,8 +3320,8 @@ export const useAppStore = create<AppState>((set, get) => {
         }
         await get().syncVideos();
         get().addNotification({
-          title: get().settings?.language === 'en-US' ? 'Folder Deleted' : 'Pasta Excluída',
-          message: `Pasta "${folderName}" excluída. Os vídeos foram movidos para a pasta Geral.`,
+          title: isEn ? 'Folder Deleted' : 'Pasta Excluída',
+          message: isEn ? `Folder "${folderName}" deleted. Videos were moved to General folder.` : `Pasta "${folderName}" excluída. Os vídeos foram movidos para a pasta Geral.`,
           type: 'info'
         });
         return true;
@@ -3278,13 +3362,36 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     toggleVideoFavorite: async (videoId: string) => {
-      const { settings } = get();
+      const { settings, activePlayingVideo, videos } = get();
       soundEffects.star(settings.soundEnabled);
-      const isFav = await backendApi.toggleVideoFavorite(videoId);
+
+      const localVideo = videos.find(v => v.id === videoId);
+      const isOnlineStream = !localVideo || (activePlayingVideo?.id === videoId && Boolean(activePlayingVideo.sourceUrl || activePlayingVideo.streamUrl?.includes('/api/proxy-video-stream')));
+
+      let isFav = false;
+      if (isOnlineStream && activePlayingVideo?.id === videoId) {
+        isFav = await backendApi.toggleVideoFavorite(videoId, activePlayingVideo);
+        try {
+          useProfileHubStore.getState().fetchFavoriteVideos();
+        } catch (_) {}
+      } else {
+        isFav = await backendApi.toggleVideoFavorite(videoId);
+      }
+
       set(state => ({
         videos: state.videos.map(v => v.id === videoId ? { ...v, isFavorite: isFav } : v),
         activePlayingVideo: state.activePlayingVideo?.id === videoId ? { ...state.activePlayingVideo, isFavorite: isFav } : state.activePlayingVideo
       }));
+
+      const curLang = (settings?.language || 'pt-BR') as 'pt-BR' | 'en-US';
+      get().addNotification({
+        title: isFav
+          ? (settings.language === 'en-US' ? 'Added to Favorites' : 'Adicionado aos Favoritos')
+          : (settings.language === 'en-US' ? 'Removed from Favorites' : 'Removido dos Favoritos'),
+        message: activePlayingVideo?.title || translations[curLang]?.player?.untitledVideo || (curLang === 'en-US' ? 'Video' : 'Vídeo'),
+        type: isFav ? 'success' : 'info'
+      });
+
       return isFav;
     },
 
@@ -3497,15 +3604,15 @@ export const useAppStore = create<AppState>((set, get) => {
       const { settings } = get();
       const curLang = (settings?.language || 'pt-BR') as 'pt-BR' | 'en-US';
       const tStore: any = translations[curLang]?.store || translations['pt-BR']?.store || {};
-      const effFolder = folder || tStore.defaultVideoFolder || 'Extraídos';
-      const effTitle = title || tStore.saveVideo || 'Vídeo';
+      const effFolder = folder || tStore.defaultVideoFolder || (curLang === 'en-US' ? 'Extracted' : 'Extraídos');
+      const effTitle = title || translations[curLang]?.player?.untitledVideo || tStore.saveVideo || (curLang === 'en-US' ? 'Video' : 'Vídeo');
       try {
         const result = await backendApi.saveExtractedVideoToGallery(videoUrl, title, effFolder, sourceUrl, thumbnailUrl, streamOnly);
         if (result.success && result.job_id) {
           const newJob: ExtractionJob = {
             id: result.job_id,
             url: videoUrl,
-            title: `${tStore.saveVideo || 'Salvar Vídeo'}: ${effTitle}`,
+            title: `${tStore.saveVideo || (curLang === 'en-US' ? 'Save Video' : 'Salvar Vídeo')}: ${effTitle}`,
             status: 'active',
             mode: 'video_save' as any,
             progressPercent: 1,
@@ -3583,7 +3690,8 @@ export const useAppStore = create<AppState>((set, get) => {
 
     markItemAsSavedOptimistically: (params: { url?: string; title?: string; folder: string; targetId?: string; targetView?: 'videos' | 'gallery' }) => {
       const { url, title, folder, targetId, targetView = 'videos' } = params;
-      const targetFolder = folder || (targetView === 'videos' ? 'Extraídos' : 'Geral');
+      const isEn = get().settings?.language === 'en-US';
+      const targetFolder = folder || (targetView === 'videos' ? (isEn ? 'Extracted' : 'Extraídos') : (isEn ? 'General' : 'Geral'));
       const now = Date.now();
       const newEntries: Record<string, { folder: string; targetId: string; targetView: 'videos' | 'gallery'; timestamp: number }> = {};
       const entry = { folder: targetFolder, targetId: targetId || '', targetView, timestamp: now };
@@ -3708,16 +3816,17 @@ export const useAppStore = create<AppState>((set, get) => {
             type: 'success',
             title: isEn ? 'App is Up to Date' : 'App Atualizado',
             message: isEn
-              ? `You are running the latest version of IMAGEX.AI (${data.current_version}).`
-              : `Você está na versão mais recente do IMAGEX.AI (${data.current_version}).`
+              ? `You are running the latest version of IMAGEX (${data.current_version}).`
+              : `Você está na versão mais recente do IMAGEX (${data.current_version}).`
           });
         }
       } catch (e: any) {
         set({ isCheckingUpdate: false });
         if (!silent) {
+          const isEn = get().settings?.language === 'en-US';
           get().addNotification({
             type: 'error',
-            title: 'Erro ao verificar atualizações',
+            title: isEn ? 'Error checking for updates' : 'Erro ao verificar atualizações',
             message: e.message || String(e)
           });
         }
@@ -3741,13 +3850,14 @@ export const useAppStore = create<AppState>((set, get) => {
 
     applyAppUpdate: async () => {
       set({ isApplyingUpdate: true });
+      const isEn = get().settings?.language === 'en-US';
       try {
         const res = await backendApi.applyUpdate();
         if (res.status === 'error') {
           set({ isApplyingUpdate: false });
           get().addNotification({
             type: 'error',
-            title: 'Falha na Atualização',
+            title: isEn ? 'Update Failed' : 'Falha na Atualização',
             message: res.message
           });
           return;
@@ -3780,10 +3890,15 @@ export const useAppStore = create<AppState>((set, get) => {
         set({ isApplyingUpdate: false });
         get().addNotification({
           type: 'error',
-          title: 'Falha ao iniciar atualização',
+          title: isEn ? 'Failed to start update' : 'Falha ao iniciar atualização',
           message: err.message || String(err)
         });
       }
     },
   };
 });
+
+if (typeof window !== 'undefined') {
+  (window as any).__imagexAppStore = useAppStore;
+}
+

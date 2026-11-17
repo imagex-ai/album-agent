@@ -99,7 +99,7 @@ export const CommandPalette: React.FC = () => {
       id: `folder-album-${f.id || f.name}`,
       category: 'folder' as const,
       label: f.name,
-      subLabel: `${f.count || 0} ${t.photos || 'fotos'} • ${t.albumFolder || (isEn ? 'Album Folder' : 'Pasta de Álbuns')}`,
+      subLabel: `${f.count || 0} ${t.photos || (isEn ? 'photos' : 'fotos')} • ${t.albumFolder || (isEn ? 'Album Folder' : 'Pasta de Álbuns')}`,
       icon: Folder,
       badge: t.folder || (isEn ? 'Folder' : 'Pasta'),
       onSelect: () => {
@@ -362,7 +362,7 @@ export const CommandPalette: React.FC = () => {
           {filteredAlbums.length > 0 && (
             <div className="space-y-1">
               <div className="px-3 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                {!q ? (t.recentAlbums || 'Álbuns Recentes') : (t.albumsAndGifs || 'Álbuns & GIFs')} ({filteredAlbums.length})
+                {!q ? (t.recentAlbums || (isEn ? 'Recent Albums' : 'Álbuns Recentes')) : (t.albumsAndGifs || (isEn ? 'Albums & GIFs' : 'Álbuns & GIFs'))} ({filteredAlbums.length})
               </div>
               {filteredAlbums.map(item => {
                 const globalIdx = currentItemIdx++;
@@ -408,7 +408,7 @@ export const CommandPalette: React.FC = () => {
           {filteredVideos.length > 0 && (
             <div className="space-y-1">
               <div className="px-3 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                {!q ? (t.recentVideos || 'Vídeos e GIFs Recentes') : (t.videosAndMedia || 'Vídeos & Animações')} ({filteredVideos.length})
+                {!q ? (t.recentVideos || (isEn ? 'Recent Videos & GIFs' : 'Vídeos e GIFs Recentes')) : (t.videosAndMedia || (isEn ? 'Videos & Media' : 'Vídeos & Animações'))} ({filteredVideos.length})
               </div>
 
               {filteredVideos.map(item => {

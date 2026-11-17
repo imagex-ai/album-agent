@@ -9,6 +9,7 @@ Autonomous platform for intelligent extraction, organization, and inspection of 
 - Profile Hub: explore creator profiles, videos, albums and playlists in one integrated experience.
 - Saved directories and favorites: keep shortcuts and find profiles more easily.
 - Update alerts: notifications and Settings indicators when a new version is available.
+- Feedback: send problems or suggestions from the menu, with an optional screenshot, when the service is configured.
 - Selection and review: choose media and destinations per profile, then review the batch before saving.
 - Timeline: browse recent posts and open profiles and collections while keeping your place.
 - Watch: play videos, explore related content and read comments and replies from the source.

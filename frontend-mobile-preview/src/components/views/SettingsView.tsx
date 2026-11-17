@@ -1,5 +1,6 @@
 import React from 'react';
 import { version as appVersion } from '../../../package.json';
+import { feedbackConfigured } from '../../services/feedbackService';
 import {
   Film,
   PlaySquare,
@@ -419,6 +420,48 @@ export const SettingsView: React.FC = () => {
               {isEn ? 'View release notes & update' : 'Ver novidades e atualizar'}
             </button>
           )}
+        </div>
+      </div>
+
+      <div className="glass-panel p-4 sm:p-6 rounded-3xl border border-border space-y-3">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="font-bold text-sm text-[var(--text-primary)] flex items-center gap-2">
+              <IconBadge icon={<Shield size={14} />} variant="gold" size="sm" />
+              <span>{isEn ? 'Automatic error reports' : 'Relatórios automáticos de erro'}</span>
+            </h3>
+            <p className="text-xs text-[var(--text-secondary)] mt-2">
+              {isEn
+                ? 'Send limited error details to Sentry: type, position and app version. Error messages, links and library content are not included.'
+                : 'Envia ao Sentry dados limitados do erro: tipo, posição e versão do app. Mensagens de erro, links e conteúdo da biblioteca não são incluídos.'}
+            </p>
+            {!feedbackConfigured() && <p className="text-xs text-[var(--text-secondary)] mt-2">
+              {isEn ? 'The service is not configured; no reports are sent.' : 'O serviço ainda não está configurado; nenhum relatório é enviado.'}
+            </p>}
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={settings.automaticErrorReports !== false}
+            aria-label={isEn ? 'Automatic error reports' : 'Relatórios automáticos de erro'}
+            onClick={() => {
+              const next = settings.automaticErrorReports === false;
+              updateSettings({ automaticErrorReports: next });
+              try {
+                const stored = JSON.parse(localStorage.getItem('imagex_settings') || 'null');
+                if (stored?.automaticErrorReports !== next) throw new Error('storage_unavailable');
+              } catch (_) {
+                addNotification({
+                  type: 'warning',
+                  title: isEn ? 'Preference not saved' : 'Preferência não salva',
+                  message: isEn ? 'The setting applies for now, but could not be saved for next time.' : 'A opção vale por enquanto, mas não pôde ser salva para a próxima vez.',
+                });
+              }
+            }}
+            className={`shrink-0 rounded-xl border px-3 py-2 text-xs font-semibold text-[var(--text-primary)] transition-colors ${settings.automaticErrorReports !== false ? 'bg-brand-500/20 border-brand-500' : 'bg-surface-elevated border-border'}`}
+          >
+            {settings.automaticErrorReports !== false ? (isEn ? 'On' : 'Ativado') : (isEn ? 'Off' : 'Desativado')}
+          </button>
         </div>
       </div>
 

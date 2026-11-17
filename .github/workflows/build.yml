@@ -27,6 +27,8 @@ jobs:
           node-version: '20'
 
       - name: Compilar Frontend (Vite)
+        env:
+          VITE_SENTRY_DSN: ${{ vars.VITE_SENTRY_DSN }}
         run: |
           cd frontend-mobile-preview
           npm install

@@ -353,6 +353,7 @@ export interface AppSettings {
   accent: AccentColor;
   language: Language;
   soundEnabled: boolean;
+  automaticErrorReports?: boolean;
   ambientSoundVolume: number;
   ambientSoundType: 'none' | 'lofi' | 'rain' | 'whitenoise';
   defaultFilenamePattern: string;

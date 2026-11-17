@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@sentry/browser": "11.14.0",
     "canvas-confetti": "^1.9.3",
     "clsx": "^2.1.1",
     "hls.js": "^1.7.3",

@@ -63,6 +63,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   accent: 'blue',
   language: 'en-US',
   soundEnabled: true,
+  automaticErrorReports: true,
   ambientSoundVolume: 0.3,
   ambientSoundType: 'none',
   defaultFilenamePattern: '{album}_{index}_{res}.jpg',

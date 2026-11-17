@@ -18,7 +18,6 @@ import {
   X,
   Home,
   Flame,
-  Sparkles,
   UserRound,
   History,
   ListVideo,
@@ -30,6 +29,7 @@ import { useAppStore } from '../../store/useAppStore';
 import { useProfileHubLibraryStore } from '../../store/useProfileHubLibraryStore';
 import { translations } from '../../i18n/translations';
 import { updateNeedsAttention } from '../../services/updateAlerts';
+import { FeedbackButton } from '../common/FeedbackButton';
 import { ViewId } from '../../types';
 
 interface SidebarProps {
@@ -51,7 +51,7 @@ interface NavSection {
 
 export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseMobile }) => {
   const [collapsed, setCollapsed] = useState(false);
-  const { currentView, navigateToView, setSlideshowOpen, albums, videos, trashItems, jobs, logs, settings, updateInfo, dismissedUpdateVersion, setUpdateModalOpen } = useAppStore();
+  const { currentView, navigateToView, albums, videos, trashItems, jobs, logs, settings, updateInfo, dismissedUpdateVersion, setUpdateModalOpen } = useAppStore();
   const libraryHistoryCount = useProfileHubLibraryStore((state) => state.history.length);
   const libraryPlaylistsCount = useProfileHubLibraryStore((state) => state.playlists.length);
   const libraryFavoritesCount = useProfileHubLibraryStore((state) => state.favorites.length);
@@ -268,19 +268,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen = false, onCloseM
         ))}
       </div>
 
-      {/* Quick Global Dopamine Slider Launcher */}
+      {/* Feedback entry */}
       <div className="px-3 pb-2">
-        <button
-          onClick={() => {
-            setSlideshowOpen(true, 0, 'global');
-            if (onCloseMobile) onCloseMobile();
-          }}
-          className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-xs font-bold bg-gradient-to-r from-brand-600/25 to-fuchsia-600/25 hover:from-brand-600/40 hover:to-fuchsia-600/40 text-brand-200 border border-brand-500/30 transition-all shadow-lg cursor-pointer"
-          title={t.globalSlider || 'Slider Global (Fotos/GIFs)'}
-        >
-          <Sparkles size={15} className="text-amber-300 shrink-0" />
-          {(!collapsed || isMobileOpen) && <span className="truncate">{t.globalSlider || 'Slider Global (Fotos/GIFs)'}</span>}
-        </button>
+        <FeedbackButton compact={collapsed && !isMobileOpen} onOpen={onCloseMobile} />
       </div>
     </div>
   );

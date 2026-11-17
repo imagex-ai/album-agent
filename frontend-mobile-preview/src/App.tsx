@@ -55,6 +55,7 @@ import { SettingsView } from './components/views/SettingsView';
 import { TimelinePreviewView } from './components/views/TimelinePreviewView';
 import { ProfileHubLibraryView } from './components/profile-hub/library/ProfileHubLibraryView';
 import { AddToPlaylistModal } from './components/profile-hub/library/AddToPlaylistModal';
+import { claimDiagnosticsNotice, initializeFeedback } from './services/feedbackService';
 
 // Match the backend update-check cache so a long-running session discovers releases.
 const UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
@@ -191,6 +192,25 @@ export const App: React.FC = () => {
   useEffect(() => {
     syncBackendData();
   }, [syncBackendData]);
+
+  useEffect(() => {
+    let active = true;
+    void initializeFeedback(() => useAppStore.getState().settings.automaticErrorReports !== false).then(ready => {
+      if (!ready || !active) return;
+      const state = useAppStore.getState();
+      if (state.settings.automaticErrorReports === false || !claimDiagnosticsNotice()) return;
+      const isEn = state.settings.language === 'en-US';
+      state.addNotification({
+        type: 'info',
+        title: isEn ? 'Automatic error reports' : 'Relatórios automáticos de erro',
+        message: isEn
+          ? 'Limited error details are sent to Sentry. You can turn this off in Settings.'
+          : 'Dados limitados de erros são enviados ao Sentry. Você pode desativar em Configurações.',
+        linkViewId: 'settings',
+      });
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     const checkWhileVisible = () => {

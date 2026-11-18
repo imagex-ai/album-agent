@@ -204,8 +204,8 @@ export const App: React.FC = () => {
         type: 'info',
         title: isEn ? 'Automatic error reports' : 'Relatórios automáticos de erro',
         message: isEn
-          ? 'Limited error details are sent to Sentry. You can turn this off in Settings.'
-          : 'Dados limitados de erros são enviados ao Sentry. Você pode desativar em Configurações.',
+          ? 'Limited error details are sent to Sentry, which may infer your approximate location. Turn this off in Settings.'
+          : 'Dados limitados de erros são enviados ao Sentry, que pode estimar sua localização aproximada. Desative em Configurações.',
         linkViewId: 'settings',
       });
     }).catch(() => {});

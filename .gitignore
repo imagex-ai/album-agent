@@ -75,6 +75,7 @@ Thumbs.db
 dist/
 build/
 *.spec
+!/imagex-build.spec
 
 # Vite production build outputs
 frontend-mobile-preview/dist/

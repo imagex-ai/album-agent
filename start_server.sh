@@ -36,4 +36,4 @@ if [ ! -f "frontend-mobile-preview/dist/index.html" ] && [ -d "frontend-mobile-p
     echo "[OK] Frontend compilado em dist!"
 fi
 
-python3 -m src.main --server-only
+python3 -m src.main --server

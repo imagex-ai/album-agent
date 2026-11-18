@@ -6,7 +6,7 @@ set PYTHONIOENCODING=utf-8
 cd /d "%~dp0"
 
 echo ==============================================================
-echo       IMAGEX.AI - Automated Verification and Build Tool
+echo       IMAGEX - Automated Verification and Build Tool
 echo ==============================================================
 echo.
 
@@ -45,11 +45,12 @@ if exist "frontend-mobile-preview" (
     )
     call npm run build
     if !errorlevel! neq 0 (
+        set "build_error=!errorlevel!"
         echo.
         echo [ERROR] Frontend build failed with Vite / TypeScript!
         cd ..
         pause
-        exit /b !errorlevel!
+        exit /b !build_error!
     )
     cd ..
     echo [OK] Frontend compiled successfully into the dist folder!
@@ -93,7 +94,7 @@ if "%CHOICE%"=="2" (
 
 echo.
 echo [5/5] Building standalone executable with PyInstaller...
-python -m PyInstaller main.spec --noconfirm
+python -m PyInstaller imagex-build.spec --noconfirm
 
 if %errorlevel% neq 0 (
     echo.
@@ -104,6 +105,6 @@ if %errorlevel% neq 0 (
 
 echo.
 echo ==============================================================
-echo  SUCCESS! Executable built and available at: dist\IMAGEX_AI.exe
+echo  SUCCESS! Executable built and available at: dist\IMAGEX.exe
 echo ==============================================================
 pause

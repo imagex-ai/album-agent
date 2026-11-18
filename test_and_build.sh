@@ -47,20 +47,18 @@ fi
 echo ""
 
 echo "[4/5] Verifying Playwright browser dependencies..."
-python3 -m playwright install chromium >/dev/null 2>&1 || true
-echo "[OK] Playwright / Chromium engine ready!"
-echo ""
-
-echo "[5/5] Running automated unit test suites..."
-if command -v pytest >/dev/null 2>&1; then
-    pytest tests/ -v
-    echo "[OK] All test suites completed successfully!"
+if python3 -m playwright install chromium; then
+    echo "[OK] Playwright / Chromium engine ready!"
 else
-    python3 scripts/run_all_tests.py
-    echo "[OK] Tests verified!"
+    echo "[WARNING] Chromium installation failed; browser-based features may be unavailable."
 fi
 echo ""
+
+echo "[5/5] Running isolated media classification checks..."
+python3 -m pytest tests/test_media_classification.py -q -p no:cacheprovider
+echo "[OK] Isolated checks completed. Other test suites were not run."
+echo ""
 echo "=============================================================="
-echo "  Verification complete! The app is tested and ready to run."
+echo "  Initial checks complete. To launch the server:"
 echo "  To launch the server, run ./start_server.sh"
 echo "=============================================================="

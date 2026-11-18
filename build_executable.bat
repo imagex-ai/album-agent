@@ -4,7 +4,7 @@ chcp 65001 > nul
 set PYTHONUTF8=1
 cd /d "%~dp0"
 echo ==============================================
-echo  Building IMAGEX.AI (Frontend + Executable)
+echo  Building IMAGEX (Frontend + Executable)
 echo ==============================================
 echo.
 
@@ -25,12 +25,12 @@ if errorlevel 1 goto :error
 
 echo.
 echo [3/3] Generating executable with PyInstaller...
-python -m PyInstaller main.spec --noconfirm
+python -m PyInstaller imagex-build.spec --noconfirm
 if errorlevel 1 goto :error
 
 echo.
 echo ==============================================
-echo  Done! Executable generated at dist\IMAGEX_AI.exe
+echo  Done! Executable generated at dist\IMAGEX.exe
 echo ==============================================
 pause
 exit /b 0

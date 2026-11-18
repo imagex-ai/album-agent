@@ -31,3 +31,23 @@ projeto Sentry antes de habilitar o serviço. Não afirme anonimato absoluto.
 O backend e erros tratados silenciosamente não são cobertos por esse mecanismo.
 Uma instalação antiga que ainda não tem o SDK consegue compilar, mas o envio
 fica indisponível até instalar as dependências e gerar o frontend novamente.
+
+## Antes de ativar o projeto Sentry
+
+1. Crie um projeto para o frontend e obtenha seu DSN público. Enquanto não houver
+   DSN configurado no build, o aplicativo não envia relatórios ao Sentry.
+2. Nas configurações de privacidade da organização e do projeto, habilite a
+   remoção de endereços IP e os filtros de dados sensíveis disponíveis. Confira
+   as opções na [API de projeto](https://docs.sentry.io/api/projects/update-a-project/)
+   e na [API de organização](https://docs.sentry.io/api/organizations/update-an-organization/).
+   Remover IP dos eventos armazenados não impede que a conexão chegue ao Sentry.
+3. Restrinja o acesso ao projeto e aos anexos às pessoas responsáveis pelo
+   suporte. Revise a retenção dos eventos e anexos no plano contratado; exclua
+   relatos quando não forem mais necessários.
+4. Depois de configurar o DSN, faça um teste com dados fictícios e confira no
+   painel o conteúdo de um erro automático e de um relato voluntário, inclusive
+   a captura de tela quando anexada. Confirme também que desligar relatórios
+   automáticos impede novos envios automáticos.
+
+Essas configurações dependem da criação do projeto e ainda não foram aplicadas
+no Sentry. Não inclua informações privadas nos testes.

@@ -51,7 +51,7 @@ export function FeedbackButton({ compact, onOpen }: { compact: boolean; onOpen?:
         {isEn ? 'Tell us about a problem, suggestion or anything else. Your email is optional.' : 'Conte sobre um problema, sugestão ou qualquer outra coisa. Seu e-mail é opcional.'}
       </p>
       <p className="mt-3 text-xs leading-relaxed text-[var(--text-secondary)]">
-        {isEn ? 'Your message and any screenshot you choose to add are sent to Sentry, which may infer your approximate location from the connection. Check for private content before sending.' : 'Sua mensagem e qualquer captura de tela que você escolher adicionar serão enviadas ao Sentry, que pode estimar sua localização aproximada pela conexão. Confira se há conteúdo privado antes de enviar.'}
+        {isEn ? 'Your message and any screenshot you choose to add are sent to Sentry. Check them for private content before sending.' : 'Sua mensagem e qualquer captura de tela que você escolher adicionar serão enviadas ao Sentry. Confira se há conteúdo privado antes de enviar.'}
       </p>
       {(!configured || failed) && <p role="status" className="mt-3 text-xs font-semibold text-[var(--text-primary)]">
         {isEn ? 'Feedback is not available right now. Please try again later.' : 'O envio de feedback ainda não está disponível. Tente novamente mais tarde.'}

@@ -432,8 +432,8 @@ export const SettingsView: React.FC = () => {
             </h3>
             <p className="text-xs text-[var(--text-secondary)] mt-2">
               {isEn
-                ? 'Send limited error details to Sentry: type, position and app version. Error messages, links and library content are not included. Sentry may infer your approximate location from the connection.'
-                : 'Envia ao Sentry dados limitados do erro: tipo, posição e versão do app. Mensagens de erro, links e conteúdo da biblioteca não são incluídos. O Sentry pode estimar sua localização aproximada pela conexão.'}
+                ? 'Send limited error details to Sentry: type, position and app version. Error messages, links and library content are not included.'
+                : 'Envia ao Sentry dados limitados do erro: tipo, posição e versão do app. Mensagens de erro, links e conteúdo da biblioteca não são incluídos.'}
             </p>
             {!feedbackConfigured() && <p className="text-xs text-[var(--text-secondary)] mt-2">
               {isEn ? 'The service is not configured; no reports are sent.' : 'O serviço ainda não está configurado; nenhum relatório é enviado.'}

@@ -91,6 +91,23 @@ export const getMediaExtension = (item: MediaItem): string => {
   return isVideoMedia(item) ? 'mp4' : 'jpg';
 };
 
+/**
+ * Returns a hardware-accelerated video stream URL for animated GIFs/WebP.
+ * - 'standard': Lightweight, high-fps loop for grid cards (immediate playback on Desktop & Mobile).
+ * - 'ultrahq': Master CRF 14 / BT.709 stream for fullscreen lightbox inspection.
+ */
+export const getAnimationVideoUrl = (
+  rawUrl?: string,
+  quality: 'standard' | 'ultrahq' = 'standard',
+  referer?: string
+): string => {
+  if (!rawUrl) return '';
+  const cleanUrl = unwrapMediaSource(rawUrl);
+  const cleanQ = quality === 'ultrahq' ? 'ultrahq' : 'standard';
+  const refParam = referer ? `&referer=${encodeURIComponent(referer)}` : '';
+  return `/api/animation-stream?url=${encodeURIComponent(cleanUrl)}&quality=${cleanQ}${refParam}`;
+};
+
 export const normalizeAlbumMediaTags = (tags: string[] = [], isGifAlbum: boolean = false): string[] => {
   const retained = tags.filter(tag => !['gif', 'animado'].includes(tag.toLowerCase()));
   return Array.from(new Set([...retained, ...(isGifAlbum ? ['gif', 'animado'] : [])]));

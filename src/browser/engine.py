@@ -78,6 +78,10 @@ class BrowserEngine:
         )
         self._context = await self._browser.new_context(
             user_agent=self.user_agent,
+            locale="en-US",
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+            },
             viewport={"width": 1440, "height": 900},
             ignore_https_errors=True,
         )

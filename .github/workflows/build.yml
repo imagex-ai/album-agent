@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -24,6 +27,8 @@ jobs:
           node-version: '20'
 
       - name: Compilar Frontend (Vite)
+        env:
+          VITE_SENTRY_DSN: ${{ vars.VITE_SENTRY_DSN }}
         run: |
           cd frontend-mobile-preview
           npm install
@@ -48,6 +53,10 @@ jobs:
       - name: Publicar Release no GitHub
         uses: softprops/action-gh-release@v2
         with:
-          files: IMAGEX.AI-Windows.zip
+          body_path: docs/release-notes-${{ github.ref_name }}.md
+          fail_on_unmatched_files: true
+          files: |
+            dist/main.exe
+            IMAGEX.AI-Windows.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

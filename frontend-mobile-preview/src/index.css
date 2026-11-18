@@ -48,6 +48,46 @@
   --border-focus: #a855f7;
 }
 
+/* Hub Violet shares the Profile Hub palette across the application shell and portals.
+   RGB channels let Tailwind keep opacity modifiers on neutral and primary utilities. */
+.theme-hub-violet {
+  --bg-main: #0c0a13;
+  --bg-surface: #19151f;
+  --bg-surface-elevated: #211a2a;
+  --bg-surface-hover: #281e32;
+  --border-color: #3a2c46;
+  --border-focus: #c58af1;
+  --text-primary: #f2edf6;
+  --text-secondary: #b6adbf;
+  --text-muted: #a599af;
+  --accent-color: #8d30e8;
+  --neutral-50: 250 247 252;
+  --neutral-100: 242 237 246;
+  --neutral-200: 229 219 236;
+  --neutral-300: 207 192 218;
+  --neutral-400: 182 173 191;
+  --neutral-500: 165 153 175;
+  --neutral-600: 154 134 170;
+  --neutral-700: 58 44 70;
+  --neutral-800: 40 30 50;
+  --neutral-900: 25 21 31;
+  --neutral-950: 12 10 19;
+  --brand-50: 250 245 255;
+  --brand-100: 243 232 255;
+  --brand-200: 233 213 255;
+  --brand-300: 213 171 247;
+  --brand-400: 197 138 241;
+  --brand-500: 141 48 232;
+  --brand-600: 115 54 168;
+  --brand-700: 96 39 146;
+  --brand-800: 75 31 111;
+  --brand-900: 54 23 77;
+  --brand-950: 33 22 39;
+  color-scheme: dark;
+}
+.theme-hub-violet .glass-panel { background: color-mix(in srgb, var(--bg-surface) 85%, transparent); }
+.theme-hub-violet .glass-panel-elevated { background: color-mix(in srgb, var(--bg-surface-elevated) 92%, transparent); border-color: var(--border-color); }
+
 /* Global Viewport & Safe Scroll Locks */
 html, body, #root {
   overflow-x: hidden;
@@ -797,3 +837,328 @@ input[type="range"] {
   transform-style: preserve-3d;
   touch-action: manipulation;
 }
+
+/* Animações e Micro-interações da Linha do Tempo e Stories (Mobile & Desktop) */
+:root {
+  interpolate-size: allow-keywords;
+}
+
+@property --watch-fade-start {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --watch-fade-end {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+.smooth-transition {
+  transition:
+    color 0.18s ease-out,
+    background-color 0.18s ease-out,
+    border-color 0.18s ease-out,
+    box-shadow 0.2s ease-out,
+    opacity 0.2s ease-out,
+    transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Tactile spring interactions (individual transform properties keep stacking contexts stable) */
+.cute-press,
+.cute-icon-btn {
+  translate: 0px 0px;
+  rotate: 0deg;
+  scale: 1;
+  transition:
+    background-color 180ms ease-out,
+    border-color 180ms ease-out,
+    color 180ms ease-out,
+    box-shadow 200ms ease-out;
+}
+
+.cute-icon-btn {
+  position: relative;
+}
+
+@media (pointer: coarse) {
+  .cute-icon-btn::after {
+    content: "";
+    position: absolute;
+    inset: -3px;
+    border-radius: 9999px;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cute-press,
+  .cute-icon-btn {
+    transition:
+      background-color 180ms ease-out,
+      border-color 180ms ease-out,
+      color 180ms ease-out,
+      box-shadow 200ms ease-out,
+      translate 240ms cubic-bezier(0.34, 1.56, 0.64, 1),
+      rotate 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+      scale 340ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    transition-timing-function:
+      ease-out,
+      ease-out,
+      ease-out,
+      ease-out,
+      linear(0, 0.08, 0.45 18%, 1.07 42%, 0.98 68%, 1.01 84%, 1),
+      linear(0, 0.08, 0.45 18%, 1.07 42%, 0.98 68%, 1.01 84%, 1),
+      linear(0, 0.009, 0.035 2.1%, 0.281 6.7%, 0.938 16.7%, 1.149 24.3%, 1.163, 1.129 32.8%, 1.017 43.1%, 0.974 53.8%, 0.997 69.8%, 1.004 83.8%, 1);
+  }
+
+  @media (hover: hover) {
+    .cute-press:not(:disabled):hover,
+    .cute-icon-btn:not(:disabled):hover {
+      translate: 0px -1.5px;
+      scale: 1.05;
+    }
+
+    .group\/back:hover .cute-nudge-left {
+      translate: -3px 0px;
+    }
+
+    .cute-icon-btn:hover .cute-nudge-ne {
+      translate: 1.5px -1.5px;
+      scale: 1.08;
+    }
+
+    .cute-icon-btn:hover .cute-tilt-hop {
+      translate: 0px -1.5px;
+      rotate: -8deg;
+      scale: 1.08;
+    }
+
+    .cute-card-lift {
+      translate: 0px 0px;
+      scale: 1;
+      transition:
+        border-color 180ms ease-out,
+        background-color 180ms ease-out,
+        box-shadow 220ms ease-out,
+        translate 280ms cubic-bezier(0.34, 1.56, 0.64, 1),
+        scale 320ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+
+    .cute-card-lift:hover {
+      translate: 0px -2px;
+      scale: 1.01;
+    }
+  }
+
+  .cute-press:not(:disabled):active,
+  .cute-icon-btn:not(:disabled):active {
+    scale: 0.9;
+    translate: 0px 1px;
+  }
+
+  .cute-nudge-left,
+  .cute-nudge-ne,
+  .cute-tilt-hop {
+    translate: 0px 0px;
+    rotate: 0deg;
+    scale: 1;
+    transition:
+      translate 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+      rotate 280ms cubic-bezier(0.34, 1.56, 0.64, 1),
+      scale 300ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+}
+
+/* Single-row swipeable action toolbar & artists strip with edge-fade scrollability hints */
+.watch-swipe-row {
+  --watch-fade-size: 1.5rem;
+  --watch-fade-dir: right;
+  --watch-fade-start-pos: 0;
+  --watch-fade-end-pos: 100%;
+  scroll-snap-type: x proximity;
+  scroll-padding-inline: 1.25rem;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.watch-swipe-row::-webkit-scrollbar {
+  display: none;
+}
+
+.watch-swipe-row > * {
+  scroll-snap-align: start;
+}
+
+@supports (animation-timeline: scroll(self inline)) and (mask-composite: subtract) {
+  .watch-swipe-row {
+    mask:
+      linear-gradient(black, black) no-clip subtract,
+      linear-gradient(to var(--watch-fade-dir), black, transparent) var(--watch-fade-start-pos) 0 / var(--watch-fade-start) 100% no-repeat no-clip,
+      linear-gradient(to var(--watch-fade-dir), transparent, black) var(--watch-fade-end-pos) 0 / var(--watch-fade-end) 100% no-repeat no-clip;
+    animation: watchRevealFadeStart linear both, watchHideFadeEnd linear both;
+    animation-timeline: scroll(self inline);
+    animation-range: 0 var(--watch-fade-size), calc(100% - var(--watch-fade-size)) 100%;
+  }
+
+  .watch-swipe-row:dir(rtl) {
+    --watch-fade-dir: left;
+    --watch-fade-start-pos: 100%;
+    --watch-fade-end-pos: 0;
+  }
+}
+
+@keyframes watchRevealFadeStart {
+  to { --watch-fade-start: var(--watch-fade-size); }
+}
+
+@keyframes watchHideFadeEnd {
+  from { --watch-fade-end: var(--watch-fade-size); }
+}
+
+@keyframes heartBurst {
+  0% { scale: 1; rotate: 0deg; }
+  30% { scale: 1.38; rotate: -8deg; }
+  62% { scale: 0.9; rotate: 5deg; }
+  100% { scale: 1; rotate: 0deg; }
+}
+
+@keyframes cuteHaloSparkle {
+  0% { scale: 0.65; opacity: 0.85; }
+  70% { scale: 1.55; opacity: 0.25; }
+  100% { scale: 1.75; opacity: 0; }
+}
+
+@keyframes cuteBookmarkBoing {
+  0% { scale: 0.82; translate: 0px 0px; rotate: 0deg; }
+  38% { scale: 1.24; translate: 0px -3px; rotate: -10deg; }
+  70% { scale: 0.94; translate: 0px 1px; rotate: 5deg; }
+  100% { scale: 1; translate: 0px 0px; rotate: 0deg; }
+}
+
+@keyframes followConfirmPop {
+  0% { scale: 0.9; rotate: -2deg; }
+  45% { scale: 1.07; rotate: 1.5deg; }
+  75% { scale: 0.985; rotate: -0.5deg; }
+  100% { scale: 1; rotate: 0deg; }
+}
+
+@keyframes cuteChipPopIn {
+  from { opacity: 0; scale: 0.86; translate: 0px 6px; }
+  to { opacity: 1; scale: 1; translate: 0px 0px; }
+}
+
+@keyframes watchPanelReveal {
+  from { opacity: 0; translate: 0px 8px; }
+  to { opacity: 1; translate: 0px 0px; }
+}
+
+@keyframes cuteBadgePop {
+  0% { scale: 0.7; opacity: 0; }
+  65% { scale: 1.15; opacity: 1; }
+  100% { scale: 1; opacity: 1; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .heart-pop {
+    animation: heartBurst 0.44s cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation-timing-function: linear(
+      0, 0.009, 0.035 2.1%, 0.141, 0.281 6.7%, 0.723 12.9%, 0.938 16.7%, 1.017,
+      1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%,
+      1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%,
+      0.997 69.8%, 1.003 76.9%, 1.004 83.8%, 1
+    );
+    will-change: scale, rotate;
+  }
+
+  .cute-halo-pulse {
+    animation: cuteHaloSparkle 0.5s ease-out both;
+    will-change: scale, opacity;
+  }
+
+  .bookmark-boing {
+    animation: cuteBookmarkBoing 0.44s cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation-timing-function: linear(
+      0, 0.009, 0.035 2.1%, 0.281 6.7%, 0.938 16.7%, 1.149 24.3%, 1.163,
+      1.129 32.8%, 1.017 43.1%, 0.974 53.8%, 0.997 69.8%, 1.004 83.8%, 1
+    );
+    will-change: scale, translate, rotate;
+  }
+
+  .follow-spring {
+    animation: followConfirmPop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation-timing-function: linear(
+      0, 0.009, 0.035 2.1%, 0.141, 0.281 6.7%, 0.723 12.9%, 0.938 16.7%, 1.017,
+      1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%,
+      1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%,
+      0.997 69.8%, 1.003 76.9%, 1.004 83.8%, 1
+    );
+    will-change: scale, rotate;
+  }
+
+  .watch-artist-chip-enter {
+    animation: cuteChipPopIn 0.36s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+    animation-timing-function: linear(
+      0, 0.08, 0.45 18%, 1.08 42%, 0.97 68%, 1.01 84%, 1
+    );
+    animation-delay: calc(min(var(--stagger-index, 0), 8) * 38ms);
+    animation-delay: calc(min(sibling-index() - 1, 8) * 38ms);
+  }
+
+  .watch-panel-reveal {
+    animation: watchPanelReveal 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .cute-badge-pop {
+    animation: cuteBadgePop 0.36s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+    animation-timing-function: linear(
+      0, 0.08, 0.45 18%, 1.08 42%, 0.97 68%, 1.01 84%, 1
+    );
+  }
+}
+
+.watch-about-accordion {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 0.24s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.watch-about-accordion[data-expanded="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.watch-about-accordion-inner {
+  overflow: hidden;
+}
+
+@keyframes storyPulse {
+  0%, 100% { border-color: rgba(147, 51, 234, 0.8); box-shadow: 0 0 12px rgba(147, 51, 234, 0.4); }
+  50% { border-color: rgba(192, 132, 252, 0.6); box-shadow: 0 0 4px rgba(147, 51, 234, 0.2); }
+}
+.story-ring-active {
+  animation: storyPulse 2.5s infinite ease-in-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .smooth-transition,
+  .cute-press,
+  .cute-icon-btn,
+  .cute-card-lift,
+  .cute-nudge-left,
+  .cute-nudge-ne,
+  .cute-tilt-hop,
+  .heart-pop,
+  .cute-halo-pulse,
+  .bookmark-boing,
+  .follow-spring,
+  .watch-artist-chip-enter,
+  .watch-panel-reveal,
+  .cute-badge-pop,
+  .watch-about-accordion,
+  .story-ring-active {
+    animation: none !important;
+    transition: color 0.15s ease-out, background-color 0.15s ease-out, border-color 0.15s ease-out, opacity 0.15s ease-out !important;
+    will-change: auto;
+  }
+}
+

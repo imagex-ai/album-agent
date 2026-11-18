@@ -24,11 +24,13 @@ export const TopTabBar: React.FC = () => {
     }
     switch (tab.viewId) {
       case 'extractor': return s.imageExtractor;
+      case 'profile-hub': return settings.language === 'en-US' ? 'Profile Hub' : 'Hub de Perfil';
       case 'multi-album': return s.multiAlbum;
       case 'web-video-scraper': return s.webVideoScraper;
       case 'batch-queue': return s.batchProcessor;
       case 'gallery': return s.albumLibrary;
       case 'videos': return s.videoGallery;
+      case 'shorts': return s.shortsFeed;
       case 'live-monitor': return s.aiLiveMonitor;
       case 'album-detail': return s.albumDetail;
       case 'domain-patterns': return s.domainRules;

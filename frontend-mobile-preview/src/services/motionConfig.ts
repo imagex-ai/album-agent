@@ -64,15 +64,15 @@ export const getDistanceClass = (distance?: AnimationDistance): string => {
 /**
  * Retorna o rótulo textual legível para a amplitude de movimento.
  */
-export const getDistanceLabel = (distance?: AnimationDistance): string => {
+export const getDistanceLabel = (distance?: AnimationDistance, isEn = false): string => {
   switch (distance) {
     case 'subtle':
-      return 'Sutil (16px)';
+      return isEn ? 'Subtle (16px)' : 'Sutil (16px)';
     case 'large':
-      return 'Ampla (75px)';
+      return isEn ? 'Wide (75px)' : 'Ampla (75px)';
     case 'normal':
     default:
-      return 'Média (36px)';
+      return isEn ? 'Medium (36px)' : 'Média (36px)';
   }
 };
 

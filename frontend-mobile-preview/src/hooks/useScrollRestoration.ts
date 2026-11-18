@@ -12,6 +12,7 @@ interface UseScrollRestorationOptions {
   currentView: ViewId;
   activeTabId: string;
   activeAlbumId: string | null;
+  contextKey?: string;
 }
 
 /**
@@ -24,7 +25,8 @@ export function useScrollRestoration({
   containerRef,
   currentView,
   activeTabId,
-  activeAlbumId
+  activeAlbumId,
+  contextKey
 }: UseScrollRestorationOptions) {
   const isRestoringRef = useRef(false);
   const restorationActiveRef = useRef(false);
@@ -37,10 +39,12 @@ export function useScrollRestoration({
   const activeTabIdRef = useRef(activeTabId);
   const currentViewRef = useRef(currentView);
   const activeAlbumIdRef = useRef(activeAlbumId);
+  const contextKeyRef = useRef(contextKey);
 
   activeTabIdRef.current = activeTabId;
   currentViewRef.current = currentView;
   activeAlbumIdRef.current = activeAlbumId;
+  contextKeyRef.current = contextKey;
 
   // Cleanup helper for the restoration loop
   const stopRestorationLoop = (reason?: string) => {
@@ -82,6 +86,7 @@ export function useScrollRestoration({
       const tabId = activeTabIdRef.current;
       const view = currentViewRef.current;
       const albumId = activeAlbumIdRef.current;
+      if (contextKeyRef.current) scrollRestorationManager.savePosition(contextKeyRef.current, currentScroll);
 
       if (tabId) {
         scrollRestorationManager.savePosition(getTabScrollKey(tabId), currentScroll);
@@ -139,7 +144,7 @@ export function useScrollRestoration({
     scrollRestorationManager.registerContainer(container);
 
     // Resolve target scroll position
-    const targetScrollTop = scrollRestorationManager.getSavedPosition(
+    const targetScrollTop = contextKey ? (scrollRestorationManager.getPosition(contextKey) ?? 0) : scrollRestorationManager.getSavedPosition(
       activeTabId,
       currentView,
       activeAlbumId
@@ -258,5 +263,5 @@ export function useScrollRestoration({
     return () => {
       stopRestorationLoop('layout_effect_cleanup');
     };
-  }, [activeTabId, currentView, activeAlbumId]);
+  }, [activeTabId, currentView, activeAlbumId, contextKey]);
 }

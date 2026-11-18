@@ -11,6 +11,7 @@ data/backup data/*
 data/knowledge/
 data/jobs.json
 data/jobs.json.tmp
+data/profile-hub-execution/
 data/meta_knowledge_graph.json
 data/recipes.json
 data/image_knowledge_base.json
@@ -26,6 +27,7 @@ data/cache/
 data/*.tmp
 data/*.cache
 data/cache/*
+/recovery-backups/
 !data/albums/.gitkeep
 !data/videos/.gitkeep
 
@@ -42,6 +44,7 @@ benchmark_*.py
 test_prewarm_verification.py
 diagnose_lightbox_experience.py
 tests/benchmark_top6.py
+tests/gif_performance_lab.html
 
 # Python cache & virtual environments
 __pycache__/
@@ -79,8 +82,40 @@ frontend/dist/
 
 # Agent teamwork logs & showcase mockups
 .agents/
+.superpowers/
 .showcase/
 album-agent-main/
 frontend-mobile-preview/test-*.mjs
 refactor_album_detail.py
+update_collection.py
+premium-audit.json
+posts/
+scratch/
+scripts/verify_*.py
+tests/check_gender_classifier.py
+tests/test_abigaiil_*.py
+tests/test_current_abigaiil.py
+tests/test_profile_hub_live_*.py
+data/saved_profile_directories.json
+data/favorite_profiles.json
+data/favorite_profile_videos.json
 scripts/poc_moment_intelligence/
+
+data/local_profile_examples.json
+
+# Keep personal runtime data and audit captures out of repository updates.
+/data/
+/docs/audit-profilehub-2026-11-11/
+
+# Exclude filenames and directories containing known adult-content terms.
+# Ignored source files may still be required to run the application.
+*[pP][oO][rR][nN]*
+*[xX][vV][iI][dD][eE][oO][sS]*
+*[xX][hH][aA][mM][sS][tT][eE][rR]*
+*[eE][pP][oO][rR][nN][eE][rR]*
+*[nN][sS][fF][wW]*
+*[hH][eE][nN][tT][aA][iI]*
+*[eE][rR][oO][tT][iI][cC]*
+*[nN][uU][dD][eE]*
+*[aA][dD][uU][lL][tT]*
+*[xX][xX][xX]*

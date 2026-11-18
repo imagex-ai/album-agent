@@ -265,7 +265,7 @@ export const JobHistoryView: React.FC = () => {
           <button
             onClick={handleExportJobs}
             className="px-3.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface-hover border border-border text-xs font-semibold text-slate-300 flex items-center gap-1.5 transition-colors shrink-0"
-            title={tJobs.exportReportTitle || "Exportar relatório de jobs em JSON"}
+            title={tJobs.exportReportTitle || (isEn ? "Export jobs report in JSON" : "Exportar relatório de jobs em JSON")}
           >
             <Download size={13} />
             <span>{tJobs.exportReport || 'Export Report'}</span>
@@ -274,7 +274,7 @@ export const JobHistoryView: React.FC = () => {
             <button
               onClick={clearCompletedJobs}
               className="px-3 py-1.5 rounded-xl bg-surface-elevated hover:bg-rose-950/40 border border-border text-xs font-semibold text-slate-400 hover:text-rose-400 flex items-center gap-1.5 transition-colors shrink-0"
-              title={tJobs.clearCompletedTitle || "Limpar jobs concluídos do histórico"}
+              title={tJobs.clearCompletedTitle || (isEn ? "Clear completed jobs from history" : "Limpar jobs concluídos do histórico")}
             >
               <Trash2 size={13} />
               <span>{tJobs.clearCompleted || 'Clear Completed'}</span>

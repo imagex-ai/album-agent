@@ -1,3 +1,11 @@
+import colors from 'tailwindcss/colors';
+
+// Runtime palette channels retain Tailwind's exact defaults for existing themes.
+const themedScale = (name, scale) => Object.fromEntries(Object.entries(scale).map(([step, hex]) => {
+  const rgb = hex.match(/[a-f0-9]{2}/gi).map(channel => parseInt(channel, 16)).join(' ');
+  return [step, `rgb(var(--${name}-${step}, ${rgb}) / <alpha-value>)`];
+}));
+
 /** @type {import('tailwindcss').Config} */
 export default {
   content: [
@@ -8,25 +16,16 @@ export default {
   theme: {
     extend: {
       colors: {
+        slate: themedScale('neutral', colors.slate),
         background: 'var(--bg-main)',
         surface: 'var(--bg-surface)',
         'surface-elevated': 'var(--bg-surface-elevated)',
         'surface-hover': 'var(--bg-surface-hover)',
         border: 'var(--border-color)',
         'border-focus': 'var(--border-focus)',
-        brand: {
-          50: '#eff6ff',
-          100: '#dbeafe',
-          200: '#bfdbfe',
-          300: '#93c5fd',
-          400: '#60a5fa',
-          500: '#3b82f6',
-          600: '#2563eb',
-          700: '#1d4ed8',
-          800: '#1e40af',
-          900: '#1e3a8a',
-          950: '#172554',
-        },
+        brand: themedScale('brand', colors.blue),
+        'primary-end': themedScale('brand', colors.indigo),
+        'primary-violet': themedScale('brand', colors.violet),
         accent: {
           purple: '#8b5cf6',
           cyan: '#06b6d4',
@@ -40,7 +39,7 @@ export default {
         mono: ['"JetBrains Mono"', 'monospace']
       },
       boxShadow: {
-        'glow-brand': '0 0 25px -5px rgba(59, 130, 246, 0.35)',
+        'glow-brand': '0 0 25px -5px rgb(var(--brand-500, 59 130 246) / 0.35)',
         'glow-emerald': '0 0 25px -5px rgba(16, 185, 129, 0.35)',
         'glow-accent': '0 0 25px -5px rgba(139, 92, 246, 0.35)',
         'card-elevated': '0 8px 30px rgba(0, 0, 0, 0.4)',

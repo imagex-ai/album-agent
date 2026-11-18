@@ -224,14 +224,14 @@ export const HomeView: React.FC = () => {
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-full bg-brand-500/20 text-brand-300 border border-brand-500/40">
-                IMAGEX.AI STUDIO
+                IMAGEX STUDIO
               </span>
               <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-surface-elevated text-slate-400 border border-border flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                 {t.systemReady || (isEn ? 'System Ready' : 'Sistema Pronto')}
               </span>
             </div>
-            <h1 className="text-2xl sm:text-3xl font-black text-slate-100 tracking-tight flex items-center gap-3">
+            <h1 className="text-2xl sm:text-3xl font-black text-slate-100 tracking-tight flex flex-wrap items-center gap-x-3 gap-y-1">
               <span>{greeting},</span>
               <span className="bg-gradient-to-r from-brand-400 via-indigo-300 to-accent-purple bg-clip-text text-transparent">
                 {t.commandCenter || (isEn ? 'Command Center' : 'Central de Operações')}
@@ -242,7 +242,7 @@ export const HomeView: React.FC = () => {
             </p>
           </div>
 
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="flex flex-wrap items-center gap-3 shrink-0">
             <div className="px-4 py-3 rounded-2xl bg-surface-elevated/80 border border-border flex items-center gap-3 shadow-inner">
               <IconBadge icon={<FolderHeart size={18} />} variant="gold" size="md" />
               <div>

@@ -1,0 +1,53 @@
+/* The confirmed state morphs locally without moving the button's hit area. */
+.timeline-save-icon { position: relative; display: inline-block; width: 1rem; height: 1rem; vertical-align: middle; }
+.timeline-save-icon > svg { position: absolute; inset: 0; }
+.timeline-save-happy { opacity: 0; transform: scale(.65); }
+.timeline-save-icon[data-saved="true"] .timeline-save-disk { opacity: 0; transform: scale(.65) rotate(-12deg); }
+.timeline-save-icon[data-saved="true"] .timeline-save-happy { opacity: 1; transform: scale(1); }
+@media (prefers-reduced-motion: no-preference) {
+  .timeline-save-icon[data-animate="true"] > svg { transition: opacity 180ms ease-out, transform 280ms cubic-bezier(.34, 1.56, .64, 1); }
+}
+
+/* Decorative outline moves independently of the player during feedback layout changes. */
+.timeline-save-outline {
+  position: absolute;
+  inset: -1px;
+  margin: 0 !important;
+  border: 1px solid var(--tl-border);
+  border-radius: inherit;
+  pointer-events: none;
+  transform-origin: top;
+  visibility: hidden;
+  z-index: 1;
+}
+
+article[data-save-layout-motion="true"] {
+  border-color: transparent !important;
+}
+
+article[data-save-layout-motion="true"] > .timeline-save-outline {
+  visibility: visible;
+}
+.timeline-video-controls,
+.timeline-quality-menu {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition: opacity var(--timeline-motion-duration, 350ms) ease,
+    transform var(--timeline-motion-duration, 350ms) cubic-bezier(0.22, 1, 0.36, 1),
+    visibility var(--timeline-motion-duration, 350ms);
+}
+.timeline-video-controls[data-visible="false"],
+.timeline-quality-menu[data-visible="false"] {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(8px);
+  pointer-events: none;
+}
+.timeline-video-controls[data-motion-disabled="true"],
+.timeline-video-controls[data-motion-disabled="true"] .timeline-quality-menu {
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .timeline-video-controls, .timeline-quality-menu { transition: none; }
+}

@@ -1,6 +1,6 @@
 """
-Copilot Master Agent (IMAGEX.AI Autonomy Architecture)
-Provides 100% full autonomous control over the entire IMAGEX.AI application to Google Gemini:
+Copilot Master Agent (IMAGEX Autonomy Architecture)
+Provides 100% full autonomous control over the entire IMAGEX application to Google Gemini:
 - Albums (List, Details, Search, Create, Delete, Rename, Set Cover, Favorite, Delete Images, Rename Images, Move, ZIP, JSON)
 - Videos (List, Details, Download from URL, Import Local, Delete, Batch Delete, Rename, Move, Batch Move, Favorite, Sync Thumbnails)
 - Folders (List, Create, Rename, Delete for albums and videos)
@@ -602,7 +602,7 @@ COPILOT_TOOL_DECLARATIONS = [
 class CopilotMasterAgent:
     """
     Master Co-Pilot Agent with full autonomous execution capabilities across
-    all IMAGEX.AI domains. Powered by multi-turn ReAct loops over Gemini Function Calling.
+    all IMAGEX domains. Powered by multi-turn ReAct loops over Gemini Function Calling.
     """
 
     def __init__(self):
@@ -1776,7 +1776,7 @@ class CopilotMasterAgent:
 
         # System Prompt definition
         system_instruction_text = (
-            "Você é o Agente Mestre Co-Pilot IMAGEX.AI com AUTONOMIA TOTAL sobre toda a aplicação.\n"
+            "Você é o Agente Mestre Co-Pilot IMAGEX com AUTONOMIA TOTAL sobre toda a aplicação.\n"
             "Você possui poder irrestrito para gerenciar, pesquisar, criar, renomear, mover, excluir, baixar, "
             "inspecionar tarefas, organizar álbuns, gerenciar vídeos, esvaziar lixeira e configurar o sistema.\n\n"
             "REGRAS DE CONDUTA OBRIGATÓRIAS:\n"

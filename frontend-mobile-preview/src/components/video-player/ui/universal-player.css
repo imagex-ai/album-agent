@@ -1,0 +1,1054 @@
+/* ============================================================
+   universal-player.css
+   IMAGEX.AI Container-Query UI Shell & Motion Engine Stylesheet
+   Governed by docs/video-player-architecture.md & DESIGN.md
+   ============================================================ */
+
+/* 1. Container Query Stage & Root Surface */
+.uvp-stage,
+[data-video-surface] {
+  container-type: inline-size;
+  container-name: player-stage;
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  background-color: #000000;
+  color: #ffffff;
+}
+
+/* Touch Action defaults outside fullscreen */
+.uvp-stage:not([data-fullscreen="true"]) {
+  touch-action: pan-y;
+}
+
+.uvp-stage[data-fullscreen="true"] {
+  touch-action: none;
+}
+
+/* In-page fullscreen when the browser refuses native fullscreen. A manual
+   popover keeps the existing video above clipping/transformed ancestors. */
+.uvp-stage[data-fullscreen-fallback="true"] {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100dvh !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  border: 0;
+  border-radius: 0 !important;
+  z-index: 100;
+  transform: none !important;
+  animation: none !important;
+}
+
+/* 2. Video Element & Fit */
+.uvp-video-el {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.uvp-stage[data-fill-mode="cover"] .uvp-video-el {
+  object-fit: cover;
+}
+
+/* 3. Ambient Cinema Glow (Portrait 9:16 & Cinema density) */
+.uvp-ambient-glow {
+  position: absolute;
+  inset: -15%;
+  z-index: 0;
+  pointer-events: none;
+  filter: blur(48px) saturate(1.4);
+  opacity: 0.45;
+  transform: translate3d(0, 0, 0);
+  background: radial-gradient(
+    circle at 50% 50%,
+    rgba(59, 130, 246, 0.28) 0%,
+    rgba(147, 51, 234, 0.18) 40%,
+    transparent 75%
+  );
+  animation: uvp-glow-pulse 6s ease-in-out infinite alternate;
+}
+
+@keyframes uvp-glow-pulse {
+  0% {
+    transform: scale(0.96) translate3d(0, 0, 0);
+    opacity: 0.35;
+  }
+  100% {
+    transform: scale(1.04) translate3d(0, 0, 0);
+    opacity: 0.55;
+  }
+}
+
+/* 4. Controls Chrome Overlay */
+.uvp-chrome,
+[data-player-chrome] {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  pointer-events: none;
+  transition: opacity 240ms cubic-bezier(0.22, 1, 0.36, 1), visibility 240ms ease;
+  background: linear-gradient(
+    to bottom,
+    rgba(15, 23, 42, 0.58) 0%,
+    transparent 20%,
+    transparent 65%,
+    rgba(15, 23, 42, 0.88) 100%
+  );
+}
+
+.uvp-chrome .uvp-bottom-bar {
+  transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease;
+}
+
+.uvp-chrome[data-visible="false"] {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.uvp-chrome[data-visible="false"] .uvp-bottom-bar {
+  transform: translateY(8px);
+}
+
+.uvp-chrome[data-visible="true"] {
+  opacity: 1;
+  visibility: visible;
+}
+
+.uvp-chrome[data-visible="true"] .uvp-bottom-bar {
+  transform: translateY(0);
+}
+
+.uvp-chrome > * {
+  pointer-events: auto;
+}
+
+/* Top Actions Bar */
+.uvp-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  gap: 12px;
+  background: linear-gradient(to bottom, rgba(15, 23, 42, 0.72) 0%, transparent 100%);
+}
+
+/* Bottom Controls Bar */
+.uvp-bottom-bar {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 0 14px 12px 14px;
+  gap: 6px;
+  background: linear-gradient(to top, rgba(15, 23, 42, 0.88) 0%, rgba(15, 23, 42, 0.45) 70%, transparent 100%);
+}
+
+/* Keep a small floating player focused on the picture. Touch targets retain
+   their full dimensions; fine pointers can use a denser transport bar. */
+.uvp-density-cinema .uvp-bottom-bar {
+  padding: 0 10px 4px;
+  gap: 0;
+}
+
+.uvp-density-mini .uvp-bottom-bar {
+  padding: 0 8px 2px;
+  gap: 0;
+}
+
+/* Keep the drawn controls compact without shrinking the touchable buttons. */
+:is(.uvp-density-cinema, .uvp-density-mini) .uvp-bottom-bar .uvp-btn > svg {
+  width: 18px;
+  height: 18px;
+  transform: translateY(-1px);
+}
+
+:is(.uvp-density-cinema, .uvp-density-mini) .uvp-bottom-bar .uvp-clock {
+  transform: translateY(-1px);
+}
+
+.uvp-density-mini .uvp-bottom-bar .uvp-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+:is(.uvp-density-cinema, .uvp-density-mini) .uvp-bottom-bar .uvp-scrubber-hit {
+  min-height: 18px;
+  height: 18px;
+}
+
+@media (pointer: coarse) {
+  :is(.uvp-density-cinema, .uvp-density-mini) .uvp-bottom-bar .uvp-btn > svg,
+  :is(.uvp-density-cinema, .uvp-density-mini) .uvp-bottom-bar .uvp-clock {
+    transform: translateY(-5px);
+  }
+
+  :is(.uvp-density-cinema, .uvp-density-mini) .uvp-bottom-bar .uvp-scrubber-hit::before {
+    content: '';
+    position: absolute;
+    inset: -26px 0 0;
+  }
+}
+
+.uvp-stage[data-motion-disabled="true"] *,
+.uvp-stage[data-motion-disabled="true"] *::before,
+.uvp-stage[data-motion-disabled="true"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+.uvp-highlight-marker {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 8px;
+  min-width: 2px;
+  max-width: 100%;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.uvp-controls-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
+.uvp-controls-left,
+.uvp-controls-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 5. Buttons & Touch Targets */
+.uvp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: #ffffff;
+  padding: 6px;
+  border-radius: 10px;
+  cursor: pointer;
+  translate: 0px 0px;
+  scale: 1;
+  transition:
+    background-color 180ms ease-out,
+    color 180ms ease-out,
+    box-shadow 200ms ease-out,
+    opacity 150ms ease-out,
+    translate 240ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    scale 300ms linear(0, 0.08, 0.45 18%, 1.07 42%, 0.98 68%, 1.01 84%, 1);
+  outline: none;
+  flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+@media (hover: hover) {
+  .uvp-btn:hover {
+    background-color: rgba(255, 255, 255, 0.18);
+    translate: 0px -1.5px;
+    scale: 1.08;
+  }
+}
+
+.uvp-btn:active {
+  scale: 0.88;
+  translate: 0px 1px;
+  background-color: rgba(255, 255, 255, 0.24);
+}
+
+.uvp-btn:focus-visible {
+  outline: 2px solid var(--tl-accent-ring, #3b82f6);
+  outline-offset: 2px;
+}
+
+/* Coarse pointer & touch hit targets >= 44x44px */
+@media (pointer: coarse) {
+  .uvp-btn {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 8px;
+  }
+}
+
+/* 6. Scrubber Bar, Thumb & 60fps Zero-ReRender Hit Area */
+.uvp-scrubber-hit {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 36px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+@media (pointer: coarse) {
+  .uvp-scrubber-hit {
+    min-height: 44px;
+  }
+}
+
+.uvp-scrubber-track {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  background-color: rgba(255, 255, 255, 0.28);
+  border-radius: 9999px;
+  overflow: visible;
+  transform-origin: center;
+  transition: transform 160ms ease;
+}
+
+.uvp-scrubber-hit:hover .uvp-scrubber-track,
+.uvp-scrubber-hit[data-scrubbing="true"] .uvp-scrubber-track {
+  transform: scaleY(1.5);
+}
+
+/* Buffered & Progress Fill via CSS Variables */
+.uvp-scrubber-buffered {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: var(--uvp-buffered, 0%);
+  background-color: rgba(255, 255, 255, 0.45);
+  border-radius: 9999px;
+  pointer-events: none;
+}
+
+.uvp-scrubber-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: var(--uvp-progress, 0%);
+  background-color: var(--tl-accent, #3b82f6);
+  border-radius: 9999px;
+  pointer-events: none;
+}
+
+.uvp-scrubber-thumb {
+  position: absolute;
+  top: 50%;
+  left: var(--uvp-progress, 0%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background-color: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  transform: translate(-50%, -50%) scale(0);
+  transition: transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  pointer-events: none;
+}
+
+.uvp-scrubber-hit:hover .uvp-scrubber-thumb,
+.uvp-scrubber-hit[data-scrubbing="true"] .uvp-scrubber-thumb {
+  /* Counter the track's vertical hover scale so the handle stays circular. */
+  transform: translate(-50%, -50%) scaleY(0.666667);
+}
+
+/* Hover Preview Bubble */
+.uvp-hover-bubble {
+  position: absolute;
+  bottom: 24px;
+  left: var(--uvp-hover-x, 0px);
+  transform: translateX(-50%);
+  background: rgba(15, 23, 42, 0.94);
+  color: #ffffff;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+/* 7. Tabular-Nums Non-Wrapping Clock Lock */
+.uvp-clock {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.92);
+  gap: 4px;
+}
+
+/* 8. Desktop Volume Reveal (interpolate-size / calc-size) */
+.uvp-volume-group {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.uvp-volume-slider-wrap {
+  width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: width 200ms ease, opacity 200ms ease;
+  interpolate-size: allow-keywords;
+  display: flex;
+  align-items: center;
+}
+
+.uvp-volume-group:hover .uvp-volume-slider-wrap,
+.uvp-volume-group:focus-within .uvp-volume-slider-wrap {
+  width: 68px;
+  opacity: 1;
+}
+
+.uvp-volume-input {
+  width: 60px;
+  height: 4px;
+  accent-color: var(--tl-accent, #3b82f6);
+  cursor: pointer;
+}
+
+/* 9. Physics Spring Badges & Micro-Interactions */
+.uvp-spring-pop {
+  animation: uvp-spring-bounce 360ms linear;
+  animation-timing-function: linear(
+    0, 0.006, 0.025, 0.057, 0.103, 0.163, 0.236, 0.32, 0.413, 0.514, 0.619,
+    0.725, 0.828, 0.923, 1.006, 1.073, 1.121, 1.149, 1.157, 1.146, 1.121,
+    1.085, 1.044, 1.004, 0.969, 0.942, 0.925, 0.919, 0.922, 0.933, 0.95,
+    0.97, 0.99, 1.008, 1.021, 1.028, 1.029, 1.025, 1.018, 1.01, 1.003,
+    0.998, 0.995, 0.995, 0.997, 1
+  );
+}
+
+@supports not (animation-timing-function: linear(0, 1)) {
+  .uvp-spring-pop {
+    animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+}
+
+@keyframes uvp-spring-bounce {
+  0% {
+    transform: scale(0.85);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Hold-for-2x pill badge */
+.uvp-hold-2x-pill {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 35;
+  background: rgba(15, 23, 42, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+  padding: 6px 14px;
+  border-radius: 9999px;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+
+/* Double-tap Seek Combo Ripple */
+.uvp-seek-ripple {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 38%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 30;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.22) 0%, transparent 70%);
+}
+
+.uvp-seek-ripple-left {
+  left: 0;
+  border-top-right-radius: 50%;
+  border-bottom-right-radius: 50%;
+}
+
+.uvp-seek-ripple-right {
+  right: 0;
+  border-top-left-radius: 50%;
+  border-bottom-left-radius: 50%;
+}
+
+.uvp-seek-badge {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+  padding: 6px 12px;
+  border-radius: 9999px;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+}
+
+/* Fine-Scrubbing Guidance */
+.uvp-fine-scrub-guide {
+  position: absolute;
+  bottom: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 23, 42, 0.88);
+  border: 1px dashed var(--tl-accent, #3b82f6);
+  color: #ffffff;
+  padding: 4px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 35;
+}
+
+/* 10. Buffering Spinner (Wrapper Rotation for Rule 6.1) */
+.uvp-spinner-wrapper {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  animation: uvp-spin 900ms linear infinite;
+}
+
+@keyframes uvp-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 11. Overlays, Bottom Sheet & Settings Popover */
+.uvp-settings-sheet,
+.uvp-bottom-sheet,
+.uvp-shortcuts-modal {
+  background: color-mix(in srgb, var(--tl-surface, #0f172a) 68%, transparent);
+  backdrop-filter: blur(20px) saturate(165%);
+  -webkit-backdrop-filter: blur(20px) saturate(165%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--tl-text-primary, #f8fafc);
+  border-radius: 14px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.52), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  transition-behavior: allow-discrete;
+}
+
+/* Keyframes also provide an entrance on browsers without @starting-style. */
+.uvp-settings-sheet {
+  transition: opacity var(--uvp-motion-duration, 350ms) ease,
+    transform var(--uvp-motion-duration, 350ms) cubic-bezier(0.22, 1, 0.36, 1);
+  animation: uvp-settings-enter var(--uvp-motion-duration, 350ms) cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.uvp-bottom-sheet.uvp-settings-sheet {
+  animation-name: uvp-sheet-enter;
+}
+@keyframes uvp-settings-enter {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes uvp-sheet-enter {
+  from { opacity: 0; transform: translateY(100%); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.uvp-shortcuts-overlay {
+  animation: uvp-shortcuts-backdrop-enter var(--uvp-motion-duration, 350ms) ease both;
+  transition: opacity var(--uvp-motion-duration, 350ms) ease;
+}
+.uvp-shortcuts-modal {
+  animation: uvp-settings-enter var(--uvp-motion-duration, 350ms) cubic-bezier(0.22, 1, 0.36, 1) both;
+  transition: opacity var(--uvp-motion-duration, 350ms) ease,
+    transform var(--uvp-motion-duration, 350ms) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.uvp-shortcuts-overlay[data-closing="true"] {
+  animation: none !important;
+  opacity: 0 !important;
+  transform: none !important;
+  transition: opacity var(--uvp-motion-duration, 350ms) ease !important;
+}
+.uvp-shortcuts-overlay[data-closing="true"] .uvp-shortcuts-modal {
+  animation: none;
+  opacity: 0;
+  transform: translateY(8px) scale(0.96);
+}
+.uvp-shortcuts-overlay[data-motion-disabled="true"],
+.uvp-shortcuts-overlay[data-motion-disabled="true"] .uvp-shortcuts-modal {
+  animation: none;
+  transition: none;
+}
+@keyframes uvp-shortcuts-backdrop-enter { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .uvp-shortcuts-overlay, .uvp-shortcuts-modal { animation: none; transition: none; }
+}
+
+.uvp-settings-section {
+  animation: uvp-settings-section-forward calc(var(--uvp-motion-duration, 350ms) / 2) ease-out both;
+}
+.uvp-settings-section[data-direction="back"] {
+  animation-name: uvp-settings-section-back;
+}
+.uvp-settings-section[data-motion-disabled="true"] {
+  animation: none;
+}
+@keyframes uvp-settings-section-forward {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes uvp-settings-section-back {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .uvp-settings-section { animation: none; }
+}
+
+.uvp-settings-popover {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.38) transparent;
+}
+
+.uvp-settings-popover::-webkit-scrollbar {
+  width: 5px;
+}
+
+.uvp-settings-popover::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.uvp-settings-popover::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.35);
+  border-radius: 9999px;
+}
+
+.uvp-settings-popover::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.uvp-settings-popover {
+  bottom: calc(var(--uvp-bar-h, 44px) + 8px);
+  max-height: calc(100% - var(--uvp-bar-h, 44px) - 16px);
+}
+
+/* In-sheet and in-dialog buttons must respect theme text color (theme-clean-light contrast) */
+.uvp-settings-sheet .uvp-btn,
+.uvp-bottom-sheet .uvp-btn,
+.uvp-shortcuts-modal .uvp-btn {
+  color: var(--tl-text-primary, #ffffff);
+}
+
+.uvp-settings-sheet .uvp-btn:hover,
+.uvp-bottom-sheet .uvp-btn:hover,
+.uvp-shortcuts-modal .uvp-btn:hover {
+  background-color: var(--tl-surface-hover, rgba(255, 255, 255, 0.1));
+}
+
+/* Starting style for discrete popover / sheet entry */
+@starting-style {
+  .uvp-settings-sheet,
+  .uvp-shortcuts-modal {
+    opacity: 0;
+    transform: translateY(12px) scale(0.96);
+  }
+
+  .uvp-bottom-sheet {
+    opacity: 0;
+    transform: translateY(100%);
+  }
+}
+
+/* Exit transition via [data-closing="true"] avoiding Firefox Bug 1882408 */
+[data-closing="true"] {
+  opacity: 0 !important;
+  transform: translateY(8px) scale(0.96) !important;
+  transition: opacity 180ms ease-out, transform 180ms ease-out !important;
+}
+.uvp-settings-sheet[data-closing="true"] {
+  animation: none !important;
+  transition-duration: var(--uvp-motion-duration, 350ms) !important;
+}
+
+.uvp-bottom-sheet[data-closing="true"] {
+  opacity: 0 !important;
+  transform: translateY(100%) !important;
+  transition: opacity 180ms ease-out, transform 180ms ease-out !important;
+}
+.uvp-bottom-sheet.uvp-settings-sheet[data-closing="true"] {
+  transition-duration: var(--uvp-motion-duration, 350ms) !important;
+}
+
+/* Mobile Bottom Sheet Layout & Backdrop */
+.uvp-bottom-sheet::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+.uvp-bottom-sheet {
+  position: fixed;
+  top: auto;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  max-height: 75dvh;
+  border-radius: 16px 16px 0 0;
+  padding: 16px 16px max(16px, env(safe-area-inset-bottom)) 16px;
+  z-index: 50;
+  overflow-y: auto;
+}
+
+.uvp-sheet-handle {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--tl-border, #475569);
+  margin: 0 auto 12px auto;
+}
+
+/* Playback Error Overlay Scrim */
+.uvp-error-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 35;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.92);
+  color: #ffffff;
+  padding: 24px;
+  text-align: center;
+  gap: 12px;
+}
+
+/* 12. Container Queries Adaptation & Lively Micro-Interactions */
+.uvp-center-hud {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+}
+
+.uvp-center-hud .uvp-center-action {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  background: transparent;
+  color: #ffffff;
+}
+
+.uvp-center-action::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.58);
+  transition:
+    transform 260ms linear(0, 0.08, 0.45 18%, 1.07 42%, 0.98 68%, 1.01 84%, 1),
+    box-shadow 200ms ease-out,
+    background-color 180ms ease-out;
+}
+
+.uvp-center-action--play::before {
+  width: 44px;
+  height: 44px;
+  background: var(--tl-accent, var(--accent-color, #7c3aed));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.uvp-center-action svg {
+  position: relative;
+  z-index: 2;
+  display: block;
+  flex-shrink: 0;
+  color: var(--tl-accent-contrast, #ffffff);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .uvp-stage:not([data-motion-disabled="true"]) .uvp-center-action svg {
+    transition: transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  @media (hover: hover) {
+    .uvp-stage:not([data-motion-disabled="true"]) .uvp-center-action:hover::before {
+      transform: scale(1.1);
+    }
+    .uvp-stage:not([data-motion-disabled="true"]) .uvp-center-action:hover svg {
+      transform: scale(1.08);
+    }
+  }
+  .uvp-stage:not([data-motion-disabled="true"]) .uvp-center-action:active::before,
+  .uvp-stage:not([data-motion-disabled="true"]) .uvp-center-action:active svg {
+    transform: scale(0.88);
+  }
+}
+
+@container player-stage (max-width: 479px) {
+  .uvp-btn {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 8px;
+  }
+
+  .uvp-desktop-only {
+    display: none !important;
+  }
+
+  .uvp-stage:not([data-density="mini"]) .uvp-center-hud {
+    display: flex !important;
+  }
+
+  /* Leave room for the expanded progress target beneath the center actions. */
+  .uvp-density-cinema .uvp-center-hud {
+    position: absolute;
+    top: max(28px, calc(50% - 20px));
+    transform: translateY(-50%);
+  }
+
+  .uvp-controls-row {
+    justify-content: space-between;
+  }
+}
+
+/* Strictly scoped to Video Gallery minicards (.uvp-density-card) without touching cinema/mini */
+.uvp-density-card .uvp-bottom-bar {
+  padding: 0 8px 4px;
+  gap: 0;
+}
+
+.uvp-density-card .uvp-bottom-bar .uvp-scrubber-hit {
+  min-height: 16px;
+  height: 16px;
+}
+
+.uvp-density-card .uvp-bottom-bar .uvp-btn > svg {
+  width: 16px;
+  height: 16px;
+}
+
+.uvp-density-card .uvp-bottom-bar .uvp-clock {
+  font-size: 11px;
+}
+
+@media (pointer: fine) {
+  .uvp-density-card .uvp-bottom-bar .uvp-btn {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 4px;
+  }
+}
+
+.uvp-density-card .uvp-center-hud {
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: var(--uvp-bar-h, 0px) !important;
+  margin: 0 !important;
+  transform: none !important;
+  gap: clamp(0.4rem, 3cqi, 0.85rem);
+  pointer-events: none;
+}
+
+.uvp-density-card .uvp-center-hud .uvp-center-action {
+  pointer-events: auto;
+  width: clamp(30px, 11cqh, 40px);
+  height: clamp(30px, 11cqh, 40px);
+  min-width: clamp(30px, 11cqh, 40px);
+  min-height: clamp(30px, 11cqh, 40px);
+}
+
+.uvp-density-card .uvp-center-hud .uvp-center-action::before {
+  width: clamp(26px, 10cqh, 34px);
+  height: clamp(26px, 10cqh, 34px);
+}
+
+.uvp-density-card .uvp-center-hud .uvp-center-action--play {
+  width: clamp(36px, 14cqh, 46px);
+  height: clamp(36px, 14cqh, 46px);
+  min-width: clamp(36px, 14cqh, 46px);
+  min-height: clamp(36px, 14cqh, 46px);
+}
+
+.uvp-density-card .uvp-center-hud .uvp-center-action--play::before {
+  width: clamp(32px, 12.5cqh, 42px);
+  height: clamp(32px, 12.5cqh, 42px);
+}
+
+@media (pointer: coarse) {
+  .uvp-density-card .uvp-center-hud .uvp-center-action,
+  .uvp-density-card .uvp-center-hud .uvp-center-action--play {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+@container player-stage (max-width: 360px) {
+  .uvp-density-cinema .uvp-center-hud {
+    top: max(28px, calc(50% - 34px));
+  }
+}
+
+@container player-stage (max-width: 264px) {
+  .uvp-stage.uvp-density-cinema .uvp-center-hud {
+    display: none !important;
+  }
+}
+
+@container player-stage (min-width: 480px) {
+  .uvp-stage:not([data-density="mini"]) .uvp-center-hud {
+    display: flex !important;
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    pointer-events: none;
+    transition: opacity 200ms ease-out, transform 260ms linear(0, 0.08, 0.45 18%, 1.07 42%, 0.98 68%, 1.01 84%, 1);
+  }
+  .uvp-stage:not([data-density="mini"]) .uvp-center-hud[data-playing="true"] {
+    opacity: 0;
+    transform: scale(0.82);
+    pointer-events: none;
+  }
+  .uvp-stage:not([data-density="mini"]) .uvp-center-hud[data-playing="false"] {
+    opacity: 1;
+    transform: scale(1);
+  }
+  .uvp-center-hud .uvp-center-action--skip {
+    display: none !important;
+  }
+  .uvp-center-hud .uvp-center-action--play {
+    pointer-events: auto;
+    width: 60px !important;
+    height: 60px !important;
+    min-width: 60px !important;
+    min-height: 60px !important;
+  }
+  .uvp-center-action--play::before {
+    width: 56px;
+    height: 56px;
+  }
+}
+
+@media (pointer: fine) {
+  .uvp-density-mini .uvp-bottom-bar .uvp-btn {
+    min-width: 32px;
+    min-height: 32px;
+    padding: 6px;
+  }
+}
+
+/* Lively per-icon micro-interactions & single-SVG 4-point path morphing */
+.uvp-btn svg {
+  transition: transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@media (hover: hover) {
+  .uvp-btn--nudge-left:hover svg { transform: translateX(-2px) scale(1.06); }
+  .uvp-btn--nudge-right:hover svg { transform: translateX(2px) scale(1.06); }
+  .uvp-btn--tilt:hover svg { transform: rotate(-10deg) scale(1.1); }
+  .uvp-btn--spin:hover svg { transform: rotate(45deg) scale(1.08); }
+  .uvp-btn--pip:hover svg { transform: translate(1.5px, -1.5px) scale(1.08); }
+  .uvp-btn--theater:hover svg { transform: scaleX(1.12); }
+  .uvp-btn--expand:hover svg { transform: scale(1.14); }
+}
+
+.uvp-btn--nudge-left:active svg { transform: translateX(-4px) scale(0.92); }
+.uvp-btn--nudge-right:active svg { transform: translateX(4px) scale(0.92); }
+.uvp-btn--spin:active svg { transform: rotate(90deg) scale(0.9); }
+
+.uvp-morph-svg {
+  display: block;
+  overflow: visible;
+  pointer-events: none;
+  transition: transform 280ms linear(0, 0.08, 0.45 18%, 1.07 42%, 0.98 68%, 1.01 84%, 1);
+}
+
+.uvp-morph-path {
+  transition: d 260ms linear(0, 0.08, 0.45 18%, 1.07 42%, 0.98 68%, 1.01 84%, 1);
+}
+
+.uvp-morph-svg[data-playing="true"] .uvp-morph-path--left {
+  d: path("M 6 5 L 10 5 L 10 19 L 6 19 Z");
+}
+
+.uvp-morph-svg[data-playing="true"] .uvp-morph-path--right {
+  d: path("M 14 5 L 18 5 L 18 19 L 14 19 Z");
+}
+
+.uvp-morph-svg[data-playing="false"] .uvp-morph-path--left {
+  d: path("M 7 5 L 13 8.5 L 13 15.5 L 7 19 Z");
+}
+
+.uvp-morph-svg[data-playing="false"] .uvp-morph-path--right {
+  d: path("M 13 8.5 L 19 12 L 19 12 L 13 15.5 Z");
+}
+
+/* 13. Reduced Motion Reset Block */
+@media (pointer: coarse) {
+  .uvp-settings-sheet button { min-width: 44px; min-height: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .uvp-stage *,
+  .uvp-stage *::before,
+  .uvp-stage *::after,
+  .uvp-morph-svg,
+  .uvp-morph-path {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .uvp-ambient-glow {
+    display: none !important;
+  }
+
+  .uvp-spring-pop {
+    animation: none !important;
+  }
+}

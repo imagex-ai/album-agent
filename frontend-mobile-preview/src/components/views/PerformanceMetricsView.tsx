@@ -204,7 +204,7 @@ export const PerformanceMetricsView: React.FC = () => {
         id: 'sub360p',
         label: '< 360p',
         range: '< 640×360 px (Web/Thumb)',
-        badge: 'Miniaturas',
+        badge: tPerf.tierThumbnails || (isEn ? 'Thumbnails' : 'Miniaturas'),
         count: rSub360,
         pct: calcPct(rSub360),
         color: 'bg-rose-500',
@@ -215,8 +215,8 @@ export const PerformanceMetricsView: React.FC = () => {
       {
         id: 'unknown',
         label: '0×0',
-        range: 'Não dimensionado / Stream',
-        badge: 'Direto',
+        range: tPerf.tierUndimensioned || (isEn ? 'Undimensioned / Stream' : 'Não dimensionado / Stream'),
+        badge: tPerf.tierDirect || (isEn ? 'Direct' : 'Direto'),
         count: rUnknown,
         pct: calcPct(rUnknown),
         color: 'bg-slate-600',
@@ -225,7 +225,7 @@ export const PerformanceMetricsView: React.FC = () => {
         glowColor: 'shadow-slate-600/20'
       }
     ].filter(tier => tier.count > 0 || total === 0);
-  }, [allImages]);
+  }, [allImages, isEn, tPerf]);
 
   // 2. Top Resoluções Reais em Números (Largura × Altura)
   const topExactResolutions = useMemo(() => {
@@ -288,7 +288,7 @@ export const PerformanceMetricsView: React.FC = () => {
           onClick={handleGlobalRefresh}
           disabled={isRefreshing}
           className="self-start sm:self-auto px-3.5 py-1.5 rounded-xl bg-surface-elevated hover:bg-surface border border-border text-xs text-slate-200 hover:text-white flex items-center gap-2 transition-all shadow-sm"
-          title="Sincronizar com banco de dados e arquivos locais"
+          title={isEn ? "Sync with database and local files" : "Sincronizar com banco de dados e arquivos locais"}
         >
           <RefreshCw size={13} className={isRefreshing ? 'animate-spin text-brand-400' : 'text-slate-400'} />
           <span>{isRefreshing ? (isEn ? 'Syncing...' : 'Sincronizando...') : (isEn ? 'Live Refresh' : 'Atualizar Dados')}</span>
@@ -300,7 +300,7 @@ export const PerformanceMetricsView: React.FC = () => {
         {/* Card 1: Volume da Biblioteca */}
         <div className="p-4 sm:p-5 glass-panel rounded-3xl border border-border space-y-2">
           <div className="flex items-center justify-between text-slate-400 text-xs">
-            <span>Volume da Biblioteca</span>
+            <span>{tPerf.libraryVolume || (isEn ? "Library Volume" : "Volume da Biblioteca")}</span>
             <Database size={16} className="text-accent-purple shrink-0" />
           </div>
           <div className="text-xl sm:text-2xl font-extrabold font-mono text-slate-100">
@@ -316,7 +316,7 @@ export const PerformanceMetricsView: React.FC = () => {
           <div className="flex items-center justify-between text-amber-300 text-xs">
             <span className="font-bold flex items-center gap-1">
               <HardDrive size={14} className="text-amber-400 shrink-0" />
-              <span>Gravado no PC (Local)</span>
+              <span>{tPerf.savedToPc || (isEn ? "Saved to PC (Local)" : "Gravado no PC (Local)")}</span>
             </span>
             <span className="text-[9px] px-1.5 py-0.5 rounded-full font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
               {localStorage?.drive_letter || 'C:'}
@@ -326,28 +326,28 @@ export const PerformanceMetricsView: React.FC = () => {
             {formatBytes(localStorage?.total_app_bytes || 0)}
           </div>
           <p className="text-[10px] sm:text-[11px] text-slate-300 font-medium truncate">
-            {localStorage ? `${(localStorage.videos_count || 0)} vídeos • ${formatBytes(localStorage.cache_bytes || 0)} cache` : 'Carregando disco...'}
+            {localStorage ? `${(localStorage.videos_count || 0)} ${tPerf.videosWord || (isEn ? "videos" : "vídeos")} • ${formatBytes(localStorage.cache_bytes || 0)} ${tPerf.cacheWord || "cache"}` : (tPerf.loadingDisk || (isEn ? 'Loading disk...' : 'Carregando disco...'))}
           </p>
         </div>
 
         {/* Card 3: Rendimento Original */}
         <div className="p-4 sm:p-5 glass-panel rounded-3xl border border-border space-y-2">
           <div className="flex items-center justify-between text-slate-400 text-xs">
-            <span>Rendimento Original</span>
+            <span>{tPerf.originalYield || (isEn ? "Original Yield" : "Rendimento Original")}</span>
             <Sparkles size={16} className="text-emerald-400 shrink-0" />
           </div>
           <div className="text-xl sm:text-2xl font-extrabold font-mono text-emerald-400">
             {totalImages > 0 ? `${yieldPercent}% Yield` : '0%'}
           </div>
           <p className="text-[10px] sm:text-[11px] text-slate-400 font-medium truncate">
-            {(tPerf.resolvedOriginals || '{count} de {total} fotos em resolução original').replace('{count}', String(resolvedImages.length)).replace('{total}', String(totalImages))}
+            {(tPerf.resolvedOriginals || (isEn ? '{count} of {total} photos in original resolution' : '{count} de {total} fotos em resolução original')).replace('{count}', String(resolvedImages.length)).replace('{total}', String(totalImages))}
           </p>
         </div>
 
         {/* Card 4: Total de Imagens */}
         <div className="p-4 sm:p-5 glass-panel rounded-3xl border border-border space-y-2">
           <div className="flex items-center justify-between text-slate-400 text-xs">
-            <span>Total de Imagens</span>
+            <span>{tPerf.totalImages || (isEn ? "Total Images" : "Total de Imagens")}</span>
             <ImageIcon size={16} className="text-brand-400 shrink-0" />
           </div>
           <div className="text-xl sm:text-2xl font-extrabold font-mono text-brand-400">
@@ -437,7 +437,7 @@ export const PerformanceMetricsView: React.FC = () => {
               </div>
               <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
                 <span>0 px</span>
-                <span>{(tPerf.photosAnalyzed || "{count} fotos analisadas").replace('{count}', allImages.length.toLocaleString())}</span>
+                <span>{(tPerf.photosAnalyzed || (isEn ? "{count} photos analyzed" : "{count} fotos analisadas")).replace('{count}', allImages.length.toLocaleString())}</span>
                 <span>≥ 3840 px</span>
               </div>
             </div>
@@ -480,8 +480,8 @@ export const PerformanceMetricsView: React.FC = () => {
             {activeTab === 'exact' && (
               <div className="space-y-2 pt-1">
                 <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span>{tPerf.mostFrequentDimensions || "Resoluções mais frequentes na biblioteca:"}</span>
-                  <span className="font-mono text-[11px] text-slate-500">Top 12 dimensões identificadas</span>
+                  <span>{tPerf.mostFrequentDimensions || (isEn ? "Most frequent resolutions in library:" : "Resoluções mais frequentes na biblioteca:")}</span>
+                  <span className="font-mono text-[11px] text-slate-500">{tPerf.topExactIdentified || (isEn ? "Top 12 identified dimensions" : "Top 12 dimensões identificadas")}</span>
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
                   {topExactResolutions.map(item => (
@@ -527,7 +527,7 @@ export const PerformanceMetricsView: React.FC = () => {
         <div className="glass-panel p-4 sm:p-5 rounded-3xl border border-border space-y-3">
           <h3 className="font-bold text-xs sm:text-sm text-slate-200 flex items-center gap-2">
             <FileImage size={16} className="text-brand-400" />
-            <span>Formatos de Imagem Detectados</span>
+            <span>{tPerf.detectedFormats || (isEn ? "Detected Image Formats" : "Formatos de Imagem Detectados")}</span>
           </h3>
           {Object.keys(formatCounts).length > 0 ? (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
@@ -542,7 +542,7 @@ export const PerformanceMetricsView: React.FC = () => {
               ))}
             </div>
           ) : (
-            <p className="text-xs text-slate-500">Nenhum formato registrado.</p>
+            <p className="text-xs text-slate-500">{tPerf.noFormatsRegistered || (isEn ? "No formats registered." : "Nenhum formato registrado.")}</p>
           )}
         </div>
 
@@ -562,10 +562,10 @@ export const PerformanceMetricsView: React.FC = () => {
               <span className="font-mono font-bold text-slate-200">{albums.length.toLocaleString()}</span>
             </div>
             <div className="flex justify-between p-2.5 rounded-xl bg-surface-elevated/30 border border-border/50">
-              <span className="text-slate-400">Fila de Processamento:</span>
+              <span className="text-slate-400">{tPerf.processingQueue || (isEn ? "Processing Queue:" : "Fila de Processamento:")}</span>
               <span className="font-mono font-bold text-slate-200 flex items-center gap-1.5">
                 {activeJobsCount > 0 && <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>}
-                <span>{activeJobsCount} em andamento</span>
+                <span>{(tPerf.inProgress || (isEn ? "{count} in progress" : "{count} em andamento")).replace('{count}', String(activeJobsCount))}</span>
               </span>
             </div>
           </div>
@@ -609,10 +609,10 @@ const StorageInfrastructureSection: React.FC<StorageInfrastructureProps> = ({ st
         <div>
           <h2 className="text-sm sm:text-base font-black text-slate-100 flex items-center gap-2">
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-            <span>Infraestrutura de Armazenamento: Disco Local (PC) & Nuvem</span>
+            <span>{tPerf.storageInfrastructureTitle || (isEn ? "Storage Infrastructure: Local Disk (PC) & Cloud" : "Infraestrutura de Armazenamento: Disco Local (PC) & Nuvem")}</span>
           </h2>
           <p className="text-xs text-slate-400">
-            Monitoramento físico e remoto: Disco Rígido deste computador, Hugging Face Hub e Streams sem download
+            {tPerf.storageInfrastructureSubtitle || (isEn ? "Physical and remote monitoring: Hard Drive of this computer, Hugging Face Hub, and streams without download" : "Monitoramento físico e remoto: Disco Rígido deste computador, Hugging Face Hub e Streams sem download")}
           </p>
         </div>
         <button
@@ -644,16 +644,16 @@ const StorageInfrastructureSection: React.FC<StorageInfrastructureProps> = ({ st
                 {formatBytes(localDisk?.total_app_bytes || 0)}
               </span>
               <span className="text-xs font-mono text-slate-400">
-                gravado pelo app
+                {tPerf.savedByApp || (isEn ? "saved by app" : "gravado pelo app")}
               </span>
             </div>
 
             {/* Accessible Progress Bar seguindo Modern Web Guidance */}
             <div className="space-y-1 pt-0.5">
               <div className="flex justify-between text-[10px] font-mono text-slate-400">
-                <span>{isEn ? "Drive Usage:" : "Uso do Disco:"}</span>
+                <span>{tPerf.driveUsageLabel || (isEn ? "Drive Usage:" : "Uso do Disco:")}</span>
                 <span className="text-amber-300 font-bold">
-                  {localDisk?.drive_used_percentage || 0}% ({formatBytes(localDisk?.drive_used_bytes || 0)} de {formatBytes(localDisk?.drive_total_bytes || 0)})
+                  {localDisk?.drive_used_percentage || 0}% ({formatBytes(localDisk?.drive_used_bytes || 0)} {isEn ? "of" : "de"} {formatBytes(localDisk?.drive_total_bytes || 0)})
                 </span>
               </div>
               <progress
@@ -667,21 +667,21 @@ const StorageInfrastructureSection: React.FC<StorageInfrastructureProps> = ({ st
 
           <div className="text-[11px] text-slate-400 space-y-1 pt-1 border-t border-border/40">
             <div className="flex justify-between">
-              <span>Vídeos no Disco:</span>
+              <span>{tPerf.videosOnDisk || (isEn ? "Videos on Disk:" : "Vídeos no Disco:")}</span>
               <span className="font-mono text-slate-200">
-                {formatBytes(localDisk?.videos_bytes || 0)} ({(localDisk?.videos_count || 0)} vídeos)
+                {formatBytes(localDisk?.videos_bytes || 0)} ({(localDisk?.videos_count || 0)} {tPerf.videosWord || (isEn ? "videos" : "vídeos")})
               </span>
             </div>
             <div className="flex justify-between">
-              <span>Cache SSD (Imagens):</span>
+              <span>{tPerf.ssdCacheImages || (isEn ? "SSD Cache (Images):" : "Cache SSD (Imagens):")}</span>
               <span className="font-mono text-slate-200">
-                {formatBytes(localDisk?.cache_bytes || 0)} ({(localDisk?.cache_files_count || 0).toLocaleString()} fotos)
+                {formatBytes(localDisk?.cache_bytes || 0)} ({(localDisk?.cache_files_count || 0).toLocaleString()} {tPerf.photosWord || (isEn ? "photos" : "fotos")})
               </span>
             </div>
             <div className="flex justify-between">
-              <span>Espaço Livre no PC:</span>
+              <span>{tPerf.freeSpaceOnPc || (isEn ? "Free Space on PC:" : "Espaço Livre no PC:")}</span>
               <span className="font-bold text-emerald-400 font-mono">
-                {formatBytes(localDisk?.drive_free_bytes || 0)} livres
+                {formatBytes(localDisk?.drive_free_bytes || 0)} {tPerf.freeLabel || (isEn ? "free" : "livres")}
               </span>
             </div>
           </div>
@@ -689,7 +689,9 @@ const StorageInfrastructureSection: React.FC<StorageInfrastructureProps> = ({ st
           {localDisk?.is_low_space && (
             <p className="text-[10px] text-amber-300/90 leading-tight flex items-start gap-1 pt-1 border-t border-amber-500/20">
               <AlertTriangle size={13} className="text-amber-400 shrink-0 mt-0.5" />
-              <span>Atenção: Restam {formatBytes(localDisk?.drive_free_bytes || 0)} de espaço livre no drive {localDisk?.drive_letter}. Os arquivos estão seguros permanentemente no seu disco local.</span>
+              <span>
+                {(tPerf.lowSpaceAttention || (isEn ? "Warning: {free} of free space remaining on drive {drive}. Files are permanently safe on your local disk." : "Atenção: Restam {free} de espaço livre no drive {drive}. Os arquivos estão seguros permanentemente no seu disco local.")).replace('{free}', formatBytes(localDisk?.drive_free_bytes || 0)).replace('{drive}', localDisk?.drive_letter || 'C:')}
+              </span>
             </p>
           )}
         </div>
@@ -704,7 +706,7 @@ const StorageInfrastructureSection: React.FC<StorageInfrastructureProps> = ({ st
             <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold ${
               hf?.is_connected ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
             }`}>
-              {hf?.is_connected ? '● CONECTADO' : '○ OFFLINE'}
+              {hf?.is_connected ? (tPerf.connected || (isEn ? '● CONNECTED' : '● CONECTADO')) : (tPerf.offline || (isEn ? '○ OFFLINE' : '○ OFFLINE'))}
             </span>
           </div>
 
@@ -714,7 +716,7 @@ const StorageInfrastructureSection: React.FC<StorageInfrastructureProps> = ({ st
                 {formatBytes(hf?.total_bytes_used || 0)}
               </span>
               <span className="text-xs font-mono text-slate-400">
-                de 10.00 GB ref ({hf?.used_percentage || 0}%)
+                {(tPerf.ofRef || (isEn ? "of {total} ref ({pct}%)" : "de {total} ref ({pct}%)")).replace('{total}', '10.00 GB').replace('{pct}', String(hf?.used_percentage || 0))}
               </span>
             </div>
             {/* Progress bar */}
@@ -738,8 +740,8 @@ const StorageInfrastructureSection: React.FC<StorageInfrastructureProps> = ({ st
               <span className="font-mono text-slate-200">{(hf?.app_recorded_videos || hf?.files_count || 0).toLocaleString()}</span>
             </div>
             <div className="flex justify-between">
-              <span>Custo:</span>
-              <span className="font-bold text-emerald-400">{tPerf.freeForever || "100% Gratuito (Sem Cartão)"}</span>
+              <span>{tPerf.cost || (isEn ? "Cost:" : "Custo:")}</span>
+              <span className="font-bold text-emerald-400">{tPerf.freeForever || (isEn ? "100% Free (No Credit Card)" : "100% Gratuito (Sem Cartão)")}</span>
             </div>
           </div>
         </div>
@@ -749,10 +751,10 @@ const StorageInfrastructureSection: React.FC<StorageInfrastructureProps> = ({ st
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-cyan-400 flex items-center gap-1.5">
               <Link2 size={15} className="text-cyan-400" />
-              <span>Streaming Puro (URLs)</span>
+              <span>{tPerf.pureStreaming || (isEn ? "Pure Streaming (URLs)" : "Streaming Puro (URLs)")}</span>
             </span>
             <span className="text-[10px] px-2 py-0.5 rounded-full font-mono font-bold bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">
-              ZERO DISCO
+              {tPerf.zeroDisk || (isEn ? "ZERO DISK" : "ZERO DISCO")}
             </span>
           </div>
 
@@ -762,7 +764,7 @@ const StorageInfrastructureSection: React.FC<StorageInfrastructureProps> = ({ st
                 {(streamOnly?.videos_count || 0).toLocaleString()} {isEn ? "videos" : "vídeos"}
               </span>
               <span className="text-xs font-mono text-slate-400">
-                0 MB consumidos
+                {tPerf.zeroConsumed || (isEn ? "0 MB consumed" : "0 MB consumidos")}
               </span>
             </div>
             <div className="w-full h-2 rounded-full overflow-hidden bg-slate-800">
@@ -772,7 +774,7 @@ const StorageInfrastructureSection: React.FC<StorageInfrastructureProps> = ({ st
 
           <div className="text-[11px] text-slate-400 space-y-1 pt-1 border-t border-border/40">
             <p className="text-[10px] text-slate-300 leading-tight">
-              {isEn ? "Videos streamed directly from origin servers without physical download, saving 100% disk storage on your PC." : "Vídeos reproduzidos diretamente do servidor de origem sem download físico, preservando 100% do espaço no seu disco rígido."}
+              {tPerf.pureStreamingDesc || (isEn ? "Videos streamed directly from origin servers without physical download, saving 100% disk storage on your PC." : "Vídeos reproduzidos diretamente do servidor de origem sem download físico, preservando 100% do espaço no seu disco rígido.")}
             </p>
           </div>
         </div>

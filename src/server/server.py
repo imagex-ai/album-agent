@@ -44,8 +44,13 @@ from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 
 if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    try:
+        if sys.version_info < (3, 14):
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
 
+import httpcore
 import httpx
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request, Response, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
@@ -53,8 +58,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from .video_service import video_service, sanitize_folder_name
+from .stream_registration_lookup import StreamRegistrationLookup
+from .proxy_image_guard import is_valid_image_response
 from .trash_service import trash_service
 from .library_responses import LibraryResponseCache, accepts_gzip, album_page
+from .challenge_solver import apply_ytdlp_pornhub_patch
+
+apply_ytdlp_pornhub_patch()
 
 from ..core.models import Album, AlbumImage, ResolutionMethod, TelemetryMetrics
 from ..core.media_classification import normalize_media_item, update_album_media_metadata, apply_image_animation, verify_media_animation, filter_album_media, media_category
@@ -108,7 +118,11 @@ from ..core.network_profiles import (
     get_video_host_indicators,
     suggest_smart_folder_name,
     load_cookie_string_into_cookiejar,
+    normalize_ytdlp_video_info,
+    split_mux_audio_url,
 )
+from ..core.stream_identity import redirected_progressive_video
+from .profile_hub_resolution import PhotoResolveRequest, PhotoResolveResult, resolve_photo_original
 
 logger = logging.getLogger("agent_server")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -122,6 +136,16 @@ def is_auto_cloud_sync_enabled() -> bool:
 app = FastAPI(title="AI Album Intelligence Agent API")
 @app.on_event("startup")
 async def on_app_startup():
+    # Load existing albums, jobs and start thumbnail healing at server startup
+    _load_albums_from_disk()
+    _load_jobs_from_disk(clear_zombies=True)
+    from src.core.startup_policy import startup_maintenance_enabled
+    if not startup_maintenance_enabled():
+        return
+    try:
+        video_service.auto_heal_all_thumbnails(background=True)
+    except Exception as e_th:
+        logger.warning(f"Could not auto-heal thumbnails on startup: {e_th}")
     asyncio.create_task(auto_migrate_palettes_in_background())
 
 
@@ -336,9 +360,11 @@ def _load_jobs_from_disk(clear_zombies: bool = False):
     If local disk was wiped (Render restart), restores from HF first.
     clear_zombies should only be True on initial server startup."""
     global _active_jobs, _startup_zombies_cleared
+    from src.core.startup_policy import startup_maintenance_enabled
+    maintenance = startup_maintenance_enabled()
 
     # --- Restore jobs.json from HF if local is missing and auto-sync is enabled ---
-    if (not os.path.exists(JOBS_FILE) or os.path.getsize(JOBS_FILE) < 3) and is_auto_cloud_sync_enabled():
+    if maintenance and (not os.path.exists(JOBS_FILE) or os.path.getsize(JOBS_FILE) < 3) and is_auto_cloud_sync_enabled():
         try:
             from src.server.video_service import cloud_storage as _cs
             if _cs.is_connected():
@@ -472,7 +498,7 @@ def _load_jobs_from_disk(clear_zombies: bool = False):
                 j["progress"]["status"] = "Pausado (aguardando retomada manual)"
             updated = True
 
-    if updated:
+    if updated and maintenance:
         _save_jobs_to_disk()
 
 
@@ -531,40 +557,60 @@ def _save_jobs_to_disk(sync_hf: bool = False):
 
 
 def is_placeholder_image(url: Optional[str]) -> bool:
-    """Checks if a URL is empty or points to a 1px transparent placeholder."""
+    """Checks if a URL is empty, points to a dead blob:, or points to a 1px transparent placeholder."""
     if not url:
         return True
-    u_low = str(url).lower()
+    u_low = str(url).strip().lower()
+    if not u_low:
+        return True
+    if u_low.startswith("blob:"):
+        return True
     return any(p in u_low for p in ("1px.png", "1px.gif", "blank.gif", "spacer.gif", "transparent.png"))
 
 
 def ensure_album_cover(album: Album) -> bool:
     """
     Ensures the album has a non-placeholder cover_image_url if images exist.
-    Also heals internal images having 1px.png thumbnail_url by replacing with original_url.
+    Also heals internal images having placeholder or dead blob thumbnail_url by replacing with poster_url or original_url.
     Returns True if the album was modified.
     """
     modified = False
 
-    # 1. Clean internal images that have 1px placeholder thumbnails
+    # 1. Clean internal images that have placeholder thumbnails
     for img in album.images:
-        if is_placeholder_image(img.thumbnail_url) and img.original_url and not is_placeholder_image(img.original_url):
-            img.thumbnail_url = img.original_url
-            modified = True
+        is_video = getattr(img, "media_type", None) == "video"
+        if is_placeholder_image(img.thumbnail_url):
+            if is_video:
+                if getattr(img, "poster_url", None) and not is_placeholder_image(img.poster_url):
+                    img.thumbnail_url = img.poster_url
+                    modified = True
+            else:
+                if img.original_url and not is_placeholder_image(img.original_url):
+                    img.thumbnail_url = img.original_url
+                    modified = True
 
     # 2. Check if album cover is missing or a placeholder
     if is_placeholder_image(album.cover_image_url):
         valid_img_url = None
         for img in album.images:
-            if img.original_url and not is_placeholder_image(img.original_url):
-                valid_img_url = img.original_url
-                break
-            if img.thumbnail_url and not is_placeholder_image(img.thumbnail_url):
-                valid_img_url = img.thumbnail_url
-                break
-            if getattr(img, "poster_url", None) and not is_placeholder_image(img.poster_url):
-                valid_img_url = img.poster_url
-                break
+            is_video = getattr(img, "media_type", None) == "video"
+            if is_video:
+                if getattr(img, "poster_url", None) and not is_placeholder_image(img.poster_url):
+                    valid_img_url = img.poster_url
+                    break
+                if img.thumbnail_url and not is_placeholder_image(img.thumbnail_url):
+                    valid_img_url = img.thumbnail_url
+                    break
+            else:
+                if img.thumbnail_url and not is_placeholder_image(img.thumbnail_url):
+                    valid_img_url = img.thumbnail_url
+                    break
+                if img.original_url and not is_placeholder_image(img.original_url):
+                    valid_img_url = img.original_url
+                    break
+                if getattr(img, "poster_url", None) and not is_placeholder_image(img.poster_url):
+                    valid_img_url = img.poster_url
+                    break
 
         if valid_img_url:
             album.cover_image_url = valid_img_url
@@ -673,11 +719,11 @@ def sanitize_album_images(album: Album) -> Album:
     return update_album_media_metadata(album)
 
 
-async def _finalize_extracted_media(album: Album, media_filter: str = "all") -> Album:
+async def _finalize_extracted_media(album: Album, media_filter: str = "all", *, transport=None) -> Album:
     """Resolve uncertain animation containers for this new extraction only."""
     album = sanitize_album_images(album)
     semaphore = asyncio.Semaphore(6)
-    async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, **({'transport': transport} if transport is not None else {})) as client:
         async def verify(item):
             async with semaphore:
                 await verify_media_animation(item, client, referer=album.source_page,
@@ -910,6 +956,8 @@ def _load_albums_from_disk():
     """Loads previously saved albums from data/albums/ on startup.
     Fast path: returns in 0ms if directory mtime has not changed."""
     global _hf_restore_done, _last_albums_dir_mtime, _summaries_dirty, _disk_album_mtimes
+    from src.core.startup_policy import startup_maintenance_enabled
+    maintenance = startup_maintenance_enabled()
     if not os.path.exists(ALBUMS_DIR):
         return
 
@@ -927,7 +975,7 @@ def _load_albums_from_disk():
         try:
             from src.server.video_service import cloud_storage as _cs
             local_has_albums = os.path.exists(ALBUMS_DIR) and len(os.listdir(ALBUMS_DIR)) > 0
-            if _cs.is_connected() and (is_auto_cloud_sync_enabled() or not local_has_albums):
+            if maintenance and (is_auto_cloud_sync_enabled() or not local_has_albums) and _cs.is_connected():
                 # 1. Restore Cloud/Render albums
                 cloud_paths = _cs.list_files_in_folder("albums")
                 for hf_path in cloud_paths:
@@ -980,7 +1028,7 @@ def _load_albums_from_disk():
         with os.scandir(ALBUMS_DIR) as entries:
             for entry in entries:
                 if not entry.name.endswith(".json") or entry.name.startswith("vid_page_"):
-                    if entry.name.startswith("vid_page_") and entry.name.endswith(".json"):
+                    if maintenance and entry.name.startswith("vid_page_") and entry.name.endswith(".json"):
                         try:
                             os.remove(entry.path)
                         except Exception:
@@ -1029,12 +1077,18 @@ def _load_albums_from_disk():
                             alb_instance.metadata["folder"] = "Geral"
                         needs_disk_persist = True
 
-                    sanitize_album_images(alb_instance)
-                    if set(alb_instance.tags or []) != set(data.get("tags") or []):
-                        needs_disk_persist = True
+                    # Only run deep per-image URL sanitize and cover check if tags or cover are missing
+                    # Every saved album has already been sanitized by _save_album_to_disk
+                    if needs_disk_persist or not getattr(alb_instance, "cover_image_url", None) or not getattr(alb_instance, "tags", None):
+                        sanitize_album_images(alb_instance)
+                        if set(alb_instance.tags or []) != set(data.get("tags") or []):
+                            needs_disk_persist = True
 
-                    healed = ensure_album_cover(alb_instance)
-                    if healed or needs_disk_persist:
+                        healed = ensure_album_cover(alb_instance)
+                        if healed:
+                            needs_disk_persist = True
+
+                    if needs_disk_persist and maintenance:
                         try:
                             with open(fpath, "w", encoding="utf-8") as wf:
                                 json.dump(alb_instance.model_dump() if hasattr(alb_instance, "model_dump") else alb_instance.dict(), wf, indent=2, ensure_ascii=False)
@@ -1067,13 +1121,8 @@ def _load_albums_from_disk():
         _mark_album_summaries_dirty()
 
 
-# Load any existing albums, jobs and thumbnails on startup
-_load_albums_from_disk()
-_load_jobs_from_disk(clear_zombies=True)
-try:
-    video_service.auto_heal_all_thumbnails(background=True)
-except Exception as e_th:
-    logger.warning(f"Could not auto-heal thumbnails on startup: {e_th}")
+# Eager module import blocks removed; loading is triggered by FastAPI on_app_startup
+# or on-demand on first endpoint access.
 
 
 
@@ -1090,6 +1139,7 @@ class AnalyzeRequest(BaseModel):
     media_type_filter: Optional[str] = "all"  # "all", "images", "videos", "gifs"
     folder: Optional[str] = "Geral"
     selected_image_urls: Optional[List[str]] = None
+    strict_profile_selection: bool = False
     download_locally: Optional[bool] = False
 
 
@@ -1215,7 +1265,7 @@ def _infer_extension_from_magic_or_mime(raw_bytes: bytes = b"", content_type: st
     return ".jpg" 
 
 
-APP_VERSION = "5.6.1"
+APP_VERSION = "5.7.0"
 
 
 @app.get("/api/health")
@@ -1492,8 +1542,9 @@ async def proxy_image(
 
     try:
         res = await client.get(url, headers=headers)
-        if res.status_code == 200:
-            raw_bytes = res.content
+        if res.status_code in (200, 401, 403):
+            raw_bytes = res.content if res.status_code == 200 else b""
+            header_ct = res.headers.get("content-type", "")
             # Detecção Semântica e Física Agnóstica de Bloqueio de Hotlink
             generic_err_sigs = (
                 b"hotlink", b"hot-link", b"hotlinking",
@@ -1501,7 +1552,10 @@ async def proxy_image(
                 b"embed image", b"direct linking", b"bandwidth limit",
                 b"not allowed"
             )
-            is_hotlink_err = len(raw_bytes) < 25000 and any(sig in raw_bytes[:8192].lower() for sig in generic_err_sigs)
+            valid_initial, detected_mime = is_valid_image_response(res.status_code, header_ct, raw_bytes)
+            is_hotlink_err = (res.status_code in (401, 403)) or (not valid_initial) or (
+                len(raw_bytes) < 25000 and any(sig in raw_bytes[:8192].lower() for sig in generic_err_sigs)
+            )
             if not is_hotlink_err and len(raw_bytes) < 25000:
                 try:
                     from PIL import Image as PILImage
@@ -1512,7 +1566,7 @@ async def proxy_image(
                     pass
 
             if is_hotlink_err:
-                logger.warning(f"[ProxyImage] Bloqueio de hotlink detectado para {url}. Tentando fallbacks universais...")
+                logger.warning(f"[ProxyImage] Bloqueio/resposta inválida detectada ({res.status_code}) para {url}. Tentando fallbacks universais...")
                 parsed_m = urllib.parse.urlparse(url)
                 media_apex = get_apex_domain(parsed_m.netloc)
                 media_origin = f"{parsed_m.scheme}://{media_apex}"
@@ -1532,8 +1586,12 @@ async def proxy_image(
                         res_retry = await client.get(url, headers=retry_hdrs)
                         if res_retry.status_code == 200:
                             raw_retry = res_retry.content
+                            retry_ct = res_retry.headers.get("content-type", "")
+                            retry_valid, retry_mime = is_valid_image_response(res_retry.status_code, retry_ct, raw_retry)
                             retry_lead = raw_retry[:8192].lower()
-                            retry_is_err = len(raw_retry) < 25000 and any(sig in retry_lead for sig in generic_err_sigs)
+                            retry_is_err = (not retry_valid) or (
+                                len(raw_retry) < 25000 and any(sig in retry_lead for sig in generic_err_sigs)
+                            )
                             if not retry_is_err and len(raw_retry) < 25000:
                                 try:
                                     from PIL import Image as PILImage
@@ -1542,18 +1600,21 @@ async def proxy_image(
                                             retry_is_err = True
                                 except Exception:
                                     pass
-                            if not retry_is_err and len(raw_retry) > 1000:
+                            if not retry_is_err and retry_valid:
                                 raw_bytes = raw_retry
                                 res = res_retry
+                                detected_mime = retry_mime
                                 is_hotlink_err = False
                                 logger.info(f"[ProxyImage] Anti-hotlink recovery successful via fallback: {alt_hdrs.get('Referer', 'no-referer')}")
                                 break
                     except Exception as eret:
                         logger.debug(f"[ProxyImage] Fallback falhou: {eret}")
 
-            if is_hotlink_err:
-                raise HTTPException(status_code=403, detail="Bloqueio de hotlink do provedor remoto ativo")
-            media_type = res.headers.get("content-type", "").lower()
+            final_valid, final_mime = is_valid_image_response(res.status_code, res.headers.get("content-type", ""), raw_bytes)
+            if is_hotlink_err or not final_valid:
+                status_err = 502 if res.status_code == 200 else (403 if res.status_code in (401, 403) else res.status_code)
+                raise HTTPException(status_code=status_err, detail="Bloqueio de hotlink ou resposta não-imagem do provedor remoto")
+            media_type = (final_mime or res.headers.get("content-type", "")).lower()
             if raw_bytes.startswith((b'GIF87a', b'GIF89a')) or url.lower().endswith(".gif"):
                 media_type = "image/gif"
             elif b'WEBP' in raw_bytes[:32] or url.lower().endswith(".webp"):
@@ -1599,6 +1660,12 @@ async def proxy_image(
 
 
 
+@app.post("/api/resolve-image", response_model=PhotoResolveResult)
+async def api_resolve_single_image(req: PhotoResolveRequest):
+    """Universal dynamic single photo/image resolution endpoint."""
+    return await resolve_photo_original(req)
+
+
 @app.get("/api/download-image")
 async def download_single_image(
     url: str = Query(..., description="Image URL to download"),
@@ -1608,19 +1675,30 @@ async def download_single_image(
     """
     Downloads a single high-resolution image with Content-Disposition attachment header.
     """
+    fname = filename or url.split("/")[-1].split("?")[0] or "photo.jpg"
+    clean_fname = _sanitize_filename(fname)
+    if not any(clean_fname.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif"]):
+        clean_fname += ".jpg"
+
+    if url.startswith("local://albums/"):
+        rel_fpath = url.replace("local://albums/", "").replace("\\", "/")
+        local_full = os.path.join(DATA_DIR, "albums", rel_fpath.replace("/", os.sep))
+        if os.path.exists(local_full):
+            import mimetypes
+            mt, _ = mimetypes.guess_type(local_full)
+            with open(local_full, "rb") as f:
+                return Response(
+                    content=f.read(),
+                    media_type=mt or "image/jpeg",
+                    headers={"Content-Disposition": f'attachment; filename="{clean_fname}"'}
+                )
+
     if not url or not (url.startswith("http://") or url.startswith("https://")):
         raise HTTPException(status_code=400, detail="Invalid URL")
 
-    # Verifica se já está no cache local em disco (SHA-256)
-    import hashlib
     url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
     cache_bin = os.path.join(_IMAGE_CACHE_DIR, f"{url_hash}.bin")
     cache_meta = os.path.join(_IMAGE_CACHE_DIR, f"{url_hash}.meta.json")
-
-    fname = filename or url.split("/")[-1].split("?")[0] or "photo.jpg"
-    clean_fname = _sanitize_filename(fname)
-    if not any(clean_fname.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp", ".avif"]):
-        clean_fname += ".jpg"
 
     if os.path.exists(cache_bin) and os.path.isfile(cache_bin):
         try:
@@ -1871,6 +1949,43 @@ async def download_to_disk_endpoint(req: DownloadToDiskRequest):
         except Exception as cache_err:
             logger.warning(f"[download_to_disk] Erro ao copiar do cache: {cache_err}")
 
+    # 3.5. Caso Especial: Vídeo DASH de alta resolução (2K/1080p) que requer muxagem automática com áudio via FFmpeg
+    clean_v_url, mux_audio_url = split_mux_audio_url(actual_url)
+    if mux_audio_url:
+        muxed_file = await _ensure_muxed_video_file(clean_v_url, mux_audio_url, referer=actual_referer)
+        if not muxed_file:
+            target_page, target_h, _, _ = _extract_video_info_from_url_or_albums(clean_v_url, actual_referer)
+            if target_page:
+                fresh_url, _ = await _re_resolve_video_stream(target_page, target_h)
+                if fresh_url:
+                    fresh_v, fresh_a = split_mux_audio_url(fresh_url)
+                    if fresh_a:
+                        muxed_file = await _ensure_muxed_video_file(fresh_v, fresh_a, referer=target_page)
+        if muxed_file and os.path.exists(muxed_file):
+            fname = req.filename or f"video_{url_hash[:10]}.mp4"
+            target_path = _get_unique_download_path(fname, fallback_ext=".mp4")
+            shutil.copy2(muxed_file, target_path)
+            if req.open_folder:
+                _reveal_in_explorer(target_path)
+            return {"success": True, "file_path": target_path, "filename": os.path.basename(target_path)}
+        actual_url = clean_v_url
+
+    # 3.6. Caso Especial: Stream HLS (.m3u8) ou URL de página do YouTube que requer yt-dlp + FFmpeg
+    if ".m3u8" in actual_url.lower() or any(d in actual_url.lower() for d in ("youtube.com/watch", "youtu.be/", "youtube.com/shorts/")):
+        from .resilient_downloader import download_video_resilient
+        fname = req.filename or f"video_{url_hash[:10]}.mp4"
+        target_path = _get_unique_download_path(fname, fallback_ext=".mp4")
+        dl_res = await download_video_resilient(
+            url=actual_referer or actual_url,
+            target_path=target_path,
+            clean_title=fname,
+            referer=actual_referer or actual_url,
+        )
+        if os.path.exists(target_path) and os.path.getsize(target_path) > 50_000:
+            if req.open_folder:
+                _reveal_in_explorer(target_path)
+            return {"success": True, "file_path": target_path, "filename": os.path.basename(target_path)}
+
     # 4. Caso Geral: Mídia remota (fetch e gravação com streaming e extensão garantida)
     headers = resolve_anti_hotlink_headers(actual_url, referer=actual_referer)
     client = get_image_proxy_client()
@@ -1931,6 +2046,503 @@ async def download_to_disk_endpoint(req: DownloadToDiskRequest):
 _DOMAIN_COOKIES_FILE = os.path.join(DATA_DIR, "domain_cookies.json")
 _domain_cookies: Dict[str, str] = {}
 
+_MUXED_VIDEO_CACHE_DIR = os.path.join(DATA_DIR, "cache", "muxed_videos")
+os.makedirs(_MUXED_VIDEO_CACHE_DIR, exist_ok=True)
+_INFLIGHT_MUX_EVENTS: Dict[str, asyncio.Event] = {}
+
+
+async def _ensure_muxed_video_file(
+    video_url: str,
+    audio_url: str,
+    referer: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Baixa a faixa de vídeo DASH (alta resolução, ex: 2K 1440p / 1080p FHD) e a faixa de áudio DASH (.m4a)
+    em paralelo e realiza muxagem automática via FFmpeg (-c copy -movflags +faststart) para um arquivo
+    MP4 local em cache (`data/cache/muxed_videos/`).
+    Retorna o caminho absoluto do arquivo MP4 com som ou None se os links expiraram (401/403/404/410).
+    """
+    clean_v_url, _ = split_mux_audio_url(video_url)
+    clean_a_url, _ = split_mux_audio_url(audio_url)
+    if not clean_v_url or not clean_a_url:
+        return None
+
+    def _mux_key_part(u: str) -> str:
+        base = u.split("?")[0]
+        try:
+            pq = urllib.parse.urlparse(u)
+            qp = urllib.parse.parse_qs(pq.query)
+            vid_id = (qp.get("id") or qp.get("docid") or [""])[0]
+            itag = (qp.get("itag") or [""])[0]
+            if vid_id or itag:
+                return f"{base}?id={vid_id}&itag={itag}"
+        except Exception:
+            pass
+        return base
+
+    base_key = _mux_key_part(clean_v_url) + "|" + _mux_key_part(clean_a_url)
+    url_hash = hashlib.sha256(base_key.encode("utf-8")).hexdigest()[:24]
+    os.makedirs(_MUXED_VIDEO_CACHE_DIR, exist_ok=True)
+    cache_mp4 = os.path.join(_MUXED_VIDEO_CACHE_DIR, f"{url_hash}.mp4")
+
+    if os.path.exists(cache_mp4) and os.path.getsize(cache_mp4) > 50_000:
+        return cache_mp4
+
+    inflight_ev = _INFLIGHT_MUX_EVENTS.get(url_hash)
+    if inflight_ev is not None:
+        try:
+            await asyncio.wait_for(inflight_ev.wait(), timeout=120.0)
+        except Exception:
+            pass
+        if os.path.exists(cache_mp4) and os.path.getsize(cache_mp4) > 50_000:
+            return cache_mp4
+
+    ev = asyncio.Event()
+    _INFLIGHT_MUX_EVENTS[url_hash] = ev
+    tmp_v = os.path.join(_MUXED_VIDEO_CACHE_DIR, f"{url_hash}_{os.getpid()}.video.tmp")
+    tmp_a = os.path.join(_MUXED_VIDEO_CACHE_DIR, f"{url_hash}_{os.getpid()}.audio.tmp")
+    tmp_out = os.path.join(_MUXED_VIDEO_CACHE_DIR, f"{url_hash}_{os.getpid()}.muxed.mp4")
+
+    try:
+        from .resilient_downloader import get_ffmpeg_path
+        ffmpeg_exe = get_ffmpeg_path()
+        if not ffmpeg_exe:
+            logger.warning("FFmpeg binary not found; cannot remux DASH video+audio.")
+            return None
+
+        v_headers = _get_video_download_headers(clean_v_url, referer)
+        a_headers = _get_video_download_headers(clean_a_url, referer)
+
+        async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(120.0, connect=15.0), follow_redirects=True) as client:
+            async def _fetch_track(track_url: str, hdrs: dict, out_file: str) -> bool:
+                async with client.stream("GET", track_url, headers=hdrs) as resp:
+                    if resp.status_code not in (200, 206):
+                        logger.warning(f"DASH track fetch returned HTTP {resp.status_code} for {track_url[:60]}...")
+                        return False
+                    ct = (resp.headers.get("content-type") or "").lower()
+                    if "text/html" in ct:
+                        return False
+                    written = 0
+                    with open(out_file, "wb") as fp:
+                        async for chunk in resp.aiter_bytes(chunk_size=131072):
+                            fp.write(chunk)
+                            written += len(chunk)
+                    return written > 1024
+
+            ok_v, ok_a = await asyncio.gather(
+                _fetch_track(clean_v_url, v_headers, tmp_v),
+                _fetch_track(clean_a_url, a_headers, tmp_a),
+            )
+
+        if not ok_v or not ok_a:
+            return None
+
+        def _run_ffmpeg_mux() -> bool:
+            import subprocess
+            import sys
+            cmd = [
+                ffmpeg_exe,
+                "-y",
+                "-loglevel", "error",
+                "-i", tmp_v,
+                "-i", tmp_a,
+                "-c", "copy",
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-movflags", "+faststart",
+                tmp_out,
+            ]
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, creationflags=flags)
+            if proc.returncode != 0 or not os.path.exists(tmp_out) or os.path.getsize(tmp_out) < 50_000:
+                logger.warning(f"FFmpeg DASH mux failed (rc={proc.returncode}): {proc.stderr[:200]}")
+                return False
+            os.replace(tmp_out, cache_mp4)
+            return True
+
+        mux_ok = await asyncio.to_thread(_run_ffmpeg_mux)
+        if mux_ok and os.path.exists(cache_mp4) and os.path.getsize(cache_mp4) > 50_000:
+            return cache_mp4
+        return None
+    except Exception as exc:
+        logger.warning(f"Error muxing DASH video+audio: {exc}")
+        return None
+    finally:
+        for p in (tmp_v, tmp_a, tmp_out):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+        _INFLIGHT_MUX_EVENTS.pop(url_hash, None)
+        ev.set()
+
+
+def _serve_local_video_file_with_range(
+    request: Request,
+    file_path: str,
+    cors_headers: dict,
+    download: bool = False,
+    filename: Optional[str] = None,
+) -> Response:
+    """
+    Serve um arquivo de vídeo local (ex: MP4 muxado em cache) com suporte completo a HEAD,
+    HTTP 206 Partial Content (Range) e Content-Disposition attachment para download.
+    """
+    total_size = os.path.getsize(file_path)
+    res_headers = dict(cors_headers)
+    res_headers["content-type"] = "video/mp4"
+    res_headers["accept-ranges"] = "bytes"
+
+    if download:
+        raw_fname = filename or os.path.basename(file_path) or "video.mp4"
+        base, ext = os.path.splitext(raw_fname)
+        if not ext or ext.lower() not in (".mp4", ".webm", ".mov", ".m4v"):
+            ext = ".mp4"
+        clean_base = _sanitize_filename(base)[:50]
+        clean_fname = f"{clean_base}{ext}"
+        res_headers["content-disposition"] = f'attachment; filename="{clean_fname}"'
+
+    range_header = request.headers.get("range")
+    if request.method == "HEAD":
+        res_headers["content-length"] = str(total_size)
+        return Response(status_code=200, headers=res_headers)
+
+    if range_header and range_header.strip().lower().startswith("bytes="):
+        try:
+            range_spec = range_header.strip()[6:].split(",")[0].strip()
+            start_str, end_str = range_spec.split("-", 1)
+            if start_str == "":
+                suffix_len = int(end_str)
+                start = max(0, total_size - suffix_len)
+                end = total_size - 1
+            else:
+                start = int(start_str)
+                end = int(end_str) if end_str.strip() else total_size - 1
+            if start >= total_size or start < 0 or end < start:
+                res_headers["content-range"] = f"bytes */{total_size}"
+                return Response(status_code=416, headers=res_headers)
+            end = min(end, total_size - 1)
+            chunk_len = end - start + 1
+            res_headers["content-range"] = f"bytes {start}-{end}/{total_size}"
+            res_headers["content-length"] = str(chunk_len)
+
+            def _range_file_iter():
+                with open(file_path, "rb") as fp:
+                    fp.seek(start)
+                    remaining = chunk_len
+                    while remaining > 0:
+                        data = fp.read(min(65536, remaining))
+                        if not data:
+                            break
+                        remaining -= len(data)
+                        yield data
+
+            return StreamingResponse(_range_file_iter(), status_code=206, headers=res_headers)
+        except Exception:
+            pass
+
+    res_headers["content-length"] = str(total_size)
+
+    def _full_file_iter():
+        with open(file_path, "rb") as fp:
+            while True:
+                data = fp.read(65536)
+                if not data:
+                    break
+                yield data
+
+    return StreamingResponse(_full_file_iter(), status_code=200, headers=res_headers)
+
+
+_ANIMATION_VIDEO_CACHE_DIR = os.path.join(DATA_DIR, "cache", "animations")
+_INFLIGHT_ANIMATION_EVENTS: Dict[str, asyncio.Event] = {}
+
+
+async def _ensure_animation_video_file(
+    target_url: str,
+    quality: str = "standard",
+    referer: Optional[str] = None,
+    allow_fallback: bool = True
+) -> Optional[str]:
+    """
+    Retrieves or transcodes a high-performance hardware-accelerated MP4 stream
+    for an animated GIF/WebP URL.
+    - 'standard': Native 60/30fps 1080p stream from upstream CDN or lightweight fast transcode.
+    - 'ultrahq': Master CRF 14 / BT.709 color primaries master fidelity stream.
+    Cached persistently in data/cache/animations/.
+    """
+    clean_quality = "ultrahq" if str(quality).lower() in ("ultrahq", "hq", "ultra_hq", "ultra") else "standard"
+    other_quality = "standard" if clean_quality == "ultrahq" else "ultrahq"
+    os.makedirs(_ANIMATION_VIDEO_CACHE_DIR, exist_ok=True)
+
+    # Unwrap proxied URLs (defense in depth for /api/proxy-image?url=...)
+    target_clean = target_url
+    for _ in range(5):
+        if not target_clean:
+            break
+        if target_clean.startswith("/api/proxy-image") or target_clean.startswith("/api/proxy-video-stream") or "url=" in target_clean:
+            parsed_q = urllib.parse.urlparse(target_clean)
+            qs = urllib.parse.parse_qs(parsed_q.query)
+            if "url" in qs and qs["url"][0]:
+                target_clean = qs["url"][0]
+                if not referer and "referer" in qs and qs["referer"][0]:
+                    referer = qs["referer"][0]
+                continue
+        break
+    target_url = target_clean
+
+    clean_target = target_url.split('?')[0]
+    raw_url_hash = hashlib.sha256(clean_target.encode("utf-8")).hexdigest()[:24]
+    cache_mp4 = os.path.join(_ANIMATION_VIDEO_CACHE_DIR, f"anim_{raw_url_hash}_{clean_quality}.mp4")
+    other_mp4 = os.path.join(_ANIMATION_VIDEO_CACHE_DIR, f"anim_{raw_url_hash}_{other_quality}.mp4")
+    std_mp4 = os.path.join(_ANIMATION_VIDEO_CACHE_DIR, f"anim_{raw_url_hash}_standard.mp4")
+
+    def _is_valid_mp4_file(fpath: str) -> bool:
+        if not os.path.exists(fpath) or os.path.getsize(fpath) < 5000:
+            return False
+        try:
+            with open(fpath, "rb") as f_chk:
+                header = f_chk.read(1024)
+                return (b"ftyp" in header[:32] or b"moov" in header)
+        except Exception:
+            return False
+
+    # If requested quality is already cached and valid MP4, return immediately
+    if os.path.exists(cache_mp4):
+        if _is_valid_mp4_file(cache_mp4):
+            return cache_mp4
+        else:
+            try:
+                os.remove(cache_mp4)
+            except Exception:
+                pass
+
+    url_hash = f"{raw_url_hash}_{clean_quality}"
+
+    # If the alternate / standard quality profile is already cached, serve it immediately to avoid stalls
+    if allow_fallback and os.path.exists(other_mp4):
+        if _is_valid_mp4_file(other_mp4):
+            if url_hash not in _INFLIGHT_ANIMATION_EVENTS:
+                asyncio.create_task(_ensure_animation_video_file(target_url, quality=clean_quality, referer=referer, allow_fallback=False))
+            return other_mp4
+        else:
+            try:
+                os.remove(other_mp4)
+            except Exception:
+                pass
+
+    while url_hash in _INFLIGHT_ANIMATION_EVENTS:
+        try:
+            await asyncio.wait_for(_INFLIGHT_ANIMATION_EVENTS[url_hash].wait(), timeout=45.0)
+            if _is_valid_mp4_file(cache_mp4):
+                return cache_mp4
+            if allow_fallback and _is_valid_mp4_file(other_mp4):
+                return other_mp4
+        except asyncio.TimeoutError:
+            break
+
+    ev = asyncio.Event()
+    _INFLIGHT_ANIMATION_EVENTS[url_hash] = ev
+
+    tmp_in = os.path.join(_ANIMATION_VIDEO_CACHE_DIR, f"tmp_in_{url_hash}")
+    tmp_out = os.path.join(_ANIMATION_VIDEO_CACHE_DIR, f"tmp_out_{url_hash}.mp4")
+
+    try:
+        from .resilient_downloader import get_ffmpeg_path
+        ffmpeg_exe = get_ffmpeg_path()
+        in_headers = _get_video_download_headers(target_url, referer) if (target_url.startswith("http://") or target_url.startswith("https://")) else {}
+
+        # 1. UPSTREAM DIRECT MP4 CHECK (Universal fast-path for modern animation hosts)
+        # Many sites (Eporner, Imgur, Reddit, Gfycat, RedGIFs, Tenor, etc.) host the native MP4
+        # companion directly alongside the GIF/WebP.
+        if target_url.startswith("http://") or target_url.startswith("https://"):
+            candidate_mp4 = re.sub(r'\.(gif|webp|gifv)(\?.*)?$', r'.mp4\2', target_url, flags=re.I)
+            if candidate_mp4 != target_url:
+                try:
+                    cand_headers = dict(in_headers)
+                    cand_headers["Accept"] = "*/*"
+                    async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(20.0, connect=5.0), follow_redirects=True) as check_client:
+                        head_res = await check_client.head(candidate_mp4, headers=cand_headers)
+                        if head_res.status_code == 200 and int(head_res.headers.get("content-length", 0)) > 5000:
+                            # Direct upstream MP4 confirmed!
+                            # The upstream companion MP4 is the native master 1080p stream created by the host.
+                            # Serving it directly avoids generation loss, color distortion, and 52Mbps decoder stutter.
+                            get_res = await check_client.get(candidate_mp4, headers=cand_headers)
+                            is_valid_mp4 = get_res.status_code == 200 and len(get_res.content) > 5000 and (b"ftyp" in get_res.content[:32] or b"moov" in get_res.content[:1024])
+                            if is_valid_mp4:
+                                with open(tmp_out, "wb") as f_out:
+                                    f_out.write(get_res.content)
+                                os.replace(tmp_out, cache_mp4)
+                                # Also mirror to alternate quality so both standard and ultrahq are instantly available
+                                if not os.path.exists(other_mp4):
+                                    try:
+                                        import shutil
+                                        shutil.copy2(cache_mp4, other_mp4)
+                                    except Exception:
+                                        pass
+                                return cache_mp4
+                except Exception as e_up:
+                    logger.debug(f"Upstream companion MP4 probe skipped/failed: {e_up}")
+
+        # 2. FALLBACK: Fetch source animation file if no companion MP4 was found
+        if not ffmpeg_exe:
+            logger.warning("FFmpeg binary not found; cannot transcode animation stream.")
+            return None
+
+        if target_url.startswith("http://") or target_url.startswith("https://"):
+            async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(60.0, connect=15.0), follow_redirects=True) as client:
+                resp = await client.get(target_url, headers=in_headers)
+                if resp.status_code != 200 or len(resp.content) < 100:
+                    logger.warning(f"Failed to fetch source animation: HTTP {resp.status_code}")
+                    return None
+                with open(tmp_in, "wb") as f_in:
+                    f_in.write(resp.content)
+            input_source = tmp_in
+        elif target_url.startswith("local://albums/"):
+            rel_fpath = target_url.replace("local://albums/", "").replace("\\", "/")
+            local_full = os.path.join(DATA_DIR, "albums", rel_fpath.replace("/", os.sep))
+            local_mp4 = local_full.rsplit('.', 1)[0] + '.mp4'
+            if os.path.exists(local_mp4) and os.path.getsize(local_mp4) > 5000:
+                return local_mp4
+            if not os.path.exists(local_full):
+                return None
+            input_source = local_full
+        else:
+            input_source = target_url
+
+        crf_val = "18" if clean_quality == "ultrahq" else "22"
+        preset_val = "faster"
+
+        def _run_ffmpeg_encode() -> bool:
+            import subprocess
+            # 2a. Direct FFmpeg with even dimension scaling and natural untagged sRGB gamma
+            cmd = [
+                ffmpeg_exe, "-y", "-loglevel", "error",
+                "-i", input_source,
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-c:v", "libx264", "-crf", crf_val, "-preset", preset_val,
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                tmp_out
+            ]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+            if proc.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 5000:
+                os.replace(tmp_out, cache_mp4)
+                return True
+
+            # 2b. Pillow frame extraction with true frame durations (preserves 30/60 fps)
+            try:
+                from PIL import Image, ImageSequence
+                with Image.open(input_source) as im:
+                    w, h = im.size
+                    out_w = w if w % 2 == 0 else w - 1
+                    out_h = h if h % 2 == 0 else h - 1
+                    durations = []
+                    for f in ImageSequence.Iterator(im):
+                        d = f.info.get("duration", 33)
+                        if d and d > 0:
+                            durations.append(d)
+                    avg_dur = (sum(durations) / len(durations)) if durations else 33.3
+                    fps = round(1000.0 / avg_dur) if avg_dur > 0 else 30
+                    if fps < 10 or fps > 60:
+                        fps = 30
+
+                    pipe_cmd = [
+                        ffmpeg_exe, "-y", "-loglevel", "error",
+                        "-f", "rawvideo", "-pix_fmt", "rgb24",
+                        "-s", f"{w}x{h}", "-r", str(fps),
+                        "-i", "pipe:0",
+                        "-vf", f"scale={out_w}:{out_h}",
+                        "-c:v", "libx264", "-crf", crf_val, "-preset", preset_val,
+                        "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart",
+                        tmp_out
+                    ]
+                    p = subprocess.Popen(pipe_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+                    for frame in ImageSequence.Iterator(im):
+                        rgb = frame.convert("RGB")
+                        p.stdin.write(rgb.tobytes())
+                    p.stdin.close()
+                    p.wait(timeout=120)
+                    if p.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 5000:
+                        os.replace(tmp_out, cache_mp4)
+                        return True
+            except Exception as e_pil:
+                logger.warning(f"Pillow fallback failed: {e_pil}")
+
+            return False
+
+        encode_ok = await asyncio.to_thread(_run_ffmpeg_encode)
+        if encode_ok and os.path.exists(cache_mp4):
+            return cache_mp4
+        return None
+    except Exception as exc:
+        logger.warning(f"Error ensuring animation video stream: {exc}")
+        return None
+    finally:
+        for p in (tmp_in, tmp_out):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+        _INFLIGHT_ANIMATION_EVENTS.pop(url_hash, None)
+        ev.set()
+
+
+@app.api_route("/api/animation-stream", methods=["GET", "HEAD", "OPTIONS"])
+async def animation_stream(
+    request: Request,
+    url: str = Query(..., description="Target animation URL to stream"),
+    quality: str = Query("standard", description="Quality profile: standard or ultrahq"),
+    referer: Optional[str] = Query(None, description="Original source page referer")
+):
+    """
+    Hardware-accelerated video streaming endpoint for animated GIFs and WebP.
+    Delivers 60 FPS playback on both Desktop and Mobile devices with minimal CPU load.
+    Supports 'standard' (lightweight fast-loop) and 'ultrahq' (lossless master fidelity).
+    """
+    cors_headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges, Content-Type, Content-Disposition",
+    }
+    if request.method == "OPTIONS":
+        return Response(status_code=200, headers=cors_headers)
+
+    # Unwrap proxied URLs (e.g. /api/proxy-image?url=https%3A%2F%2F...)
+    target_clean = url
+    for _ in range(5):
+        if not target_clean:
+            break
+        if target_clean.startswith("/api/proxy-image") or target_clean.startswith("/api/proxy-video-stream") or "url=" in target_clean:
+            parsed_q = urllib.parse.urlparse(target_clean)
+            qs = urllib.parse.parse_qs(parsed_q.query)
+            if "url" in qs and qs["url"][0]:
+                target_clean = qs["url"][0]
+                if not referer and "referer" in qs and qs["referer"][0]:
+                    referer = qs["referer"][0]
+                continue
+        break
+
+    if not target_clean or not (target_clean.startswith("http://") or target_clean.startswith("https://") or target_clean.startswith("local://")):
+        raise HTTPException(status_code=400, detail="Invalid animation URL", headers=cors_headers)
+
+    clean_q = "ultrahq" if str(quality).lower() in ("ultrahq", "hq", "ultra_hq", "ultra") else "standard"
+
+    cached_file = await _ensure_animation_video_file(target_clean, quality=clean_q, referer=referer)
+    if cached_file and os.path.exists(cached_file):
+        return _serve_local_video_file_with_range(
+            request=request,
+            file_path=cached_file,
+            cors_headers=cors_headers,
+            download=False,
+        )
+
+    raise HTTPException(status_code=502, detail="Failed to transcode animation stream", headers=cors_headers)
+
 
 def _save_domain_cookies():
     try:
@@ -1960,7 +2572,20 @@ def _get_video_download_headers(url: str = "", referer: Optional[str] = None) ->
     global _domain_cookies
     if not _domain_cookies:
         _load_domain_cookies()
-    return resolve_anti_hotlink_headers(url, referer=referer, domain_cookies=_domain_cookies)
+    headers = resolve_anti_hotlink_headers(url, referer=referer, domain_cookies=_domain_cookies)
+    if referer and referer.startswith("http"):
+        headers["Referer"] = referer
+        parsed_ref = urllib.parse.urlparse(referer)
+        headers["Origin"] = f"{parsed_ref.scheme}://{parsed_ref.netloc}"
+        parsed_url = urllib.parse.urlparse(url) if url else None
+        if parsed_url and get_apex_domain(parsed_ref.netloc) != get_apex_domain(parsed_url.netloc):
+            headers["Sec-Fetch-Site"] = "cross-site"
+        else:
+            headers["Sec-Fetch-Site"] = "same-site" if parsed_url and parsed_ref.netloc != parsed_url.netloc else "same-origin"
+    headers["Sec-Fetch-Dest"] = "video"
+    headers["Sec-Fetch-Mode"] = "cors"
+    headers["Accept"] = "*/*"
+    return headers
 
 
 def _deduce_image_target_height(img) -> Optional[int]:
@@ -2154,12 +2779,19 @@ async def _re_resolve_video_stream(target_page: str, target_height: Optional[int
     raw_hdrs = _get_video_download_headers(target_page, target_page)
     cookie_str = raw_hdrs.get("Cookie") or raw_hdrs.get("cookie")
     hdrs = {k: v for k, v in raw_hdrs.items() if k.lower() != "cookie"}
+    hdrs.pop("Sec-Fetch-Dest", None)
+    hdrs.pop("Sec-Fetch-Mode", None)
+    hdrs["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "http_headers": hdrs
+        "http_headers": hdrs,
+        "socket_timeout": 6.0,
+        "retries": 3,
+        "extractor_retries": 3,
     }
+    is_yt = "youtube.com" in target_page.lower() or "youtu.be" in target_page.lower()
     extracted_cookies = {}
     def _extract():
         nonlocal extracted_cookies
@@ -2171,7 +2803,7 @@ async def _re_resolve_video_stream(target_page: str, target_height: Optional[int
             return inf
 
     try:
-        info = await asyncio.to_thread(_extract)
+        info = normalize_ytdlp_video_info(await asyncio.to_thread(_extract), target_page)
     except Exception as exc:
         exc_str = str(exc)
         if "Unable to extract hash" in exc_str or "deleted" in exc_str.lower():
@@ -2193,20 +2825,61 @@ async def _re_resolve_video_stream(target_page: str, target_height: Optional[int
         _save_domain_cookies()
 
     formats = [f for f in info.get("formats", []) if f.get("ext") == "mp4" and f.get("url")]
-    direct_mp4s = [f for f in formats if not str(f.get("format_id", "")).startswith("hls")]
-    pool = direct_mp4s if direct_mp4s else formats
+    is_pornhub = "pornhub.com" in target_page.lower()
+    if is_pornhub:
+        # For Pornhub, hv-h CDN streams (HLS format_ids) bypass rigid client-IP bindings (&ipa=1)
+        # and reliably deliver HTTP 206 partial content without 474 Unauthorized errors
+        hls_mp4s = [f for f in formats if str(f.get("format_id", "")).startswith("hls") or "hv-h.phncdn.com" in str(f.get("url", ""))]
+        direct_mp4s = [f for f in formats if not str(f.get("format_id", "")).startswith("hls")]
+        pool = hls_mp4s if hls_mp4s else (direct_mp4s if direct_mp4s else formats)
+    else:
+        direct_mp4s = [
+            f for f in formats
+            if not str(f.get("format_id", "")).startswith("hls")
+            and not f.get("manifest_url")
+            and ".m3u8" not in str(f.get("url") or "").lower()
+        ]
+        av_mp4s = [
+            f for f in direct_mp4s
+            if f.get("acodec") != "none" and f.get("vcodec") != "none"
+        ]
+        pool = av_mp4s if av_mp4s else (direct_mp4s if direct_mp4s else formats)
     if not pool:
         pool = [f for f in info.get("formats", []) if f.get("url") and f.get("vcodec") != "none"]
     if not pool:
         pool = [f for f in info.get("formats", []) if f.get("url")]
 
+    def _fmt_short_side(f: dict) -> int:
+        h_val = int(f.get("height") or 0)
+        w_val = int(f.get("width") or 0)
+        return min(w_val, h_val) if (w_val > 0 and h_val > 0) else h_val
+
+    # Ordena priorizando formatos progressivos nativos (não-mux) em caso de mesma resolução, codec compatível (H.264 > progressivo não-AV1 > VP9/HEVC > AV1), maior resolução e bitrate
+    from src.core.network_profiles import codec_compatibility_rank
+    pool.sort(
+        key=lambda f: (
+            _fmt_short_side(f),
+            0 if f.get("_is_dash_mux") else 1,
+            codec_compatibility_rank(f),
+            float(f.get("tbr") or f.get("vbr") or 0),
+        ),
+        reverse=True,
+    )
+
     chosen = None
     if target_height:
-        chosen = next((f for f in pool if f.get("height") == target_height), None)
+        chosen = next(
+            (f for f in pool if f.get("height") == target_height or _fmt_short_side(f) == target_height),
+            None,
+        )
     if not chosen and pool:
-        chosen = max(pool, key=lambda f: f.get("height", 0) or 0)
+        chosen = pool[0]
 
     fresh_url = chosen.get("url") if chosen else None
+    if not fresh_url and is_yt:
+        f_master = next((f for f in info.get("formats", []) if f.get("format_id") in ("234", "233") and f.get("manifest_url")), None)
+        if f_master and f_master.get("manifest_url"):
+            return f_master["manifest_url"], info
     return fresh_url, info
 
 
@@ -2216,7 +2889,8 @@ async def proxy_video_stream(
     url: str = Query(..., description="Target video stream URL"),
     referer: Optional[str] = Query(None, description="Original source page referer"),
     download: bool = Query(False, description="Whether to trigger file download attachment"),
-    filename: Optional[str] = Query(None, description="Custom download filename")
+    filename: Optional[str] = Query(None, description="Custom download filename"),
+    height: Optional[int] = Query(None, description="Desired video height / quality resolution")
 ):
     """
     Reverse proxy for video streams supporting full HTTP Range 206 partial content,
@@ -2242,9 +2916,73 @@ async def proxy_video_stream(
             url = q_params["url"][0]
         if "referer" in q_params and not referer:
             referer = q_params["referer"][0]
+        if "height" in q_params and not height:
+            try:
+                height = int(q_params["height"][0])
+            except Exception:
+                pass
 
     if not url or not (url.startswith("http://") or url.startswith("https://")):
         raise HTTPException(status_code=400, detail="Invalid video stream URL", headers=cors_headers)
+
+    if not referer:
+        found_target_page, _, _, _ = _extract_video_info_from_url_or_albums(url, None)
+        if found_target_page:
+            referer = found_target_page
+
+    # Caso 0: Stream DASH de alta resolução (2K/1080p) que requer muxagem automática com áudio via FFmpeg
+    clean_v_url, mux_audio_url = split_mux_audio_url(url)
+    if mux_audio_url:
+        muxed_file = await _ensure_muxed_video_file(clean_v_url, mux_audio_url, referer=referer)
+        if not muxed_file:
+            target_page, target_height, _, _ = _extract_video_info_from_url_or_albums(clean_v_url, referer)
+            if height:
+                target_height = height
+            if target_page:
+                fresh_url, _ = await _re_resolve_video_stream(target_page, target_height)
+                if fresh_url:
+                    fresh_v, fresh_a = split_mux_audio_url(fresh_url)
+                    if fresh_a:
+                        muxed_file = await _ensure_muxed_video_file(fresh_v, fresh_a, referer=target_page)
+                    else:
+                        url = fresh_v
+        if muxed_file and os.path.exists(muxed_file):
+            return _serve_local_video_file_with_range(
+                request=request,
+                file_path=muxed_file,
+                cors_headers=cors_headers,
+                download=download,
+                filename=filename,
+            )
+        url = clean_v_url
+
+    # Caso 0.5: Quando solicitado download direto de um stream HLS (.m3u8) ou página de vídeo, remuxa para MP4 real
+    if download and (".m3u8" in url.lower() or "/hls/" in url.lower() or any(d in url.lower() for d in ("youtube.com/", "youtu.be/", "/reel/", "/shorts/"))):
+        target_page, target_h, _, _ = _extract_video_info_from_url_or_albums(url, referer)
+        target_page = target_page or referer or url
+        base_key = target_page + "|dl_resilient|" + (filename or "")
+        url_hash = hashlib.sha256(base_key.encode("utf-8")).hexdigest()[:24]
+        os.makedirs(_MUXED_VIDEO_CACHE_DIR, exist_ok=True)
+        cached_mp4 = os.path.join(_MUXED_VIDEO_CACHE_DIR, f"dl_{url_hash}.mp4")
+        if not os.path.exists(cached_mp4) or os.path.getsize(cached_mp4) < 50_000:
+            from .resilient_downloader import download_video_resilient
+            try:
+                await download_video_resilient(
+                    url=target_page,
+                    target_path=cached_mp4,
+                    clean_title=filename or "video",
+                    referer=referer or target_page,
+                )
+            except Exception as dl_err:
+                logger.warning(f"Resilient remux for download failed: {dl_err}")
+        if os.path.exists(cached_mp4) and os.path.getsize(cached_mp4) > 50_000:
+            return _serve_local_video_file_with_range(
+                request=request,
+                file_path=cached_mp4,
+                cors_headers=cors_headers,
+                download=True,
+                filename=filename,
+            )
 
     upstream_headers = _get_video_download_headers(url, referer)
     upstream_headers["Accept"] = "*/*"
@@ -2260,18 +2998,44 @@ async def proxy_video_stream(
         if is_head and "Range" not in upstream_headers:
             upstream_headers["Range"] = "bytes=0-0"
 
-        upstream_req = client.build_request("GET", url, headers=upstream_headers)
-        upstream_resp = await client.send(upstream_req, stream=True)
+        max_connect_attempts = 2
+        for attempt in range(max_connect_attempts):
+            try:
+                upstream_req = client.build_request("GET", url, headers=upstream_headers)
+                upstream_resp = await client.send(upstream_req, stream=True)
+                break
+            except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadTimeout, httpcore.ConnectTimeout, httpcore.ConnectError) as net_err:
+                if attempt == max_connect_attempts - 1:
+                    target_page, target_height, _, _ = _extract_video_info_from_url_or_albums(url, referer)
+                    if target_page:
+                        logger.info(f"Stream connection failed ({type(net_err).__name__}). Attempting automatic re-resolution for {target_page}...")
+                        fresh_url, _ = await _re_resolve_video_stream(target_page, target_height)
+                        if fresh_url:
+                            url = fresh_url
+                            upstream_headers = _get_video_download_headers(url, target_page)
+                            upstream_headers["Accept"] = "*/*"
+                            if range_header:
+                                upstream_headers["Range"] = range_header
+                            if is_head and "Range" not in upstream_headers:
+                                upstream_headers["Range"] = "bytes=0-0"
+                            upstream_req = client.build_request("GET", url, headers=upstream_headers)
+                            upstream_resp = await client.send(upstream_req, stream=True)
+                            break
+                    raise
+                await asyncio.sleep(0.5)
 
         # Se upstream retornar erro de link expirado/não autorizado OU página HTML em vez de mídia, tentar re-resolver
         upstream_ct = upstream_resp.headers.get("content-type", "").lower()
         is_html_response = "text/html" in upstream_ct
-        if is_html_response or upstream_resp.status_code in (401, 403, 404, 410, 470, 472, 500, 502, 503, 504) or (400 <= upstream_resp.status_code < 500 and upstream_resp.status_code != 416):
+        is_redirected_video = redirected_progressive_video(upstream_resp, url, referer)
+        if is_html_response or is_redirected_video or upstream_resp.status_code in (401, 403, 404, 410, 470, 472, 500, 502, 503, 504) or (400 <= upstream_resp.status_code < 500 and upstream_resp.status_code != 416):
             logger.info(f"Stream returned HTTP {upstream_resp.status_code} (ct={upstream_ct}). Attempting automatic re-resolution...")
             await upstream_resp.aclose()
 
             old_url = url
             target_page, target_height, found_album_id, found_img = _extract_video_info_from_url_or_albums(url, referer)
+            if height:
+                target_height = height
             if not target_page and is_html_response and url.startswith("http"):
                 target_page = url
             if target_page:
@@ -2280,6 +3044,19 @@ async def proxy_video_stream(
                     fresh_url = await _resolve_best_video_stream("vid", target_page)
                 if fresh_url:
                     logger.info(f"Successfully re-resolved fresh stream: {fresh_url[:60]}... for height {target_height}")
+                    fresh_v, fresh_a = split_mux_audio_url(fresh_url)
+                    if fresh_a:
+                        await client.aclose()
+                        muxed_file = await _ensure_muxed_video_file(fresh_v, fresh_a, referer=target_page)
+                        if muxed_file and os.path.exists(muxed_file):
+                            return _serve_local_video_file_with_range(
+                                request=request,
+                                file_path=muxed_file,
+                                cors_headers=cors_headers,
+                                download=download,
+                                filename=filename,
+                            )
+                        raise HTTPException(status_code=502, detail="Unable to mux DASH video+audio stream", headers=cors_headers)
                     url = fresh_url
                     upstream_headers = _get_video_download_headers(url, target_page)
                     upstream_headers["Accept"] = "*/*"
@@ -2290,6 +3067,12 @@ async def proxy_video_stream(
 
                     upstream_req = client.build_request("GET", url, headers=upstream_headers)
                     upstream_resp = await client.send(upstream_req, stream=True)
+                    # Validate the refreshed delivery before publishing bytes or
+                    # persisting a renewed URL. A fallback can itself be 200/206.
+                    if "text/html" in upstream_resp.headers.get("content-type", "").lower() or redirected_progressive_video(upstream_resp, url, target_page):
+                        await upstream_resp.aclose()
+                        await client.aclose()
+                        raise HTTPException(status_code=502, detail="Could not confirm the original video stream", headers=cors_headers)
 
                     # Persist renewed stream URL in Video Gallery metadata if matching entry exists
                     try:
@@ -2297,7 +3080,8 @@ async def proxy_video_stream(
                         meta_updated = False
                         for _vid, ventry in v_meta.items():
                             if ventry.get("custom_stream_url") == old_url or (target_page and ventry.get("source_url") == target_page):
-                                ventry["custom_stream_url"] = fresh_url
+                                ref_param = f"&referer={urllib.parse.quote(target_page)}" if target_page else ""
+                                ventry["custom_stream_url"] = f"/api/proxy-video-stream?url={urllib.parse.quote(fresh_url)}{ref_param}"
                                 meta_updated = True
                         if meta_updated:
                             video_service._save_metadata(v_meta)
@@ -2309,9 +3093,13 @@ async def proxy_video_stream(
                         if alb:
                             formats = [f for f in info.get("formats", []) if f.get("ext") == "mp4" and f.get("url")]
                             direct_mp4s = [f for f in formats if not str(f.get("format_id", "")).startswith("hls")]
-                            pool = direct_mp4s if direct_mp4s else formats
+                            av_mp4s = [
+                                f for f in (direct_mp4s if direct_mp4s else formats)
+                                if f.get("acodec") != "none" and f.get("vcodec") != "none"
+                            ]
+                            pool = av_mp4s if av_mp4s else (direct_mp4s if direct_mp4s else formats)
                             dur = int(info.get("duration") or 0)
-                            m_target_vk = re.search(r'(?:viewkey=|video-)([a-zA-Z0-9_-]+)', target_page) if target_page else None
+                            m_target_vk = re.search(r'(?:viewkey=|video-|/(?:reel|reels|p|tv|shorts)/)([a-zA-Z0-9_-]+)', target_page) if target_page else None
                             target_vk = m_target_vk.group(1) if m_target_vk else None
                             for img in alb.images:
                                 if getattr(img, "media_type", None) != "video":
@@ -2344,12 +3132,24 @@ async def proxy_video_stream(
                                     if dur > 0:
                                         img.duration_seconds = dur
                             _save_album_to_disk(found_album_id, alb)
+                else:
+                    await client.aclose()
+                    raise HTTPException(status_code=502, detail="Unable to resolve playable video stream from page URL", headers=cors_headers)
+            elif is_html_response or is_redirected_video:
+                await client.aclose()
+                raise HTTPException(status_code=502, detail="Upstream returned HTML page instead of video media", headers=cors_headers)
 
         res_headers = dict(cors_headers)
         for h in ("content-type", "content-length", "content-range", "accept-ranges"):
             val = upstream_resp.headers.get(h)
             if val:
                 res_headers[h] = val
+        if (
+            upstream_resp.status_code == 206
+            and str(res_headers.get("content-range", "")).lower().startswith("bytes ")
+            and "accept-ranges" not in res_headers
+        ):
+            res_headers["accept-ranges"] = "bytes"
 
         if upstream_resp.status_code == 416:
             await upstream_resp.aclose()
@@ -2364,14 +3164,26 @@ async def proxy_video_stream(
             res_headers.pop("content-type", None)
             raise HTTPException(status_code=upstream_resp.status_code, detail=f"Upstream CDN error: {upstream_resp.status_code}", headers=res_headers)
 
-        is_hls = ".m3u8" in url.lower() or "/hls/" in url.lower() or "mpegurl" in res_headers.get("content-type", "").lower()
+        url_path_low = urllib.parse.urlparse(url).path.lower()
+        is_hls_segment = url_path_low.endswith((".ts", ".m4s", ".mp4", ".aac"))
+        is_hls = (
+            not is_hls_segment
+            and (
+                url_path_low.endswith(".m3u8")
+                or "/hls_variant/" in url_path_low
+                or "/hls_playlist/" in url_path_low
+                or "mpegurl" in res_headers.get("content-type", "").lower()
+            )
+        )
         if is_hls:
             res_headers["content-type"] = "application/vnd.apple.mpegurl"
+        elif is_hls_segment and url_path_low.endswith(".ts"):
+            res_headers["content-type"] = "video/mp2t"
         elif not res_headers.get("content-type") or "text" in res_headers.get("content-type", ""):
             res_headers["content-type"] = "video/mp4"
 
-        if "accept-ranges" not in res_headers:
-            res_headers["accept-ranges"] = "bytes"
+        # Range support belongs to the upstream representation. Do not
+        # advertise byte seeking when the origin has not declared it.
 
         if download:
             raw_fname = filename or url.split("/")[-1].split("?")[0] or "video.mp4"
@@ -2397,6 +3209,34 @@ async def proxy_video_stream(
             return Response(status_code=status_code, headers=res_headers)
 
         if is_hls:
+            if download:
+                await upstream_resp.aclose()
+                await client.aclose()
+                target_page, target_h, _, _ = _extract_video_info_from_url_or_albums(url, referer)
+                target_page = target_page or referer or url
+                base_key = target_page + "|dl_hls|" + (filename or "")
+                url_hash = hashlib.sha256(base_key.encode("utf-8")).hexdigest()[:24]
+                os.makedirs(_MUXED_VIDEO_CACHE_DIR, exist_ok=True)
+                cached_mp4 = os.path.join(_MUXED_VIDEO_CACHE_DIR, f"dl_{url_hash}.mp4")
+                if not os.path.exists(cached_mp4) or os.path.getsize(cached_mp4) < 50_000:
+                    from .resilient_downloader import download_video_resilient
+                    try:
+                        await download_video_resilient(
+                            url=target_page,
+                            target_path=cached_mp4,
+                            clean_title=filename or "video",
+                            referer=referer or target_page,
+                        )
+                    except Exception as hls_dl_err:
+                        logger.warning(f"HLS download remux failed: {hls_dl_err}")
+                if os.path.exists(cached_mp4) and os.path.getsize(cached_mp4) > 50_000:
+                    return _serve_local_video_file_with_range(
+                        request=request,
+                        file_path=cached_mp4,
+                        cors_headers=cors_headers,
+                        download=True,
+                        filename=filename,
+                    )
             raw_body = await upstream_resp.aread()
             await upstream_resp.aclose()
             await client.aclose()
@@ -2413,24 +3253,24 @@ async def proxy_video_stream(
                         if referer:
                             p_line += f"&referer={urllib.parse.quote(referer)}"
                         rewritten.append(p_line)
-                    elif 'URI="' in ls:
+                    elif 'URI=' in ls:
                         def _rep(m):
                             abs_u = urljoin(url, m.group(1))
-                            return f'URI="/api/proxy-video-stream?url={urllib.parse.quote(abs_u)}"'
-                        rewritten.append(re.sub(r'URI="([^"]+)"', _rep, ls))
+                            p = f'/api/proxy-video-stream?url={urllib.parse.quote(abs_u)}'
+                            if referer:
+                                p += f'&referer={urllib.parse.quote(referer)}'
+                            return f'URI="{p}"'
+                        rewritten.append(re.sub(r'URI=["\']([^"\']+)["\']', _rep, ls))
                     else:
                         rewritten.append(l)
                 final_bytes = "\n".join(rewritten).encode("utf-8")
                 res_headers["content-length"] = str(len(final_bytes))
+                res_headers.pop("content-range", None)
                 return Response(content=final_bytes, status_code=200, headers=res_headers)
 
         final_status = upstream_resp.status_code
-        if range_header and final_status == 200 and not is_hls:
-            cl = res_headers.get("content-length")
-            if cl and cl.isdigit():
-                total_bytes = int(cl)
-                res_headers["content-range"] = f"bytes 0-{total_bytes - 1}/{total_bytes}"
-                final_status = 206
+        # An origin may ignore Range and send the complete resource as 200.
+        # Relabelling it 206 makes nonzero/suffix seeks consume the wrong bytes.
 
         async def stream_generator():
             try:
@@ -2466,6 +3306,32 @@ async def proxy_video_stream(
         except Exception:
             pass
         raise
+    except (httpx.TimeoutException, httpcore.TimeoutException, asyncio.TimeoutError) as e:
+        if upstream_resp is not None:
+            try:
+                await upstream_resp.aclose()
+            except Exception:
+                pass
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+        err_msg = str(e) or type(e).__name__
+        logger.error(f"Proxy video stream gateway timeout for {url}: {err_msg}")
+        raise HTTPException(status_code=504, detail=f"Upstream gateway timeout: {err_msg}", headers=cors_headers)
+    except (httpx.NetworkError, httpcore.NetworkError) as e:
+        if upstream_resp is not None:
+            try:
+                await upstream_resp.aclose()
+            except Exception:
+                pass
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+        err_msg = str(e) or type(e).__name__
+        logger.error(f"Proxy video stream bad gateway for {url}: {err_msg}")
+        raise HTTPException(status_code=502, detail=f"Upstream bad gateway: {err_msg}", headers=cors_headers)
     except Exception as e:
         if upstream_resp is not None:
             try:
@@ -2476,8 +3342,310 @@ async def proxy_video_stream(
             await client.aclose()
         except Exception:
             pass
-        logger.error(f"Proxy video stream failed for {url}: {e}")
-        raise HTTPException(status_code=500, detail=str(e), headers=cors_headers)
+        err_msg = str(e) or repr(e)
+        logger.error(f"Proxy video stream failed for {url}: {type(e).__name__}: {err_msg}")
+        raise HTTPException(status_code=500, detail=err_msg, headers=cors_headers)
+
+
+_qualities_cache: dict[str, tuple[float, dict]] = {}
+
+
+@app.get("/api/video-stream-qualities")
+async def get_video_stream_qualities(
+    url: str = Query(..., description="Target video stream URL or page URL"),
+    referer: Optional[str] = Query(None, description="Original source page referer"),
+    _t: Optional[str] = Query(None, description="Explicit player renewal cache-buster"),
+):
+    """
+    Returns all available video resolutions/qualities for a given stream or target page.
+    Supports HLS streams, YouTube, tube sites, and generic web streams.
+    Enables manual quality selection (1080p, 720p, 480p, etc.) and adaptive bitrate streaming.
+    """
+    cors_headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+    }
+
+    referer = referer if isinstance(referer, str) else None
+    clean_url = url.strip()
+    unwrap_count = 0
+    while "/api/proxy-video-stream" in clean_url and "url=" in clean_url and unwrap_count < 5:
+        unwrap_count += 1
+        pq = urllib.parse.urlparse(clean_url)
+        qp = urllib.parse.parse_qs(pq.query)
+        if "url" in qp:
+            clean_url = qp["url"][0]
+        if "referer" in qp and not referer:
+            referer = qp["referer"][0]
+
+    # If stream is already HLS, Hls.js in the browser inspects the master playlist levels directly
+    is_hls = ".m3u8" in clean_url.lower() or "/hls/" in clean_url.lower() or (referer and (".m3u8" in referer.lower() or "/hls/" in referer.lower()))
+    if is_hls:
+        return Response(
+            content=json.dumps({"is_hls": True, "qualities": [], "current_height": None}),
+            media_type="application/json",
+            headers=cors_headers,
+        )
+
+    target_page, deduced_height, _, _ = _extract_video_info_from_url_or_albums(clean_url, referer)
+    if not target_page:
+        if referer and (referer.startswith("http://") or referer.startswith("https://")):
+            target_page = referer
+        elif clean_url.startswith("http://") or clean_url.startswith("https://"):
+            target_page = clean_url
+
+    if not target_page:
+        return Response(
+            content=json.dumps({"is_hls": False, "target_page": None, "qualities": [], "current_height": deduced_height,
+                                "diagnostic": {"stage": "resolution", "code": "request_failed"}}),
+            media_type="application/json",
+            headers=cors_headers,
+        )
+
+    cache_key = f"{target_page}"
+    now = time.time()
+    # The player sends _t on explicit renewal; returning the same cached signed
+    # URL makes retry loop on an expired stream for the entire cache lifetime.
+    force_refresh = isinstance(_t, str) and bool(_t)
+    if not force_refresh and cache_key in _qualities_cache:
+        ts, cached_data = _qualities_cache[cache_key]
+        if now - ts < 600:
+            return Response(
+                content=json.dumps(cached_data),
+                media_type="application/json",
+                headers=cors_headers,
+            )
+
+    # Clean old cache entries if growing too large
+    if len(_qualities_cache) > 200:
+        expired_keys = [k for k, (ts, _) in _qualities_cache.items() if now - ts > 600]
+        for k in expired_keys:
+            _qualities_cache.pop(k, None)
+
+    try:
+        import yt_dlp
+        raw_hdrs = _get_video_download_headers(target_page, target_page)
+        cookie_str = raw_hdrs.get("Cookie") or raw_hdrs.get("cookie")
+        hdrs = {k: v for k, v in raw_hdrs.items() if k.lower() != "cookie"}
+        hdrs.pop("Sec-Fetch-Dest", None)
+        hdrs.pop("Sec-Fetch-Mode", None)
+        hdrs["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "socket_timeout": 6.0,
+            "retries": 3,
+            "extractor_retries": 3,
+            "http_headers": hdrs,
+        }
+        is_yt = "youtube.com" in target_page.lower() or "youtu.be" in target_page.lower()
+
+        def _extract():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                if cookie_str:
+                    load_cookie_string_into_cookiejar(ydl.cookiejar, cookie_str, target_page)
+                return ydl.extract_info(target_page, download=False)
+
+        info = normalize_ytdlp_video_info(await asyncio.to_thread(_extract), target_page)
+        formats = [f for f in info.get("formats", []) if f.get("url") or f.get("manifest_url")]
+
+        f_master = next((f for f in formats if f.get("format_id") in ("234", "233") and f.get("manifest_url")), None)
+        master_hls_url = f_master.get("manifest_url") if f_master else info.get("manifest_url")
+
+        valid_video_formats = [
+            f for f in formats
+            if f.get("vcodec") != "none" and f.get("height") and f.get("ext") not in ("mhtml", "jpg", "png", "webp")
+        ]
+        if not valid_video_formats:
+            valid_video_formats = [
+                f for f in formats
+                if f.get("height") and f.get("ext") not in ("mhtml", "jpg", "png", "webp")
+            ]
+        is_pornhub_page = "pornhub" in target_page.lower()
+        if valid_video_formats:
+            av_direct_mp4 = [
+                f for f in valid_video_formats
+                if f.get("acodec") not in (None, "none")
+                and not f.get("_is_dash_mux")
+                and not f.get("manifest_url")
+                and ".m3u8" not in str(f.get("url") or "").lower()
+                and f.get("ext") == "mp4"
+            ]
+            if not master_hls_url and not is_pornhub_page and av_direct_mp4:
+                valid_video_formats = av_direct_mp4
+            elif not master_hls_url and not is_pornhub_page:
+                av_valid = [f for f in valid_video_formats if f.get("acodec") not in (None, "none")]
+                if av_valid:
+                    valid_video_formats = av_valid
+
+        # Eporner /xhr/video provides adaptive H.264/AAC HLS (4s .ts segments), avoiding
+        # 387MB moov-at-EOF progressive MP4 stalls and AV1 failures on mobile Chrome.
+        if not master_hls_url and callable(globals().get("get_embed_xhr_url")) and callable(globals().get("_encode_b36_hash")):
+            is_direct_p, direct_vid, _ = matches_direct_extractor_provider(target_page)
+            if is_direct_p and direct_vid:
+                try:
+                    import ssl as _ssl
+                    import certifi as _certifi
+                    import httpx as _httpx
+                    _ssl_ctx = _ssl.create_default_context(cafile=_certifi.where())
+                    _ssl_ctx.load_default_certs()
+                    async with _httpx.AsyncClient(verify=_ssl_ctx, timeout=4.0, follow_redirects=True, headers=hdrs) as _xhr_client:
+                        _page_resp = await _xhr_client.get(target_page)
+                        if _page_resp.status_code == 200:
+                            _m_hash = (
+                                re.search(r"EP\.video\.player\.hash\s*=\s*['\"]([a-f0-9]{32})['\"]", _page_resp.text)
+                                or re.search(r"['\"]hash['\"]\s*:\s*['\"]([a-f0-9]{32})['\"]", _page_resp.text)
+                            )
+                            if _m_hash:
+                                _enc = _encode_b36_hash(_m_hash.group(1))
+                                if _enc:
+                                    _xhr_url = get_embed_xhr_url(direct_vid, _enc, target_page)
+                                    _xhr_resp = await _xhr_client.get(
+                                        _xhr_url,
+                                        headers={**hdrs, "Referer": target_page, "X-Requested-With": "XMLHttpRequest"},
+                                    )
+                                    if _xhr_resp.status_code == 200:
+                                        _xhr_data = _xhr_resp.json()
+                                        _hls_src = (
+                                            _xhr_data.get("sources", {})
+                                            .get("hls", {})
+                                            .get("auto", {})
+                                            .get("src")
+                                        )
+                                        if isinstance(_hls_src, str) and _hls_src.startswith("http") and "na.mp4" not in _hls_src:
+                                            master_hls_url = _hls_src
+                except Exception:
+                    pass
+
+        from src.core.network_profiles import codec_compatibility_rank
+        # Group formats by short-side resolution (so vertical 9:16 videos like 1440x2560, 1080x1920, 720x1280
+        # map to 1440, 1080, 720 instead of 2560, 1920, 1280), preferring audio, native progressive, and H.264/non-AV1
+        by_height: dict[int, dict] = {}
+        raw_to_disp: dict[int, int] = {}
+        for f in valid_video_formats:
+            h = f.get("height")
+            if not h or not isinstance(h, (int, float)) or h < 144:
+                continue
+            h = int(h)
+            w_fmt = f.get("width")
+            disp_p = int(min(w_fmt, h)) if (isinstance(w_fmt, (int, float)) and w_fmt > 0 and w_fmt < h) else h
+            raw_to_disp[h] = disp_p
+            raw_to_disp[disp_p] = disp_p
+            if disp_p not in by_height:
+                by_height[disp_p] = f
+            else:
+                cur_f = by_height[disp_p]
+                cur_br = cur_f.get("tbr") or cur_f.get("vbr") or 0
+                new_br = f.get("tbr") or f.get("vbr") or 0
+                cur_has_audio = cur_f.get("acodec") not in (None, "none")
+                new_has_audio = f.get("acodec") not in (None, "none")
+                cur_is_mux = bool(cur_f.get("_is_dash_mux"))
+                new_is_mux = bool(f.get("_is_dash_mux"))
+                cur_codec = codec_compatibility_rank(cur_f)
+                new_codec = codec_compatibility_rank(f)
+                cur_score = (1 if cur_has_audio else 0, 0 if cur_is_mux else 1, cur_codec, float(cur_br))
+                new_score = (1 if new_has_audio else 0, 0 if new_is_mux else 1, new_codec, float(new_br))
+                if new_score > cur_score:
+                    by_height[disp_p] = f
+
+        qualities_list = []
+        ref_param = f"&referer={urllib.parse.quote(target_page)}" if target_page else ""
+        for disp_p in sorted(by_height.keys(), reverse=True):
+            f = by_height[disp_p]
+            if disp_p >= 2160:
+                label = "4K 2160p"
+            elif disp_p >= 1440:
+                label = "2K 1440p"
+            elif disp_p >= 720:
+                label = f"{disp_p}p HD"
+            else:
+                label = f"{disp_p}p"
+
+            fmt_url = f.get("url") or (master_hls_url if master_hls_url else "")
+            qualities_list.append({
+                "height": disp_p,
+                "label": label,
+                "streamUrl": f"/api/proxy-video-stream?url={urllib.parse.quote(fmt_url)}{ref_param}&height={disp_p}",
+                "bitrate": int((f.get("tbr") or f.get("vbr") or 0) * 1000),
+                "format_id": str(f.get("format_id", "")),
+                "ext": f.get("ext", "mp4"),
+                "has_audio": None if f.get("acodec") is None else f.get("acodec") != "none",
+            })
+
+        mapped_current_height = raw_to_disp.get(deduced_height, deduced_height) if deduced_height else None
+        if mapped_current_height and mapped_current_height not in by_height and qualities_list:
+            mapped_current_height = qualities_list[0]["height"]
+
+        proxied_master_hls = f"/api/proxy-video-stream?url={urllib.parse.quote(master_hls_url)}{ref_param}" if master_hls_url else None
+        result = {
+            "is_hls": bool(master_hls_url),
+            "master_hls_url": proxied_master_hls,
+            "target_page": target_page,
+            "qualities": qualities_list,
+            "current_height": mapped_current_height or (qualities_list[0]["height"] if qualities_list else None)
+        }
+        if not qualities_list and not proxied_master_hls:
+            result["diagnostic"] = {"stage": "resolution", "code": "no_formats"}
+        _qualities_cache[cache_key] = (now, result)
+        return Response(content=json.dumps(result), media_type="application/json", headers=cors_headers)
+    except Exception as exc:
+        if target_page and ("xhamster" in target_page or "/shorts/" in target_page):
+            try:
+                import ssl
+                import certifi
+                import httpx
+                from .profile_hub_workers import _extract_xhamster_initials
+                from .profile_hub_service import DEFAULT_HEADERS
+                ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+                ssl_ctx.load_default_certs()
+                async with httpx.AsyncClient(verify=ssl_ctx, timeout=10, follow_redirects=True, headers=DEFAULT_HEADERS) as client:
+                    resp = await client.get(target_page)
+                    if resp.status_code == 200:
+                        init = _extract_xhamster_initials(resp.text)
+                        sources = init.get("xplayerSettings", {}).get("sources", {})
+                        hls_url = sources.get("hls", {}).get("h264", {}).get("url")
+                        std_list = sources.get("standard", {}).get("h264", [])
+                        q_list = []
+                        for s in std_list:
+                            q_url = s.get("url")
+                            label = s.get("label") or s.get("quality") or ""
+                            if q_url and label and label != "auto":
+                                m_h = re.search(r"(\d+)p?", label)
+                                h_val = int(m_h.group(1)) if m_h else 480
+                                q_list.append({
+                                    "height": h_val,
+                                    "label": f"{h_val}p HD" if h_val >= 720 else f"{h_val}p",
+                                    "streamUrl": f"/api/proxy-video-stream?url={urllib.parse.quote(q_url)}&referer={urllib.parse.quote(target_page)}&height={h_val}",
+                                    "bitrate": 0,
+                                    "format_id": label,
+                                    "ext": "mp4",
+                                })
+                        if q_list or hls_url:
+                            q_list.sort(key=lambda x: x["height"], reverse=True)
+                            proxied_hls = f"/api/proxy-video-stream?url={urllib.parse.quote(hls_url)}&referer={urllib.parse.quote(target_page)}" if hls_url else None
+                            res = {
+                                "is_hls": bool(hls_url),
+                                "master_hls_url": proxied_hls,
+                                "target_page": target_page,
+                                "qualities": q_list,
+                                "current_height": q_list[0]["height"] if q_list else None,
+                            }
+                            _qualities_cache[cache_key] = (now, res)
+                            return Response(content=json.dumps(res), media_type="application/json", headers=cors_headers)
+            except Exception:
+                pass
+        logger.warning(f"Could not extract video qualities for {target_page}: {exc}")
+        from src.server.video_playback_diagnostics import resolution_failure
+        err_res = {"is_hls": False, "target_page": target_page, "qualities": [], "current_height": deduced_height,
+                   "error": str(exc), "diagnostic": resolution_failure(exc)}
+        # Never cache transient extraction errors so immediate retries recover cleanly.
+        return Response(
+            content=json.dumps(err_res),
+            media_type="application/json",
+            headers=cors_headers,
+        )
 
 
 @app.get("/api/models")
@@ -3059,7 +4227,7 @@ async def chat_api(req: ChatRequest):
                 messages = [
                     {
                         "role": "system",
-                        "content": "Você é o Agente Co-Pilot IMAGEX.AI. Responda em português de forma concisa, inteligente e focada na extração e gerenciamento de álbuns de imagens e vídeos."
+                        "content": "Você é o Agente Co-Pilot IMAGEX. Responda em português de forma concisa, inteligente e focada na extração e gerenciamento de álbuns de imagens e vídeos."
                     }
                 ]
                 if req.conversation_history:
@@ -3090,7 +4258,7 @@ async def chat_api(req: ChatRequest):
                             "model": target_model,
                             "prompt": req.message,
                             "stream": False,
-                            "system": "Você é o Agente Co-Pilot IMAGEX.AI. Responda em português."
+                            "system": "Você é o Agente Co-Pilot IMAGEX. Responda em português."
                         }
                     )
                     if gen_resp.status_code == 200:
@@ -3581,6 +4749,7 @@ async def start_analysis(req: AnalyzeRequest):
         kw in url_lower
         for kw in (
             "/video-", "/video/", "/watch", "watch?v=", "youtu.be", "tiktok.com",
+            "/reel/", "/reels/", "/shorts/", "instagram.com/p/", "instagram.com/tv/", "instagr.am/",
             ".mp4", ".m3u8", ".webm", "view_video.php", "viewkey="
         ) + get_video_host_indicators()
     )
@@ -3696,7 +4865,22 @@ async def start_batch_analysis(req: BatchAnalyzeRequest):
             folder=getattr(req, "folder", "Geral") or "Geral",
             download_locally=bool(getattr(req, "download_locally", False)),
         )
-        if req.media_type_filter in ("videos", "gifs") or engine_type == "classic":
+        u_low = u.lower()
+        is_gal_u = any(g in u_low for g in ("/gallery/", "/album/", "/photos/", "/photo/", "gallery-", "album-"))
+        is_vid_u_pat = any(
+            kw in u_low
+            for kw in (
+                "/video-", "/video/", "/watch", "watch?v=", "youtu.be", "tiktok.com",
+                "/reel/", "/reels/", "/shorts/", "instagram.com/p/", "instagram.com/tv/", "instagr.am/",
+                ".mp4", ".m3u8", ".webm", "view_video.php", "viewkey="
+            ) + get_video_host_indicators()
+        )
+        is_vid_u = (is_vid_u_pat and not is_gal_u) if req.media_type_filter != "images" else False
+        if req.media_type_filter in ("videos", "gifs") or is_vid_u or engine_type == "classic":
+            if is_vid_u and single_req.media_type_filter not in ("videos", "gifs"):
+                single_req.media_type_filter = "videos"
+            _active_jobs[s_id]["engine_type"] = "classic"
+            _active_jobs[s_id]["mode"] = "autonomous"
             t = asyncio.create_task(_run_agent_task(s_id, single_req, semaphore=_extraction_semaphore))
         elif engine_type in ("gemini_surgical_scout", "surgical_scout", "gemini_scout"):
             t = asyncio.create_task(_run_gemini_surgical_task(s_id, single_req, semaphore=_extraction_semaphore))
@@ -3926,7 +5110,10 @@ async def _run_gemini_surgical_task(session_id: str, req: AnalyzeRequest, semaph
                 if getattr(album, "images", None) and len(album.images) > 0:
                     _multi_album_preview_cache[clean_req_url] = album.model_copy(deep=True)
 
-            if selected_urls is not None and len(selected_urls) > 0:
+            if getattr(req, "strict_profile_selection", False):
+                from .profile_hub_selection import filter_profile_album_subset
+                album = filter_profile_album_subset(album, selected_urls)
+            elif selected_urls is not None and len(selected_urls) > 0:
                 album = _filter_album_by_selected_urls(album, selected_urls)
 
             has_gemini = bool(scout.client and scout.api_key)
@@ -4376,10 +5563,66 @@ async def _download_highest_video_task(
     async with httpx.AsyncClient(verify=False, timeout=300.0, follow_redirects=True) as v_client:
         for cand in sorted_vids:
             v_url = cand.video_stream_url or cand.original_url
-            if not v_url or not v_url.startswith("http") or ".m3u8" in v_url:
+            if not v_url or not v_url.startswith("http"):
+                continue
+            src_page = getattr(cand, "source_page", None) or ""
+            thumb_u = getattr(cand, "poster_url", None) or getattr(cand, "thumbnail_url", None) or ""
+            clean_t = album_title or getattr(cand, "title", None) or "video_extraido"
+            if ".m3u8" in v_url or is_tls_impersonation_required(v_url, src_page):
+                try:
+                    from .resilient_downloader import download_video_resilient
+                    base_fname = "".join(c for c in clean_t if c.isalnum() or c in ("-", "_", " ")).strip() or f"vid_{int(time.time())}"
+                    fname = f"{base_fname}.mp4"
+                    folder_path = os.path.join(video_service.base_dir, target_folder_name)
+                    os.makedirs(folder_path, exist_ok=True)
+                    target_path = os.path.join(folder_path, fname)
+                    if os.path.exists(target_path):
+                        target_path = os.path.join(folder_path, f"{base_fname}_{int(time.time())}.mp4")
+                    res_dl = await download_video_resilient(
+                        url=src_page or v_url,
+                        target_path=target_path,
+                        clean_title=clean_t,
+                        referer=src_page or v_url,
+                    )
+                    if os.path.exists(target_path) and os.path.getsize(target_path) > 50000:
+                        total_written = os.path.getsize(target_path)
+                        dl_info = res_dl.get("info", {}) if isinstance(res_dl, dict) else {}
+                        title = os.path.splitext(os.path.basename(target_path))[0].replace("_", " ")
+                        rel_path = os.path.relpath(target_path, video_service.base_dir).replace("\\", "/")
+                        vid_id = video_service._get_video_id(rel_path)
+                        video_service._update_single_metadata(
+                            target_path,
+                            title=title,
+                            folder=target_folder_name,
+                            is_favorite=False,
+                            vid_id=vid_id,
+                            storage_location="render_local",
+                            file_size_bytes=total_written,
+                            width=int(dl_info.get("width") or getattr(cand, "width", None) or 1920),
+                            height=int(dl_info.get("height") or getattr(cand, "height", None) or 1080),
+                            duration_seconds=float(dl_info.get("duration") or getattr(cand, "duration_seconds", None) or 0.0),
+                            source_url=src_page or None,
+                            source_thumbnail_url=thumb_u if thumb_u.startswith("http") else None,
+                            source_origin="web",
+                        )
+                        try:
+                            await asyncio.to_thread(
+                                video_service.get_or_generate_thumbnail,
+                                vid_id,
+                                thumb_u if thumb_u.startswith("http") else None,
+                            )
+                        except Exception:
+                            pass
+                        if is_auto_cloud_sync_enabled():
+                            video_service._trigger_background_upload(vid_id, target_path, target_folder_name, os.path.basename(target_path))
+                        logger.info(f"Auto-saved resilient video ({total_written/1024/1024:.1f} MB) locally to Gallery: {target_path}")
+                        break
+                except Exception as ex_res:
+                    logger.warning(f"Resilient auto-save failed for {src_page or v_url}, trying direct stream: {ex_res}")
+            if ".m3u8" in v_url:
                 continue
             try:
-                headers = _get_video_download_headers(v_url, getattr(cand, "source_page", None))
+                headers = _get_video_download_headers(v_url, src_page or None)
                 async with v_client.stream("GET", v_url, headers=headers) as v_resp:
                     if v_resp.status_code in (200, 206):
                         ct = v_resp.headers.get("content-type", "").lower()
@@ -4692,16 +5935,17 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
                     }
                 }
                 ph_cookies = {}
+                target_extract_url = ext_target or req.url
                 def _extract_ph():
                     nonlocal ph_cookies
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         if cookie_str:
-                            load_cookie_string_into_cookiejar(ydl.cookiejar, cookie_str, req.url)
-                        inf = ydl.extract_info(req.url, download=False)
+                            load_cookie_string_into_cookiejar(ydl.cookiejar, cookie_str, target_extract_url)
+                        inf = ydl.extract_info(target_extract_url, download=False)
                         ph_cookies = {c.name: c.value for c in ydl.cookiejar}
                         return inf
 
-                info = await asyncio.to_thread(_extract_ph)
+                info = normalize_ytdlp_video_info(await asyncio.to_thread(_extract_ph), target_extract_url)
                 if ph_cookies:
                     c_str = "; ".join(f"{k}={v}" for k, v in ph_cookies.items())
                     for c_dom in (cookie_domains or get_cookie_domains_for_url(req.url)):
@@ -4714,26 +5958,60 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
                 vid_duration = int(info.get("duration") or 0)
 
                 formats = [f for f in info.get("formats", []) if f.get("ext") == "mp4" and f.get("url")]
-                direct_mp4s = [f for f in formats if not str(f.get("format_id", "")).startswith("hls")]
+                direct_mp4s = [
+                    f for f in formats
+                    if not str(f.get("format_id", "")).startswith("hls")
+                    and not f.get("manifest_url")
+                    and ".m3u8" not in str(f.get("url") or "").lower()
+                ]
                 if direct_mp4s:
                     formats = direct_mp4s
-                formats.sort(key=lambda f: f.get("height", 0) or 0, reverse=True)
+                av_mp4s = [
+                    f for f in formats
+                    if f.get("acodec") != "none" and f.get("vcodec") != "none"
+                ]
+                if av_mp4s:
+                    formats = av_mp4s
+                def _fmt_short_dim(fmt: dict) -> int:
+                    h_f = int(fmt.get("height") or 0)
+                    w_f = int(fmt.get("width") or 0)
+                    return min(w_f, h_f) if (w_f > 0 and h_f > 0) else h_f
+
+                formats.sort(
+                    key=lambda f: (
+                        _fmt_short_dim(f),
+                        0 if f.get("_is_dash_mux") else 1,
+                        1 if "avc1" in str(f.get("vcodec") or "").lower() else 0,
+                        float(f.get("tbr") or 0),
+                    ),
+                    reverse=True,
+                )
+
+                async def _probe_single_url_size(p_client: httpx.AsyncClient, u: str) -> int:
+                    try:
+                        p_hdrs = _get_video_download_headers(u, req.url)
+                        p_hdrs["Range"] = "bytes=0-0"
+                        pr = await p_client.get(u, headers=p_hdrs)
+                        cr = pr.headers.get("content-range", "")
+                        if "/" in cr:
+                            part = cr.split("/")[-1].strip()
+                            if part.isdigit():
+                                return int(part)
+                        elif "content-length" in pr.headers and pr.status_code in (200, 206):
+                            cl_val = pr.headers.get("content-length", "0").strip()
+                            if cl_val.isdigit():
+                                return int(cl_val)
+                    except Exception:
+                        pass
+                    return 0
 
                 async def _probe_ph_size(s_url: str) -> int:
+                    clean_s, mux_a = split_mux_audio_url(s_url)
                     try:
                         async with httpx.AsyncClient(verify=False, timeout=4.0) as p_client:
-                            p_hdrs = _get_video_download_headers(s_url, req.url)
-                            p_hdrs["Range"] = "bytes=0-0"
-                            pr = await p_client.get(s_url, headers=p_hdrs)
-                            cr = pr.headers.get("content-range", "")
-                            if "/" in cr:
-                                part = cr.split("/")[-1].strip()
-                                if part.isdigit():
-                                    return int(part)
-                            elif "content-length" in pr.headers and pr.status_code in (200, 206):
-                                cl_val = pr.headers.get("content-length", "0").strip()
-                                if cl_val.isdigit():
-                                    return int(cl_val)
+                            v_sz = await _probe_single_url_size(p_client, clean_s)
+                            a_sz = await _probe_single_url_size(p_client, mux_a) if mux_a else 0
+                            return v_sz + a_sz
                     except Exception:
                         pass
                     return 0
@@ -4741,23 +6019,40 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
                 unique_formats = []
                 seen_h = set()
                 for f in formats:
-                    h_val = f.get("height") or 720
-                    if h_val not in seen_h:
-                        seen_h.add(h_val)
+                    short_d = _fmt_short_dim(f) or 720
+                    if short_d not in seen_h:
+                        seen_h.add(short_d)
                         unique_formats.append(f)
+
+                if any(dom in target_extract_url.lower() for dom in ("instagram.com", "instagr.am", "youtube.com", "youtu.be")) and len(unique_formats) > 1:
+                    # Instagram Reels & YouTube: create 1 clean card in highest resolution (e.g. 4K/2K/1080p with audio),
+                    # while all resolutions (4K, 2K 1440p, 1080p HD, 720p HD, 480p, 360p) are available in
+                    # the streaming player quality selector and the video card Download button menu.
+                    unique_formats = unique_formats[:1]
 
                 vid_images = []
                 for idx, f in enumerate(unique_formats):
-                    h_val = f.get("height") or 720
-                    w_val = 1920 if h_val >= 1080 else (1280 if h_val >= 720 else (854 if h_val >= 480 else 426))
+                    h_val = int(f.get("height") or 720)
+                    w_raw = f.get("width")
+                    w_val = int(w_raw) if (isinstance(w_raw, (int, float)) and w_raw > 0) else (1920 if h_val >= 1080 else (1280 if h_val >= 720 else (854 if h_val >= 480 else 426)))
+                    short_dim = min(w_val, h_val) if (w_val > 0 and h_val > 0) else h_val
                     stream_src = f["url"]
-                    q_label = f"{h_val}p HD" if h_val >= 720 else f"{h_val}p"
+                    if short_dim >= 2160:
+                        q_label = "4K 2160p"
+                    elif short_dim >= 1440:
+                        q_label = "2K 1440p"
+                    elif short_dim >= 720:
+                        q_label = f"{short_dim}p HD"
+                    else:
+                        q_label = f"{short_dim}p"
                     f_size = f.get("filesize") or f.get("filesize_approx") or 0
-                    if not f_size and vid_duration > 0:
-                        tbr = f.get("tbr") or (4000 if h_val >= 1080 else (2000 if h_val >= 720 else (1000 if h_val >= 480 else 500)))
-                        f_size = int(tbr * 1000 / 8 * vid_duration)
+                    if not f_size and vid_duration > 0 and f.get("tbr"):
+                        f_size = int(float(f.get("tbr")) * 1000 / 8 * vid_duration)
                     if not f_size:
                         f_size = await _probe_ph_size(stream_src)
+                    if not f_size and vid_duration > 0:
+                        tbr_est = 4000 if short_dim >= 1080 else (2000 if short_dim >= 720 else (1000 if short_dim >= 480 else 500))
+                        f_size = int(tbr_est * 1000 / 8 * vid_duration)
 
                     img_obj = AlbumImage(
                         position=idx + 1,
@@ -4794,7 +6089,17 @@ async def _run_agent_task(session_id: str, req: AnalyzeRequest, semaphore: Optio
                         })
 
                 if vid_images:
-                    max_q = f"{formats[0].get('height', 1080)}p HD"
+                    top_h = int(formats[0].get("height") or 1080)
+                    top_w = int(formats[0].get("width") or 1920)
+                    top_short = min(top_w, top_h) if (top_w > 0 and top_h > 0) else top_h
+                    if top_short >= 2160:
+                        max_q = "4K 2160p"
+                    elif top_short >= 1440:
+                        max_q = "2K 1440p"
+                    elif top_short >= 720:
+                        max_q = f"{top_short}p HD"
+                    else:
+                        max_q = f"{top_short}p"
                     album = Album(
                         album_id=f"vid_{abs(hash(req.url)) % 1000000}",
                         title=vid_title,
@@ -5309,6 +6614,19 @@ async def _relaunch_job_in_place(session_id: str, priority: bool = False) -> boo
     if not job:
         return False
 
+    if job.get("profile_hub_batch_id"):
+        controller = _job_controllers.get(session_id)
+        if controller and controller.is_active():
+            controller.resume()
+            return True
+        try:
+            await _profile_hub_execution.retry(job["profile_hub_batch_id"], RetryExecution(
+                retry_id=_profile_hub_uuid4(), operation_ids=[job["profile_hub_unit_id"]],
+            ))
+            return True
+        except (KeyError, ValueError):
+            return False
+
     ctrl = _job_controllers.get(session_id)
     if ctrl and hasattr(ctrl, "resume") and hasattr(ctrl, "is_active") and ctrl.is_active():
         prog_status = (job.get("progress", {}).get("status") or "") if isinstance(job.get("progress"), dict) else ""
@@ -5408,8 +6726,8 @@ async def _relaunch_job_in_place(session_id: str, priority: bool = False) -> boo
             source_page_url = canon_src
 
         m_vid = (
-            re.search(r"(?:viewkey=|video-|/video/|/videos/)([a-zA-Z0-9_-]+)", raw_url)
-            or re.search(r"(?:viewkey=|video-|/video/|/videos/)([a-zA-Z0-9_-]+)", source_page_url)
+            re.search(r"(?:viewkey=|video-|[?&]v=|youtu\.be/|/video/|/videos/|/(?:reel|reels|p|tv|shorts|embed|live)/)([a-zA-Z0-9_-]+)", raw_url)
+            or re.search(r"(?:viewkey=|video-|[?&]v=|youtu\.be/|/video/|/videos/|/(?:reel|reels|p|tv|shorts|embed|live)/)([a-zA-Z0-9_-]+)", source_page_url)
         )
         vid_id = job.get("source_id") or (m_vid.group(1) if m_vid else "")
         thumb_url = job.get("thumbnail_url")
@@ -5517,6 +6835,7 @@ async def _relaunch_job_in_place(session_id: str, priority: bool = False) -> boo
             media_type_filter=job.get("media_type_filter") or "all",
             folder=job.get("folder") or "Geral",
             selected_image_urls=job.get("selected_image_urls"),
+            strict_profile_selection=bool(job.get("strict_profile_selection", False)),
         )
         if session_id not in _active_event_queues:
             _active_event_queues[session_id] = asyncio.Queue()
@@ -5997,8 +7316,32 @@ async def sync_album_metadata_endpoint(session_id: str):
                             if not album.title or album.title.strip() == "" or "sem título" in album.title.lower():
                                 album.title = clean_t
                             title_synced = True
+
+                    # Sincronização/Refresh da Thumbnail da página via OpenGraph / Twitter cards
+                    og_img = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "og:image"}) or soup.find("meta", property="twitter:image")
+                    page_thumb = str(og_img.get("content")).strip() if (og_img and og_img.get("content")) else ""
+                    if page_thumb and page_thumb.startswith("http"):
+                        if is_placeholder_image(album.cover_image_url) or len(album.images) == 1:
+                            album.cover_image_url = page_thumb
+                        for img in album.images:
+                            if is_placeholder_image(img.thumbnail_url):
+                                img.thumbnail_url = page_thumb
+                            if getattr(img, "media_type", None) == "video" and is_placeholder_image(getattr(img, "poster_url", None)):
+                                img.poster_url = page_thumb
         except Exception as etit:
             logger.warning(f"Aviso ao sincronizar título original da fonte: {etit}")
+
+    # Fallback dedicado para itens de vídeo do YouTube onde a miniatura continue vazia ou inválida
+    for img in album.images:
+        ref_page = getattr(img, "source_page", None) or album.source_page or ""
+        if is_placeholder_image(img.thumbnail_url) and ("youtube.com" in ref_page.lower() or "youtu.be" in ref_page.lower()):
+            yt_m = re.search(r'(?:v=|\/embed\/|\/watch\?v=|youtu\.be\/|\/v\/)([a-zA-Z0-9_-]{11})', ref_page)
+            if yt_m:
+                yt_thumb = f"https://i.ytimg.com/vi/{yt_m.group(1)}/hqdefault.jpg"
+                img.thumbnail_url = yt_thumb
+                img.poster_url = yt_thumb
+                if is_placeholder_image(album.cover_image_url) or len(album.images) == 1:
+                    album.cover_image_url = yt_thumb
 
     updated_dim_count = 0
     updated_size_count = 0
@@ -6161,28 +7504,42 @@ async def sync_album_metadata_endpoint(session_id: str):
 
                 # 4. Extrair paleta de cores dominante via Pillow se faltar
                 if not getattr(img, "color_palette", None) or len(img.color_palette) < 7:
-                    pal_url = img.thumbnail_url or img.original_url
-                    if pal_url:
+                    pal_url = img.thumbnail_url or (img.original_url if getattr(img, "media_type", None) != "video" else None)
+                    if pal_url and not is_placeholder_image(pal_url):
                         pal = await extract_palette_for_media_url(pal_url, source_page=img_source_ref, client=client)
                         if pal:
                             img.color_palette = pal
                             palettes_gen_count += 1
 
                 # 4.1 Pré-aquecimento da miniatura WebP leve (360px) em cache local persistente
-                thumb_target_url = img.thumbnail_url or img.original_url
-                if thumb_target_url and getattr(img, "media_type", None) != "video":
+                thumb_target_url = img.thumbnail_url or (img.original_url if getattr(img, "media_type", None) != "video" else None)
+                if thumb_target_url and not is_placeholder_image(thumb_target_url):
                     try:
                         t_hash = hashlib.sha256(thumb_target_url.encode("utf-8")).hexdigest()
                         t_webp_path = os.path.join(_IMAGE_CACHE_DIR, f"{t_hash}_w360.webp")
                         c_orig_path = os.path.join(_IMAGE_CACHE_DIR, f"{t_hash}.bin")
-                        if not os.path.exists(t_webp_path) and os.path.exists(c_orig_path):
-                            with open(c_orig_path, "rb") as c_orig_file:
-                                c_raw = c_orig_file.read()
-                            if len(c_raw) > 100:
-                                t_webp = await asyncio.to_thread(_generate_thumbnail_webp_sync, c_raw, 360)
-                                if t_webp:
-                                    with open(t_webp_path, "wb") as tw_file:
-                                        tw_file.write(t_webp)
+                        if not os.path.exists(t_webp_path):
+                            if os.path.exists(c_orig_path):
+                                with open(c_orig_path, "rb") as c_orig_file:
+                                    c_raw = c_orig_file.read()
+                                if len(c_raw) > 100:
+                                    t_webp = await asyncio.to_thread(_generate_thumbnail_webp_sync, c_raw, 360)
+                                    if t_webp:
+                                        with open(t_webp_path, "wb") as tw_file:
+                                            tw_file.write(t_webp)
+                            else:
+                                try:
+                                    t_hdrs = resolve_anti_hotlink_headers(thumb_target_url, referer=img_source_ref)
+                                    t_resp = await client.get(thumb_target_url, headers=t_hdrs)
+                                    if t_resp.status_code == 200 and len(t_resp.content) > 100:
+                                        with open(c_orig_path, "wb") as co_f:
+                                            co_f.write(t_resp.content)
+                                        t_webp = await asyncio.to_thread(_generate_thumbnail_webp_sync, t_resp.content, 360)
+                                        if t_webp:
+                                            with open(t_webp_path, "wb") as tw_file:
+                                                tw_file.write(t_webp)
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
 
@@ -6584,7 +7941,8 @@ async def _run_video_download_task(
     headers: dict,
     source_url: str = "",
     source_id: str = "",
-    thumbnail_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None,
+    registration_lookup: Optional[StreamRegistrationLookup] = None
 ):
 
     """
@@ -6819,7 +8177,8 @@ async def _run_video_download_task(
         existing_fav = False
         try:
             all_meta = video_service._load_metadata()
-            matched_prev = _find_matching_existing_video(source_id, source_url, clean_title or final_title, video_service.list_all_videos())
+            candidates = registration_lookup.list_videos() if registration_lookup is not None else video_service.list_all_videos()
+            matched_prev = _find_matching_existing_video(source_id, source_url, clean_title or final_title, candidates)
             if matched_prev:
                 existing_fav = bool(matched_prev.get("is_favorite", False))
                 prev_id = matched_prev.get("id")
@@ -6948,7 +8307,10 @@ async def _run_video_stream_register_task(
     source_url: str = "",
     source_id: str = "",
     thumbnail_url: Optional[str] = None,
-    duration_hint: Optional[str] = None
+    duration_hint: Optional[str] = None,
+    registration_lookup: Optional[StreamRegistrationLookup] = None,
+    identity_seed: Optional[str] = None,
+    resolved_metadata: Optional[dict] = None
 ):
     """
     Lightweight worker that resolves a video's 1080p stream + metadata and registers it
@@ -6967,7 +8329,7 @@ async def _run_video_stream_register_task(
         if ctrl and getattr(ctrl, "is_cancelled", False):
             raise asyncio.CancelledError()
 
-        meta_info = await _resolve_best_video_stream_with_meta(source_id or "vid", source_url or vurl)
+        meta_info = resolved_metadata if resolved_metadata is not None else await _resolve_best_video_stream_with_meta(source_id or "vid", source_url or vurl)
         resolved_stream = meta_info.get("stream_url") or vurl
         if not resolved_stream or not str(resolved_stream).startswith("http"):
             resolved_stream = vurl
@@ -6996,7 +8358,8 @@ async def _run_video_stream_register_task(
         existing_fav = False
         vid_id = ""
         try:
-            matched_prev = _find_matching_existing_video(source_id, ref_url, clean_title, video_service.list_all_videos())
+            candidates = registration_lookup.list_videos() if registration_lookup is not None else video_service.list_all_videos()
+            matched_prev = _find_matching_existing_video(source_id, ref_url, clean_title, candidates)
             if matched_prev:
                 existing_fav = bool(matched_prev.get("is_favorite", False))
                 if matched_prev.get("storage_location") == "stream_url" and matched_prev.get("id"):
@@ -7005,7 +8368,7 @@ async def _run_video_stream_register_task(
             pass
 
         if not vid_id:
-            seed = (source_id or ref_url or resolved_stream).strip()
+            seed = (identity_seed or source_id or ref_url or resolved_stream).strip()
             vid_id = hashlib.md5(seed.encode("utf-8")).hexdigest()[:12]
 
         # Ensure folder directory exists so folder appears in list_folders()
@@ -7103,7 +8466,7 @@ async def save_extracted_video_to_gallery(req: SaveExtractedVideoRequest):
     if canon_src:
         source_page_url = canon_src
 
-    m_vid = re.search(r"(?:viewkey=|video-|/video/|/videos/)([a-zA-Z0-9_-]+)", vurl) or re.search(r"(?:viewkey=|video-|/video/|/videos/)([a-zA-Z0-9_-]+)", source_page_url)
+    m_vid = re.search(r"(?:viewkey=|video-|[?&]v=|youtu\.be/|/video/|/videos/|/(?:reel|reels|p|tv|shorts|embed|live)/)([a-zA-Z0-9_-]+)", vurl) or re.search(r"(?:viewkey=|video-|[?&]v=|youtu\.be/|/video/|/videos/|/(?:reel|reels|p|tv|shorts|embed|live)/)([a-zA-Z0-9_-]+)", source_page_url)
     vid_id = m_vid.group(1) if m_vid else (req.candidate_id or "")
 
     target_folder_name = sanitize_folder_name(req.folder, default="Extraídos")
@@ -7351,10 +8714,16 @@ async def _resolve_best_video_stream_with_meta(vid_id: str, page_url: str) -> Di
             anti_hdrs = resolve_anti_hotlink_headers(target_page, referer=target_page)
             cookie_str = anti_hdrs.get("Cookie") or anti_hdrs.get("cookie")
             clean_anti_hdrs = {k: v for k, v in anti_hdrs.items() if k.lower() != "cookie"}
+            clean_anti_hdrs.pop("Sec-Fetch-Dest", None)
+            clean_anti_hdrs.pop("Sec-Fetch-Mode", None)
+            clean_anti_hdrs["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
                 "skip_download": True,
+                "socket_timeout": 6.0,
+                "retries": 3,
+                "extractor_retries": 3,
                 "http_headers": {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     **clean_anti_hdrs
@@ -7365,10 +8734,25 @@ async def _resolve_best_video_stream_with_meta(vid_id: str, page_url: str) -> Di
                     if cookie_str:
                         load_cookie_string_into_cookiejar(ydl.cookiejar, cookie_str, target_page)
                     return ydl.extract_info(target_page, download=False)
-            info = await asyncio.to_thread(_ytdl_ph)
+            info = normalize_ytdlp_video_info(await asyncio.to_thread(_ytdl_ph), target_page)
             formats = [f for f in info.get("formats", []) if f.get("ext") == "mp4" and f.get("url")]
+            av_formats = [
+                f for f in formats
+                if f.get("acodec") != "none" and f.get("vcodec") != "none"
+            ]
+            if av_formats:
+                formats = av_formats
             if formats:
-                best = max(formats, key=lambda f: f.get("height", 0) or 0)
+                best = max(
+                    formats,
+                    key=lambda f: (
+                        min(int(f.get("width") or 0), int(f.get("height") or 0))
+                        if (f.get("width") and f.get("height"))
+                        else int(f.get("height") or 0),
+                        0 if f.get("_is_dash_mux") else 1,
+                        float(f.get("tbr") or 0),
+                    ),
+                )
                 cand = best.get("url")
                 if cand and "na.mp4" not in cand:
                     logger.info(f"Resolved real direct stream ({best.get('height')}p): {cand[:60]}...")
@@ -7457,12 +8841,31 @@ async def _resolve_best_video_stream_with_meta(vid_id: str, page_url: str) -> Di
                                         return 640, 360
                                     return 1280, 720
 
-                                for q in quality_priority:
-                                    if q in mp4s and mp4s[q].get("src"):
-                                        candidate_src = mp4s[q]["src"]
-                                        if "na.mp4" not in candidate_src:
-                                            logger.info(f"Resolved real stream for {clean_id} ({q}): {candidate_src[:60]}...")
-                                            w_q, h_q = _dims_from_q(q)
+                                from src.core.network_profiles import is_av1_format
+                                for allow_av1 in (False, True):
+                                    for q in quality_priority:
+                                        if q in mp4s and mp4s[q].get("src"):
+                                            candidate_src = mp4s[q]["src"]
+                                            if not allow_av1 and is_av1_format({"format_id": q, "url": candidate_src}):
+                                                continue
+                                            if "na.mp4" not in candidate_src:
+                                                logger.info(f"Resolved real stream for {clean_id} ({q}): {candidate_src[:60]}...")
+                                                w_q, h_q = _dims_from_q(q)
+                                                return {
+                                                    "stream_url": candidate_src,
+                                                    "width": w_q,
+                                                    "height": h_q,
+                                                    "duration_seconds": page_dur,
+                                                    "thumbnail_url": page_thumb,
+                                                    "heatmap": None,
+                                                }
+                                    for q_label, q_obj in mp4s.items():
+                                        candidate_src = q_obj.get("src")
+                                        if not allow_av1 and is_av1_format({"format_id": q_label, "url": candidate_src}):
+                                            continue
+                                        if candidate_src and "na.mp4" not in candidate_src:
+                                            logger.info(f"Resolved stream for {clean_id} ({q_label}): {candidate_src[:60]}...")
+                                            w_q, h_q = _dims_from_q(q_label)
                                             return {
                                                 "stream_url": candidate_src,
                                                 "width": w_q,
@@ -7471,19 +8874,6 @@ async def _resolve_best_video_stream_with_meta(vid_id: str, page_url: str) -> Di
                                                 "thumbnail_url": page_thumb,
                                                 "heatmap": None,
                                             }
-                                for q_label, q_obj in mp4s.items():
-                                    candidate_src = q_obj.get("src")
-                                    if candidate_src and "na.mp4" not in candidate_src:
-                                        logger.info(f"Resolved stream for {clean_id} ({q_label}): {candidate_src[:60]}...")
-                                        w_q, h_q = _dims_from_q(q_label)
-                                        return {
-                                            "stream_url": candidate_src,
-                                            "width": w_q,
-                                            "height": h_q,
-                                            "duration_seconds": page_dur,
-                                            "thumbnail_url": page_thumb,
-                                            "heatmap": None,
-                                        }
                 except Exception as e_xhr:
                     logger.debug(f"XHR base36 resolution failed for {clean_id}: {e_xhr}")
 
@@ -7493,27 +8883,67 @@ async def _resolve_best_video_stream_with_meta(vid_id: str, page_url: str) -> Di
             import yt_dlp
             raw_hdrs = _get_video_download_headers(target_page)
             cookie_str = raw_hdrs.get("Cookie") or raw_hdrs.get("cookie")
+            clean_generic_hdrs = {k: v for k, v in raw_hdrs.items() if k.lower() != "cookie"}
+            clean_generic_hdrs.pop("Sec-Fetch-Dest", None)
+            clean_generic_hdrs.pop("Sec-Fetch-Mode", None)
+            clean_generic_hdrs["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
                 "skip_download": True,
-                "http_headers": {k: v for k, v in raw_hdrs.items() if k.lower() != "cookie"}
+                "socket_timeout": 6.0,
+                "retries": 3,
+                "extractor_retries": 3,
+                "http_headers": clean_generic_hdrs
             }
+            is_yt = "youtube.com" in target_page.lower() or "youtu.be" in target_page.lower()
             def _ytdl_generic():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     if cookie_str:
                         load_cookie_string_into_cookiejar(ydl.cookiejar, cookie_str, target_page)
                     return ydl.extract_info(target_page, download=False)
-            info = await asyncio.to_thread(_ytdl_generic)
-            formats = [f for f in info.get("formats", []) if f.get("ext") == "mp4" and f.get("url")]
+            info = normalize_ytdlp_video_info(await asyncio.to_thread(_ytdl_generic), target_page)
+            formats = [
+                f for f in info.get("formats", [])
+                if f.get("ext") == "mp4"
+                and f.get("url")
+                and not f.get("manifest_url")
+                and ".m3u8" not in str(f.get("url") or "").lower()
+            ]
+            av_formats = [
+                f for f in formats
+                if f.get("acodec") != "none" and f.get("vcodec") != "none"
+            ]
+            if av_formats:
+                formats = av_formats
             if formats:
-                best = max(formats, key=lambda f: f.get("height", 0) or 0)
+                from src.core.network_profiles import codec_compatibility_rank
+                best = max(
+                    formats,
+                    key=lambda f: (
+                        int(f.get("height") or 0),
+                        0 if f.get("_is_dash_mux") else 1,
+                        codec_compatibility_rank(f),
+                        float(f.get("tbr") or 0),
+                    ),
+                )
                 candidate_src = best.get("url")
                 if candidate_src and "na.mp4" not in candidate_src:
                     return {
                         "stream_url": candidate_src,
                         "width": int(best.get("width") or info.get("width") or 1920),
                         "height": int(best.get("height") or info.get("height") or 1080),
+                        "duration_seconds": float(info.get("duration") or 0.0),
+                        "thumbnail_url": info.get("thumbnail"),
+                        "heatmap": info.get("heatmap"),
+                    }
+            if is_yt:
+                f_master = next((f for f in info.get("formats", []) if f.get("format_id") in ("234", "233") and f.get("manifest_url")), None)
+                if f_master and f_master.get("manifest_url"):
+                    return {
+                        "stream_url": f_master["manifest_url"],
+                        "width": int(info.get("width") or 1920),
+                        "height": int(info.get("height") or 1080),
                         "duration_seconds": float(info.get("duration") or 0.0),
                         "thumbnail_url": info.get("thumbnail"),
                         "heatmap": info.get("heatmap"),
@@ -7543,6 +8973,34 @@ async def _resolve_best_video_stream(vid_id: str, page_url: str) -> Optional[str
     return res.get("stream_url")
 
 
+
+def normalize_incoming_scraper_url(url: str) -> str:
+    """
+    Normaliza URLs de entrada para o Web Video Scraper:
+    1. Des-amplifica URLs mobile AMP (ex: https://amp.xvideos.com/... -> https://www.xvideos.com/...)
+    2. Garante protocolo e remove fragmentos/residuos redundantes.
+    3. Converte subdomínios traduzidos do Pornhub (ex: pt.pornhub.com, es.pornhub.com -> www.pornhub.com)
+       para preservar os títulos originais em inglês e evitar traduções automáticas indesejadas.
+    4. Para perfis de criadores/pornstars/modelos/canais do Xvideos ou Pornhub que abrem por padrão
+       na aba resumo (com poucos vídeos e sem paginação completa), redireciona automaticamente para
+       o catálogo completo de vídeos:
+       - Xvideos: adiciona #_tabVideos
+       - Pornhub: adiciona /videos se for URL raiz do perfil
+    """
+    if not url:
+        return url
+    u = url.strip()
+    u = re.sub(r"^https?://amp\.(xvideos\.[a-z.]+)", r"https://www.\1", u, flags=re.I)
+    u = re.sub(r"^https?://amp\.", "https://www.", u, flags=re.I)
+    u = re.sub(r"^https?://(?:pt|es|de|fr|it|nl|pl|rt|jp|cz|cn|ar|fil)\.(pornhub\.[a-z.]+)", r"https://www.\1", u, flags=re.I)
+    u = re.sub(r"^https?://(?:pt|es|de|fr|it|nl|pl|rt|jp|cz|cn|ar|fil)\.(xhamster\.[a-z.]+)", r"https://\1", u, flags=re.I)
+    if re.search(r"xvideos\.[a-z.]+/(?:pornstars|channels|models|profiles)/[a-zA-Z0-9_\-]+/?$", u, re.I):
+        u = u.rstrip("/") + "#_tabVideos"
+    if re.search(r"pornhub\.[a-z.]+/(?:pornstar|model|channels|users)/[a-zA-Z0-9_\-]+/?$", u, re.I):
+        u = u.rstrip("/") + "/videos"
+    return u
+
+
 @app.post("/api/video-scraper/scan-page")
 async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
     """
@@ -7550,7 +9008,7 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
     Actively seeks subsequent pages (pagination links, NEXT buttons, rel=next) to gather complete playlists/categories.
     Also persists the scanned collection as a video Album in the library for future access.
     """
-    target_url = req.url.strip()
+    target_url = normalize_incoming_scraper_url(req.url.strip())
     if not target_url or not (target_url.startswith("http://") or target_url.startswith("https://")):
         raise HTTPException(status_code=400, detail="Invalid URL.")
 
@@ -7570,7 +9028,11 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
             browser = await p.chromium.launch(headless=True, channel="chrome")
         try:
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                locale="en-US",
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
             )
             page = await context.new_page()
 
@@ -7593,31 +9055,48 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
                 except Exception as nav_err:
                     logger.warning(f"Navigation to {current_url} encountered: {nav_err}. Continuing with current DOM state if available.")
 
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=4000)
+                except Exception:
+                    pass
+                await asyncio.sleep(0.4)
+
                 # Scroll behavior: thorough on page 1 to trigger lazy loading, fast and responsive on next pages
-                if page_count == 1:
-                    await page.evaluate("""async () => {
-                        const distance = 900;
-                        const delay = 100;
-                        let scrolled = 0;
-                        while (document.scrollingElement.scrollTop + window.innerHeight < document.scrollingElement.scrollHeight) {
-                            document.scrollingElement.scrollBy(0, distance);
-                            scrolled += distance;
-                            await new Promise(r => setTimeout(r, delay));
-                            if (scrolled > 25000) break;
-                        }
-                        window.scrollTo(0, 0);
-                    }""")
-                else:
-                    await page.evaluate("""async () => {
-                        window.scrollBy(0, 1500);
-                        await new Promise(r => setTimeout(r, 60));
-                        window.scrollTo(0, document.body.scrollHeight);
-                        await new Promise(r => setTimeout(r, 60));
-                        window.scrollTo(0, 0);
-                    }""")
+                try:
+                    if page_count == 1:
+                        await page.evaluate("""async () => {
+                            const distance = 900;
+                            const delay = 100;
+                            let scrolled = 0;
+                            while (document.scrollingElement.scrollTop + window.innerHeight < document.scrollingElement.scrollHeight) {
+                                document.scrollingElement.scrollBy(0, distance);
+                                scrolled += distance;
+                                await new Promise(r => setTimeout(r, delay));
+                                if (scrolled > 25000) break;
+                            }
+                            window.scrollTo(0, 0);
+                        }""")
+                    else:
+                        await page.evaluate("""async () => {
+                            window.scrollBy(0, 1500);
+                            await new Promise(r => setTimeout(r, 60));
+                            window.scrollTo(0, document.body.scrollHeight);
+                            await new Promise(r => setTimeout(r, 60));
+                            window.scrollTo(0, 0);
+                        }""")
+                except Exception as scroll_err:
+                    logger.debug(f"Scroll evaluate bypassed: {scroll_err}")
                 await asyncio.sleep(0.3)
 
                 if page_count == 1:
+                    try:
+                        canonical_href = await page.evaluate("() => document.querySelector('link[rel=\"canonical\"]')?.href")
+                        if canonical_href and canonical_href.startswith("http") and "amp." not in canonical_href:
+                            if "amp." in current_url:
+                                current_url = canonical_href
+                                await page.goto(current_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    except Exception:
+                        pass
                     raw_title = await page.title()
                     clean_page_title = re.sub(r"\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$", "", raw_title or "Vídeos da Página", flags=re.I).strip()
                     clean_page_title = sanitize_folder_name(clean_page_title, default="Vídeos da Página")
@@ -7634,6 +9113,14 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
                         const txt = (a ? (a.innerText || '').trim().toLowerCase() : '');
                         if (['english', 'português', 'español', 'deutsch', 'français', 'italiano', 'idioma', 'language'].includes(txt)) return null;
 
+                        // xHamster pattern: /videos/title-slug-xhXXXXX or /movies/ID/slug.html
+                        const mXh = href.match(/xhamster\.[a-z.]+\/videos\/.*?-([a-zA-Z0-9]+)(?:[?#]|$)/i) ||
+                                    href.match(/\/videos\/.*?-([a-zA-Z0-9]+)(?:[?#]|$)/i) ||
+                                    href.match(/xhamster\.[a-z.]+\/movies\/([a-zA-Z0-9]+)/i);
+                        if (mXh && (href.includes('xhamster') || (mXh[1] && mXh[1].toLowerCase().startsWith('xh')))) {
+                            return 'xh_' + (mXh[1] || mXh[2]);
+                        }
+
                         // Provider A pattern: /video-VuuljJoHUPf/
                         const mEp = href.match(/video-([a-zA-Z0-9]{8,15})/);
                         if (mEp) return 'ep_' + mEp[1];
@@ -7641,14 +9128,24 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
                         // Provider B pattern: ?viewkey=ph60a...
                         const mPh = href.match(/viewkey=([a-zA-Z0-9]+)/);
                         if (mPh) return 'ph_' + mPh[1];
+                        if (href.includes('pornhub')) return null;
 
-                        // Provider C pattern: /video123456/ or /video.abcde/
-                        const mXv = href.match(/\/video(\d+)\//) || href.match(/\/video\.([a-zA-Z0-9]+)\//);
-                        if (mXv) return 'xv_' + mXv[1];
+                        // Provider C pattern (XVideos): /video123456/ or /video.abcde/
+                        if (href.includes('xvideos')) {
+                            const mXvProf = href.match(/\/prof-video-click\/[^\/]+\/[^\/]+\/([a-zA-Z0-9]+)/);
+                            if (mXvProf) return 'xv_' + mXvProf[1];
+                            const mXv = href.match(/\/video(\d+)\//) || href.match(/\/video\.([a-zA-Z0-9]+)\//) || href.match(/\/video([a-zA-Z0-9]+)\//);
+                            if (mXv && mXv[1].toLowerCase() !== 's') return 'xv_' + mXv[1];
+                        } else {
+                            const mXvProf = href.match(/\/prof-video-click\/[^\/]+\/[^\/]+\/([a-zA-Z0-9]+)/);
+                            if (mXvProf) return 'xv_' + mXvProf[1];
+                            const mXv = href.match(/\/video(\d+)\//) || href.match(/\/video\.([a-zA-Z0-9]+)\//);
+                            if (mXv && mXv[1].toLowerCase() !== 's') return 'xv_' + mXv[1];
+                        }
 
                         // Generic tube patterns: /video/ID, /videos/ID, /watch/ID, /watch?v=ID
                         const mGen = href.match(/(?:\/videos?\/|\/watch\?v=|\/watch\/|\/v\/)([a-zA-Z0-9_-]{5,32})/);
-                        if (mGen) return 'gen_' + mGen[1];
+                        if (mGen && mGen[1].toLowerCase() !== 's') return 'gen_' + mGen[1];
 
                         return null;
                     }
@@ -7687,38 +9184,202 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
                         return '';
                     }
 
-                    const allLinks = Array.from(document.querySelectorAll('a[href]'));
-                    const videoLinks = allLinks.filter(a => extractVideoId(a.href, a) !== null);
+                    function isJunkTitle(t) {
+                        if (!t) return true;
+                        const clean = t.replace(/\s+/g, ' ').trim();
+                        if (!clean || clean.length < 2) return true;
+                        const junkRegex = /^(?:(?:\d{3,4}p|\d+k|hd|full\s*hd|sd|cc|fps|\d+:\d+|\d+\s*min(?:utes?)?|\d+\s*sec(?:onds?)?|new|vr|free)\s*)+$/i;
+                        if (junkRegex.test(clean)) return true;
+                        if (/^\d+$/.test(clean)) return true;
+                        const low = clean.toLowerCase();
+                        if (['play all', 'play all videos', 'reproduzir tudo', 'reproducir todo', 'tout lire'].includes(low)) return true;
+                        return false;
+                    }
 
-                    videoLinks.forEach((a, idx) => {
+                    function extractTitleFromSlug(href) {
+                        if (!href) return '';
+                        try {
+                            const mXh = href.match(/\/videos\/(.+?)(?:-[a-zA-Z0-9]+)?(?:[?#]|$)/);
+                            if (mXh && mXh[1] && mXh[1].length > 3) {
+                                let slug = mXh[1].replace(/-(?:xh[a-zA-Z0-9]+|\d+)$/i, '');
+                                slug = slug.replace(/^[\-_]+|[\-_]+$/g, '');
+                                let clean = slug.replace(/[\-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+                                if (clean.length > 3 && !isJunkTitle(clean)) {
+                                    return clean.replace(/\b\w/g, c => c.toUpperCase());
+                                }
+                            }
+                            const m = href.match(/\/video[0-9a-zA-Z._-]*\/([a-zA-Z0-9_\-\.%]+)/);
+                            if (m && m[1]) {
+                                let slug = m[1].replace(/^[\-_]+|[\-_]+$/g, '');
+                                slug = slug.replace(/\.[a-zA-Z0-9]{2,4}$/, '');
+                                let clean = slug.replace(/[\-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+                                if (clean.length > 3 && !isJunkTitle(clean)) {
+                                    return clean.replace(/\b\w/g, c => c.toUpperCase());
+                                }
+                            }
+                        } catch (_) {}
+                        return '';
+                    }
+
+                    function cleanTitleText(t, cardEl) {
+                        if (!t) return '';
+                        let cleaned = t;
+                        if (cardEl) {
+                            const nestedDur = cardEl.querySelector('.mbtim, .duration, .time, .badge-duration');
+                            if (nestedDur && nestedDur.innerText) {
+                                const durText = nestedDur.innerText.trim();
+                                if (durText && cleaned.includes(durText)) {
+                                    cleaned = cleaned.replace(durText, ' ');
+                                }
+                            }
+                        }
+                        cleaned = cleaned.replace(/\s+/g, ' ')
+                                         .replace(/\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$/i, '')
+                                         .replace(/^(?:1080p|720p|4k|hd|sd|cc)\s+/i, '')
+                                         .replace(/\s+(?:1080p|720p|4k|hd|sd|cc)$/i, '')
+                                         .trim();
+                        return cleaned;
+                    }
+
+                    const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                    const idMap = new Map();
+
+                    allLinks.forEach(a => {
                         const rawId = extractVideoId(a.href, a);
-                        if (!rawId || localSeenIds.has(rawId)) return;
+                        if (!rawId) return;
+
+                        if (!idMap.has(rawId)) {
+                            idMap.set(rawId, {
+                                rawId: rawId,
+                                anchors: [],
+                                href: a.href,
+                                card: null
+                            });
+                        }
+                        const entry = idMap.get(rawId);
+                        entry.anchors.push(a);
+
+                        if (!entry.card) {
+                            let cardCandidate = a.closest('.video-thumb, .thumb-list__item, .frame-block, .thumb-block, .video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, [id^="video_"], .video-card, li, td') || a.parentElement || a;
+                            if (cardCandidate && cardCandidate.classList && cardCandidate.classList.contains('thumb') && !cardCandidate.classList.contains('thumb-block')) {
+                                const outer = cardCandidate.closest('.frame-block, .thumb-block, .video-box, .item-video, .video-item, article, [id^="video_"]');
+                                if (outer) cardCandidate = outer;
+                            }
+                            entry.card = cardCandidate;
+                        }
+                    });
+
+                    idMap.forEach((entry, rawId) => {
+                        if (localSeenIds.has(rawId)) return;
                         localSeenIds.add(rawId);
 
                         const cleanId = rawId.replace(/^[a-z]{2,3}_/, '');
-                        const card = a.closest('.mb, .video-box, .thumb-block, .item-video, .video-item, article.thumb, .videothumb, .phimage, .thumb, li, td') || a.parentElement || a;
-                        const thumb = extractThumbnail(card) || extractThumbnail(a);
+                        const card = entry.card || (entry.anchors[0] ? entry.anchors[0].parentElement : null) || entry.anchors[0];
+                        const primaryA = entry.anchors[0];
 
-                        let title = a.getAttribute('title') ||
-                                    card.querySelector('.title, .video-title, h3, h4, h2, .name, [class*="title"]')?.innerText?.trim() ||
-                                    a.querySelector('img')?.getAttribute('alt') ||
-                                    a.querySelector('img')?.getAttribute('title') ||
-                                    a.innerText.trim();
-                        title = title.replace(/\s+/g, ' ').replace(/\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$/i, '').trim();
+                        let thumb = '';
+                        if (card) thumb = extractThumbnail(card);
+                        if (!thumb) {
+                            for (const a of entry.anchors) {
+                                thumb = extractThumbnail(a);
+                                if (thumb) break;
+                            }
+                        }
 
-                        const durEl = card.querySelector('.mbtim, .duration, .time, .badge-duration, [class*="duration"], [class*="time"]');
+                        let title = '';
+
+                        for (const a of entry.anchors) {
+                            const aTitle = cleanTitleText(a.getAttribute('title') || '', a);
+                            if (aTitle && !isJunkTitle(aTitle)) {
+                                title = aTitle;
+                                break;
+                            }
+                            const imgAlt = cleanTitleText(a.querySelector('img')?.getAttribute('alt') || '', a);
+                            if (imgAlt && !isJunkTitle(imgAlt)) {
+                                title = imgAlt;
+                                break;
+                            }
+                        }
+
+                        if (!title && card) {
+                            const titleEl = card.querySelector('.video-thumb-info__name, [class*="thumb-info__name"], .title, .video-title, h3, h4, h2, .name');
+                            if (titleEl) {
+                                const candidate = cleanTitleText(titleEl.getAttribute('title') || titleEl.innerText || '', titleEl);
+                                if (!isJunkTitle(candidate)) {
+                                    title = candidate;
+                                }
+                            }
+                        }
+
+                        if (!title) {
+                            for (const a of entry.anchors) {
+                                const aImgTitle = cleanTitleText(a.querySelector('img')?.getAttribute('title') || '', a);
+                                if (aImgTitle && !isJunkTitle(aImgTitle)) {
+                                    title = aImgTitle;
+                                    break;
+                                }
+                                const aText = cleanTitleText(a.innerText || '', a);
+                                if (aText && !isJunkTitle(aText)) {
+                                    title = aText;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!title) {
+                            for (const a of entry.anchors) {
+                                const slugTitle = extractTitleFromSlug(a.href);
+                                if (slugTitle && !isJunkTitle(slugTitle)) {
+                                    title = slugTitle;
+                                    break;
+                                }
+                            }
+                        }
+
+                        const durEl = card ? card.querySelector('.thumb-image-container__duration, [class*="thumb-image-container__duration"], .mbtim, .duration, .time, .badge-duration, [class*="duration"], [class*="time"]') : null;
                         const duration = durEl ? durEl.innerText.trim() : '';
 
-                        const qEl = card.querySelector('.mbhd, .hd, .badge-quality, [class*="hd"], [class*="quality"]');
-                        const quality = qEl ? qEl.innerText.trim() : '1080p HD';
+                        const qEl = card ? card.querySelector('.mbhd, .hd, .badge-quality, [class*="hd"], [class*="quality"]') : null;
+                        let quality = qEl ? qEl.innerText.trim() : '';
+                        if (!quality) {
+                            for (const a of entry.anchors) {
+                                const rawTxt = (a.innerText || '').trim();
+                                const mQ = rawTxt.match(/(\d{3,4}p|4k|hd)/i);
+                                if (mQ) {
+                                    quality = mQ[1].toUpperCase();
+                                    break;
+                                }
+                            }
+                        }
+                        if (!quality) quality = '1080p HD';
 
-                        const isPrimary = !!a.closest('div.mb, div.video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, .main-results, #vidresults, #contentVideos, .video-list') && !a.closest('table, td, aside, .sidebar, #related, .related, .recommended, .top-videos');
+                        const isPrimary = card ? (
+                            (
+                                !!card.closest('div.mb, div.video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, .main-results, #vidresults, #contentVideos, .video-list, .thumb-list, .pornstar-content__main, [class*="videoSection"], [class*="index-videos"], main, #main') ||
+                                !card.closest('table, td, aside, .sidebar, .pornstar-content__sidebar, #related, .related, .recommended, .top-videos')
+                            ) &&
+                            !card.closest('table, td, aside, .sidebar, .pornstar-content__sidebar, #related, .related, .recommended, .top-videos')
+                        ) : true;
                         const section = isPrimary ? 'main' : 'recommended';
 
+                        let finalUrl = primaryA ? primaryA.href : entry.href;
+                        const mXvProfRedirect = finalUrl.match(/\/prof-video-click\/[^\/]+\/[^\/]+\/([a-zA-Z0-9]+)\/([a-zA-Z0-9_\-\.\%]+)/);
+                        if (mXvProfRedirect) {
+                            finalUrl = 'https://www.xvideos.com/video.' + mXvProfRedirect[1] + '/' + mXvProfRedirect[2];
+                        }
+                        if (finalUrl.includes('pornhub.com')) {
+                            const mPhClean = finalUrl.match(/viewkey=([a-zA-Z0-9]+)/);
+                            if (mPhClean) {
+                                finalUrl = 'https://www.pornhub.com/view_video.php?viewkey=' + mPhClean[1];
+                            }
+                        }
+                        if (finalUrl.includes('xhamster')) {
+                            finalUrl = finalUrl.replace(/^https?:\/\/[a-z]{2,3}\.xhamster\./i, 'https://xhamster.');
+                        }
                         items.push({
                             id: cleanId,
-                            url: a.href,
-                            title: title || ('Vídeo ' + (idx + 1)),
+                            url: finalUrl,
+                            title: title || ('Vídeo ' + (items.length + 1)),
                             thumbnail_url: thumb,
                             duration: duration,
                             quality_hint: quality,
@@ -7732,7 +9393,7 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
                     let nextUrl = null;
 
                     // Strategy 1: Explicit <link rel="next"> or <a rel="next">
-                    const relNext = document.querySelector('link[rel="next"], a[rel="next"]');
+                    const relNext = document.querySelector('link[rel="next"], a[rel="next"], a.prev-next-list-link--next, [class*="next-page"]');
                     if (relNext && relNext.href && !relNext.href.startsWith('javascript:') && !relNext.href.startsWith('#')) {
                         nextUrl = relNext.href;
                     }
@@ -7740,8 +9401,16 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
                     // Strategy 2: Pagination container selectors with next classes
                     if (!nextUrl) {
                         const nextSel = document.querySelector('.pagination .next a, .pagination a.next, a.next_page, a.next-page, a.pagination-next, .pagination-next a, .page-next a, li.page_next a, .page_next a, a#next_page, a.nextPage, [aria-label*="Next" i], [title*="Next page" i], [title*="Próxima" i]');
-                        if (nextSel && nextSel.href && !nextSel.href.startsWith('javascript:') && !nextSel.href.startsWith('#')) {
-                            nextUrl = nextSel.href;
+                        if (nextSel) {
+                            if (nextSel.href && !nextSel.href.startsWith('javascript:') && !nextSel.href.startsWith('#')) {
+                                nextUrl = nextSel.href;
+                            } else if (window.location.host.includes('xvideos')) {
+                                const dataPage = nextSel.getAttribute('data-page');
+                                const targetPageNum = dataPage !== null ? (parseInt(dataPage, 10) + 1) : (curPageNum + 1);
+                                const base = window.location.href.split('#')[0];
+                                const hashPrefix = window.location.hash.includes('_tab') ? window.location.hash.split(',')[0] : '#_tabVideos';
+                                nextUrl = base + hashPrefix + ',page-' + targetPageNum;
+                            }
                         }
                     }
 
@@ -7773,9 +9442,14 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
                         const nextPageNumStr = String(curPageNum + 1);
                         for (const a of allLinks) {
                             const txt = (a.innerText || '').trim();
-                            if (txt === nextPageNumStr && a.closest('.pagination, .paging, .pages, .pagination-holder, nav, ul, ol')) {
+                            if (txt === nextPageNumStr && a.closest('.pagination, .paging, .pages, .pagination-holder, [class*="pagination"], nav, ul, ol')) {
                                 if (a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
                                     nextUrl = a.href;
+                                    break;
+                                } else if (window.location.host.includes('xvideos')) {
+                                    const base = window.location.href.split('#')[0];
+                                    const hashPrefix = window.location.hash.includes('_tab') ? window.location.hash.split(',')[0] : '#_tabVideos';
+                                    nextUrl = base + hashPrefix + ',page-' + (curPageNum + 1);
                                     break;
                                 }
                             }
@@ -7822,7 +9496,7 @@ async def scan_page_for_videos_endpoint(req: ScanPageVideosRequest):
             canon_hero = extract_canonical_target_page(target_url)
             self_id = None
             if canon_hero:
-                m_hero = re.search(r"(?:viewkey=|video-)([a-zA-Z0-9_-]+)", target_url)
+                m_hero = re.search(r"(?:viewkey=|video-|/videos/.*?-)([a-zA-Z0-9_-]+)", target_url)
                 self_id = m_hero.group(1) if m_hero else None
             if self_id:
                 # Remove any premature item (e.g. language bar link) with this id
@@ -7923,7 +9597,7 @@ async def scan_page_for_videos_stream_endpoint(req: ScanPageVideosRequest):
     Crawls subsequent playlist/tag/category pages and streams newly discovered video batches
     to the client as each page finishes loading, allowing dynamic live display in the UI.
     """
-    target_url = req.url.strip()
+    target_url = normalize_incoming_scraper_url(req.url.strip())
     if not target_url or not (target_url.startswith("http://") or target_url.startswith("https://")):
         raise HTTPException(status_code=400, detail="Invalid URL.")
 
@@ -7941,7 +9615,11 @@ async def scan_page_for_videos_stream_endpoint(req: ScanPageVideosRequest):
                 browser = await p.chromium.launch(headless=True, channel="chrome")
             try:
                 context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    locale="en-US",
+                    extra_http_headers={
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
                 )
                 page = await context.new_page()
 
@@ -7970,30 +9648,47 @@ async def scan_page_for_videos_stream_endpoint(req: ScanPageVideosRequest):
                     except Exception as nav_err:
                         logger.warning(f"Navigation to {current_url} encountered: {nav_err}. Continuing with current DOM state if available.")
 
-                    if page_count == 1:
-                        await page.evaluate("""async () => {
-                            const distance = 900;
-                            const delay = 100;
-                            let scrolled = 0;
-                            while (document.scrollingElement.scrollTop + window.innerHeight < document.scrollingElement.scrollHeight) {
-                                document.scrollingElement.scrollBy(0, distance);
-                                scrolled += distance;
-                                await new Promise(r => setTimeout(r, delay));
-                                if (scrolled > 25000) break;
-                            }
-                            window.scrollTo(0, 0);
-                        }""")
-                    else:
-                        await page.evaluate("""async () => {
-                            window.scrollBy(0, 1500);
-                            await new Promise(r => setTimeout(r, 60));
-                            window.scrollTo(0, document.body.scrollHeight);
-                            await new Promise(r => setTimeout(r, 60));
-                            window.scrollTo(0, 0);
-                        }""")
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=4000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.4)
+
+                    try:
+                        if page_count == 1:
+                            await page.evaluate("""async () => {
+                                const distance = 900;
+                                const delay = 100;
+                                let scrolled = 0;
+                                while (document.scrollingElement.scrollTop + window.innerHeight < document.scrollingElement.scrollHeight) {
+                                    document.scrollingElement.scrollBy(0, distance);
+                                    scrolled += distance;
+                                    await new Promise(r => setTimeout(r, delay));
+                                    if (scrolled > 25000) break;
+                                }
+                                window.scrollTo(0, 0);
+                            }""")
+                        else:
+                            await page.evaluate("""async () => {
+                                window.scrollBy(0, 1500);
+                                await new Promise(r => setTimeout(r, 60));
+                                window.scrollTo(0, document.body.scrollHeight);
+                                await new Promise(r => setTimeout(r, 60));
+                                window.scrollTo(0, 0);
+                            }""")
+                    except Exception as scroll_err:
+                        logger.debug(f"Scroll evaluate bypassed: {scroll_err}")
                     await asyncio.sleep(0.3)
 
                     if page_count == 1:
+                        try:
+                            canonical_href = await page.evaluate("() => document.querySelector('link[rel=\"canonical\"]')?.href")
+                            if canonical_href and canonical_href.startswith("http") and "amp." not in canonical_href:
+                                if "amp." in current_url:
+                                    current_url = canonical_href
+                                    await page.goto(current_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                        except Exception:
+                            pass
                         raw_title = await page.title()
                         clean_page_title = re.sub(r"\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$", "", raw_title or "Vídeos da Página", flags=re.I).strip()
                         clean_page_title = sanitize_folder_name(clean_page_title, default="Vídeos da Página")
@@ -8003,7 +9698,7 @@ async def scan_page_for_videos_stream_endpoint(req: ScanPageVideosRequest):
                         canon_hero = extract_canonical_target_page(target_url)
                         self_id = None
                         if canon_hero:
-                            m_hero = re.search(r"(?:viewkey=|video-)([a-zA-Z0-9_-]+)", target_url)
+                            m_hero = re.search(r"(?:viewkey=|video-|/videos/.*?-)([a-zA-Z0-9_-]+)", target_url)
                             self_id = m_hero.group(1) if m_hero else None
                         if self_id:
                             try:
@@ -8049,14 +9744,32 @@ async def scan_page_for_videos_stream_endpoint(req: ScanPageVideosRequest):
                             const txt = (a ? (a.innerText || '').trim().toLowerCase() : '');
                             if (['english', 'português', 'español', 'deutsch', 'français', 'italiano', 'idioma', 'language'].includes(txt)) return null;
 
+                            // xHamster pattern: /videos/title-slug-xhXXXXX or /movies/ID/slug.html
+                            const mXh = href.match(/xhamster\.[a-z.]+\/videos\/.*?-([a-zA-Z0-9]+)(?:[?#]|$)/i) ||
+                                        href.match(/\/videos\/.*?-([a-zA-Z0-9]+)(?:[?#]|$)/i) ||
+                                        href.match(/xhamster\.[a-z.]+\/movies\/([a-zA-Z0-9]+)/i);
+                            if (mXh && (href.includes('xhamster') || (mXh[1] && mXh[1].toLowerCase().startsWith('xh')))) {
+                                return 'xh_' + (mXh[1] || mXh[2]);
+                            }
+
                             const mEp = href.match(/video-([a-zA-Z0-9]{8,15})/);
                             if (mEp) return 'ep_' + mEp[1];
                             const mPh = href.match(/viewkey=([a-zA-Z0-9]+)/);
                             if (mPh) return 'ph_' + mPh[1];
-                            const mXv = href.match(/\/video(\d+)\//) || href.match(/\/video\.([a-zA-Z0-9]+)\//);
-                            if (mXv) return 'xv_' + mXv[1];
+                            if (href.includes('pornhub')) return null;
+                            if (href.includes('xvideos')) {
+                                const mXvProf = href.match(/\/prof-video-click\/[^\/]+\/[^\/]+\/([a-zA-Z0-9]+)/);
+                                if (mXvProf) return 'xv_' + mXvProf[1];
+                                const mXv = href.match(/\/video(\d+)\//) || href.match(/\/video\.([a-zA-Z0-9]+)\//) || href.match(/\/video([a-zA-Z0-9]+)\//);
+                                if (mXv && mXv[1].toLowerCase() !== 's') return 'xv_' + mXv[1];
+                            } else {
+                                const mXvProf = href.match(/\/prof-video-click\/[^\/]+\/[^\/]+\/([a-zA-Z0-9]+)/);
+                                if (mXvProf) return 'xv_' + mXvProf[1];
+                                const mXv = href.match(/\/video(\d+)\//) || href.match(/\/video\.([a-zA-Z0-9]+)\//);
+                                if (mXv && mXv[1].toLowerCase() !== 's') return 'xv_' + mXv[1];
+                            }
                             const mGen = href.match(/(?:\/videos?\/|\/watch\?v=|\/watch\/|\/v\/)([a-zA-Z0-9_-]{5,32})/);
-                            if (mGen) return 'gen_' + mGen[1];
+                            if (mGen && mGen[1].toLowerCase() !== 's') return 'gen_' + mGen[1];
                             return null;
                         }
 
@@ -8093,38 +9806,202 @@ async def scan_page_for_videos_stream_endpoint(req: ScanPageVideosRequest):
                             return '';
                         }
 
-                        const allLinks = Array.from(document.querySelectorAll('a[href]'));
-                        const videoLinks = allLinks.filter(a => extractVideoId(a.href, a) !== null);
+                        function isJunkTitle(t) {
+                            if (!t) return true;
+                            const clean = t.replace(/\s+/g, ' ').trim();
+                            if (!clean || clean.length < 2) return true;
+                            const junkRegex = /^(?:(?:\d{3,4}p|\d+k|hd|full\s*hd|sd|cc|fps|\d+:\d+|\d+\s*min(?:utes?)?|\d+\s*sec(?:onds?)?|new|vr|free)\s*)+$/i;
+                            if (junkRegex.test(clean)) return true;
+                            if (/^\d+$/.test(clean)) return true;
+                            const low = clean.toLowerCase();
+                            if (['play all', 'play all videos', 'reproduzir tudo', 'reproducir todo', 'tout lire'].includes(low)) return true;
+                            return false;
+                        }
 
-                        videoLinks.forEach((a, idx) => {
+                        function extractTitleFromSlug(href) {
+                            if (!href) return '';
+                            try {
+                                const mXh = href.match(/\/videos\/(.+?)(?:-[a-zA-Z0-9]+)?(?:[?#]|$)/);
+                                if (mXh && mXh[1] && mXh[1].length > 3) {
+                                    let slug = mXh[1].replace(/-(?:xh[a-zA-Z0-9]+|\d+)$/i, '');
+                                    slug = slug.replace(/^[\-_]+|[\-_]+$/g, '');
+                                    let clean = slug.replace(/[\-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+                                    if (clean.length > 3 && !isJunkTitle(clean)) {
+                                        return clean.replace(/\b\w/g, c => c.toUpperCase());
+                                    }
+                                }
+                                const m = href.match(/\/video[0-9a-zA-Z._-]*\/([a-zA-Z0-9_\-\.%]+)/);
+                                if (m && m[1]) {
+                                    let slug = m[1].replace(/^[\-_]+|[\-_]+$/g, '');
+                                    slug = slug.replace(/\.[a-zA-Z0-9]{2,4}$/, '');
+                                    let clean = slug.replace(/[\-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+                                    if (clean.length > 3 && !isJunkTitle(clean)) {
+                                        return clean.replace(/\b\w/g, c => c.toUpperCase());
+                                    }
+                                }
+                            } catch (_) {}
+                            return '';
+                        }
+
+                        function cleanTitleText(t, cardEl) {
+                            if (!t) return '';
+                            let cleaned = t;
+                            if (cardEl) {
+                                const nestedDur = cardEl.querySelector('.mbtim, .duration, .time, .badge-duration');
+                                if (nestedDur && nestedDur.innerText) {
+                                    const durText = nestedDur.innerText.trim();
+                                    if (durText && cleaned.includes(durText)) {
+                                        cleaned = cleaned.replace(durText, ' ');
+                                    }
+                                }
+                            }
+                            cleaned = cleaned.replace(/\s+/g, ' ')
+                                             .replace(/\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$/i, '')
+                                             .replace(/^(?:1080p|720p|4k|hd|sd|cc)\s+/i, '')
+                                             .replace(/\s+(?:1080p|720p|4k|hd|sd|cc)$/i, '')
+                                             .trim();
+                            return cleaned;
+                        }
+
+                        const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                        const idMap = new Map();
+
+                        allLinks.forEach(a => {
                             const rawId = extractVideoId(a.href, a);
-                            if (!rawId || localSeenIds.has(rawId)) return;
+                            if (!rawId) return;
+
+                            if (!idMap.has(rawId)) {
+                                idMap.set(rawId, {
+                                    rawId: rawId,
+                                    anchors: [],
+                                    href: a.href,
+                                    card: null
+                                });
+                            }
+                            const entry = idMap.get(rawId);
+                            entry.anchors.push(a);
+
+                            if (!entry.card) {
+                                let cardCandidate = a.closest('.video-thumb, .thumb-list__item, .frame-block, .thumb-block, .video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, [id^="video_"], .video-card, li, td') || a.parentElement || a;
+                                if (cardCandidate && cardCandidate.classList && cardCandidate.classList.contains('thumb') && !cardCandidate.classList.contains('thumb-block')) {
+                                    const outer = cardCandidate.closest('.frame-block, .thumb-block, .video-box, .item-video, .video-item, article, [id^="video_"]');
+                                    if (outer) cardCandidate = outer;
+                                }
+                                entry.card = cardCandidate;
+                            }
+                        });
+
+                        idMap.forEach((entry, rawId) => {
+                            if (localSeenIds.has(rawId)) return;
                             localSeenIds.add(rawId);
 
                             const cleanId = rawId.replace(/^[a-z]{2,3}_/, '');
-                            const card = a.closest('.mb, .video-box, .thumb-block, .item-video, .video-item, article.thumb, .videothumb, .phimage, .thumb, li, td') || a.parentElement || a;
-                            const thumb = extractThumbnail(card) || extractThumbnail(a);
+                            const card = entry.card || (entry.anchors[0] ? entry.anchors[0].parentElement : null) || entry.anchors[0];
+                            const primaryA = entry.anchors[0];
 
-                            let title = a.getAttribute('title') ||
-                                        card.querySelector('.title, .video-title, h3, h4, h2, .name, [class*="title"]')?.innerText?.trim() ||
-                                        a.querySelector('img')?.getAttribute('alt') ||
-                                        a.querySelector('img')?.getAttribute('title') ||
-                                        a.innerText.trim();
-                            title = title.replace(/\s+/g, ' ').replace(/\s*[-|]\s*[a-zA-Z0-9_-]+(?:\.[a-zA-Z]{2,})?\s*$/i, '').trim();
+                            let thumb = '';
+                            if (card) thumb = extractThumbnail(card);
+                            if (!thumb) {
+                                for (const a of entry.anchors) {
+                                    thumb = extractThumbnail(a);
+                                    if (thumb) break;
+                                }
+                            }
 
-                            const durEl = card.querySelector('.mbtim, .duration, .time, .badge-duration, [class*="duration"], [class*="time"]');
+                            let title = '';
+
+                            for (const a of entry.anchors) {
+                                const aTitle = cleanTitleText(a.getAttribute('title') || '', a);
+                                if (aTitle && !isJunkTitle(aTitle)) {
+                                    title = aTitle;
+                                    break;
+                                }
+                                const imgAlt = cleanTitleText(a.querySelector('img')?.getAttribute('alt') || '', a);
+                                if (imgAlt && !isJunkTitle(imgAlt)) {
+                                    title = imgAlt;
+                                    break;
+                                }
+                            }
+
+                            if (!title && card) {
+                                const titleEl = card.querySelector('.video-thumb-info__name, [class*="thumb-info__name"], .title, .video-title, h3, h4, h2, .name');
+                                if (titleEl) {
+                                    const candidate = cleanTitleText(titleEl.getAttribute('title') || titleEl.innerText || '', titleEl);
+                                    if (!isJunkTitle(candidate)) {
+                                        title = candidate;
+                                    }
+                                }
+                            }
+
+                            if (!title) {
+                                for (const a of entry.anchors) {
+                                    const aImgTitle = cleanTitleText(a.querySelector('img')?.getAttribute('title') || '', a);
+                                    if (aImgTitle && !isJunkTitle(aImgTitle)) {
+                                        title = aImgTitle;
+                                        break;
+                                    }
+                                    const aText = cleanTitleText(a.innerText || '', a);
+                                    if (aText && !isJunkTitle(aText)) {
+                                        title = aText;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (!title) {
+                                for (const a of entry.anchors) {
+                                    const slugTitle = extractTitleFromSlug(a.href);
+                                    if (slugTitle && !isJunkTitle(slugTitle)) {
+                                        title = slugTitle;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            const durEl = card ? card.querySelector('.thumb-image-container__duration, [class*="thumb-image-container__duration"], .mbtim, .duration, .time, .badge-duration, [class*="duration"], [class*="time"]') : null;
                             const duration = durEl ? durEl.innerText.trim() : '';
 
-                            const qEl = card.querySelector('.mbhd, .hd, .badge-quality, [class*="hd"], [class*="quality"]');
-                            const quality = qEl ? qEl.innerText.trim() : '1080p HD';
+                            const qEl = card ? card.querySelector('.mbhd, .hd, .badge-quality, [class*="hd"], [class*="quality"]') : null;
+                            let quality = qEl ? qEl.innerText.trim() : '';
+                            if (!quality) {
+                                for (const a of entry.anchors) {
+                                    const rawTxt = (a.innerText || '').trim();
+                                    const mQ = rawTxt.match(/(\d{3,4}p|4k|hd)/i);
+                                    if (mQ) {
+                                        quality = mQ[1].toUpperCase();
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!quality) quality = '1080p HD';
 
-                            const isPrimary = !!a.closest('div.mb, div.video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, .main-results, #vidresults, #contentVideos, .video-list') && !a.closest('table, td, aside, .sidebar, #related, .related, .recommended, .top-videos');
+                            const isPrimary = card ? (
+                                (
+                                    !!card.closest('div.mb, div.video-box, .item-video, .video-item, article.thumb, .videothumb, .phimage, .main-results, #vidresults, #contentVideos, .video-list, .thumb-list, .pornstar-content__main, [class*="videoSection"], [class*="index-videos"], main, #main') ||
+                                    !card.closest('table, td, aside, .sidebar, .pornstar-content__sidebar, #related, .related, .recommended, .top-videos')
+                                ) &&
+                                !card.closest('table, td, aside, .sidebar, .pornstar-content__sidebar, #related, .related, .recommended, .top-videos')
+                            ) : true;
                             const section = isPrimary ? 'main' : 'recommended';
 
+                            let finalUrl = primaryA ? primaryA.href : entry.href;
+                            const mXvProfRedirect = finalUrl.match(/\/prof-video-click\/[^\/]+\/[^\/]+\/([a-zA-Z0-9]+)\/([a-zA-Z0-9_\-\.\%]+)/);
+                            if (mXvProfRedirect) {
+                                finalUrl = 'https://www.xvideos.com/video.' + mXvProfRedirect[1] + '/' + mXvProfRedirect[2];
+                            }
+                            if (finalUrl.includes('pornhub.com')) {
+                                const mPhClean = finalUrl.match(/viewkey=([a-zA-Z0-9]+)/);
+                                if (mPhClean) {
+                                    finalUrl = 'https://www.pornhub.com/view_video.php?viewkey=' + mPhClean[1];
+                                }
+                            }
+                            if (finalUrl.includes('xhamster')) {
+                                finalUrl = finalUrl.replace(/^https?:\/\/[a-z]{2,3}\.xhamster\./i, 'https://xhamster.');
+                            }
                             items.push({
                                 id: cleanId,
-                                url: a.href,
-                                title: title || ('Vídeo ' + (idx + 1)),
+                                url: finalUrl,
+                                title: title || ('Vídeo ' + (items.length + 1)),
                                 thumbnail_url: thumb,
                                 duration: duration,
                                 quality_hint: quality,
@@ -8136,7 +10013,7 @@ async def scan_page_for_videos_stream_endpoint(req: ScanPageVideosRequest):
 
                         // Multi-strategy Next Page Detection
                         let nextUrl = null;
-                        const relNext = document.querySelector('link[rel="next"], a[rel="next"]');
+                        const relNext = document.querySelector('link[rel="next"], a[rel="next"], a.prev-next-list-link--next, [class*="next-page"]');
                         if (relNext && relNext.href && !relNext.href.startsWith('javascript:') && !relNext.href.startsWith('#')) {
                             nextUrl = relNext.href;
                         }
@@ -8174,7 +10051,7 @@ async def scan_page_for_videos_stream_endpoint(req: ScanPageVideosRequest):
                             const nextPageNumStr = String(curPageNum + 1);
                             for (const a of allLinks) {
                                 const txt = (a.innerText || '').trim();
-                                if (txt === nextPageNumStr && a.closest('.pagination, .paging, .pages, .pagination-holder, nav, ul, ol')) {
+                                if (txt === nextPageNumStr && a.closest('.pagination, .paging, .pages, .pagination-holder, [class*="pagination"], nav, ul, ol')) {
                                     if (a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {
                                         nextUrl = a.href;
                                         break;
@@ -8308,6 +10185,7 @@ async def batch_save_videos_endpoint(req: BatchSaveVideosRequest):
 
     is_stream_only = True if req.stream_only is None else bool(req.stream_only)
     semaphore = _video_stream_register_semaphore if is_stream_only else _video_download_semaphore
+    registration_lookup = StreamRegistrationLookup(video_service) if is_stream_only else None
 
     queued_jobs = []
 
@@ -8322,7 +10200,8 @@ async def batch_save_videos_endpoint(req: BatchSaveVideosRequest):
                     source_url=v_item.url,
                     source_id=v_item.id,
                     thumbnail_url=v_item.thumbnail_url,
-                    duration_hint=v_item.duration
+                    duration_hint=v_item.duration,
+                    registration_lookup=registration_lookup
                 )
                 return
 
@@ -8360,7 +10239,9 @@ async def batch_save_videos_endpoint(req: BatchSaveVideosRequest):
             )
 
     try:
-        all_existing = video_service.list_all_videos() if req.skip_existing else []
+        all_existing = []
+        if req.skip_existing:
+            all_existing = registration_lookup.list_videos() if registration_lookup is not None else video_service.list_all_videos()
     except Exception:
         all_existing = []
 
@@ -8647,10 +10528,43 @@ async def add_video_by_url(req: AddVideoUrlRequest):
     if not filename.endswith(".mp4"):
         filename += ".mp4"
 
-    headers = _get_video_download_headers(target_stream_url, req.url)
+    clean_v_url, mux_audio_url = split_mux_audio_url(target_stream_url)
+    if mux_audio_url:
+        muxed_file = await _ensure_muxed_video_file(clean_v_url, mux_audio_url, referer=req.url)
+        if muxed_file and os.path.exists(muxed_file):
+            with open(muxed_file, "rb") as f_mux:
+                video = video_service.save_uploaded_file(filename, f_mux.read(), folder=req.folder or "Geral", source_origin="web", source_url=req.url)
+            if video:
+                return video
+
+    if ".m3u8" in target_stream_url.lower() or is_tls_impersonation_required(target_stream_url, req.url):
+        from .resilient_downloader import download_video_resilient
+        target_folder_name = sanitize_folder_name(req.folder, default="Geral")
+        target_folder = os.path.join(video_service.base_dir, target_folder_name)
+        os.makedirs(target_folder, exist_ok=True)
+        target_path = os.path.join(target_folder, filename)
+        if os.path.exists(target_path):
+            target_path = os.path.join(target_folder, f"{os.path.splitext(filename)[0]}_{int(time.time())}.mp4")
+        dl_res = await download_video_resilient(
+            url=req.url or clean_v_url,
+            target_path=target_path,
+            clean_title=clean_title,
+            referer=req.url or clean_v_url,
+        )
+        if dl_res.get("success") and os.path.exists(target_path):
+            vid_id = video_service.register_local_video_file(
+                file_path=target_path,
+                title=clean_title,
+                folder=target_folder_name,
+                source_url=req.url,
+            )
+            if vid_id:
+                return video_service.get_video_by_id(vid_id)
+
+    headers = _get_video_download_headers(clean_v_url, req.url)
     try:
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-            resp = await client.get(target_stream_url, headers=headers)
+            resp = await client.get(clean_v_url, headers=headers)
             if resp.status_code != 200 or len(resp.content) < 1000:
                 raise HTTPException(status_code=400, detail="Invalid URL or response does not contain a valid video")
             video = video_service.save_uploaded_file(filename, resp.content, folder=req.folder or "Geral", source_origin="web", source_url=req.url)
@@ -9460,11 +11374,17 @@ async def download_video(video_id: str):
         cloud_url = video.get("cloud_url")
         if not cloud_url or not cloud_url.startswith("http"):
             raw_stream = video.get("stream_url") or video.get("source_url") or ""
+            target_referer = video.get("source_url") or raw_stream
+            mux_audio_param = None
             if "/api/proxy-video-stream" in raw_stream and "url=" in raw_stream:
                 try:
                     parsed_q = urllib.parse.parse_qs(urllib.parse.urlparse(raw_stream).query)
                     if "url" in parsed_q and parsed_q["url"]:
                         raw_stream = parsed_q["url"][0]
+                    if "_mux_audio" in parsed_q and parsed_q["_mux_audio"]:
+                        mux_audio_param = parsed_q["_mux_audio"][0]
+                    if "referer" in parsed_q and parsed_q["referer"]:
+                        target_referer = parsed_q["referer"][0]
                 except Exception:
                     pass
             if not raw_stream or not any(ext in raw_stream.lower() for ext in (".mp4", ".webm", ".mov", ".m4v")):
@@ -9477,7 +11397,6 @@ async def download_video(video_id: str):
             if not raw_stream or not raw_stream.startswith("http"):
                 raise HTTPException(status_code=404, detail="Video not found locally or in cloud")
 
-            dl_headers = _get_video_download_headers(raw_stream, video.get("source_url") or raw_stream)
             filename = video.get("filename", "video.mp4")
             if not any(filename.lower().endswith(ext) for ext in (".mp4", ".webm", ".mov", ".mkv")):
                 filename = f"{filename}.mp4"
@@ -9485,8 +11404,37 @@ async def download_video(video_id: str):
             if not mime_type:
                 mime_type = "video/mp4"
 
+            clean_v_url, mux_audio_url = split_mux_audio_url(raw_stream)
+            if not mux_audio_url and mux_audio_param:
+                mux_audio_url = mux_audio_param
+
+            if mux_audio_url:
+                try:
+                    muxed_file = await _ensure_muxed_video_file(clean_v_url, mux_audio_url, referer=target_referer)
+                    if muxed_file and os.path.exists(muxed_file) and os.path.getsize(muxed_file) > 1000:
+                        return FileResponse(muxed_file, media_type="video/mp4", filename=filename)
+                except Exception as e_mux:
+                    logger.warning(f"Error muxing audio for download {video_id}: {e_mux}")
+
+            if ".m3u8" in clean_v_url.lower() or is_tls_impersonation_required(clean_v_url, target_referer):
+                from .resilient_downloader import download_video_resilient
+                cache_dir = os.path.join(DATA_DIR, "cache", "muxed_videos")
+                os.makedirs(cache_dir, exist_ok=True)
+                url_hash = hashlib.md5(f"{clean_v_url}_{filename}".encode("utf-8")).hexdigest()
+                cached_dl_path = os.path.join(cache_dir, f"dl_{url_hash}_{filename}")
+                if not os.path.exists(cached_dl_path) or os.path.getsize(cached_dl_path) == 0:
+                    await download_video_resilient(
+                        url=target_referer or clean_v_url,
+                        target_path=cached_dl_path,
+                        clean_title=filename,
+                        referer=target_referer or clean_v_url,
+                    )
+                if os.path.exists(cached_dl_path) and os.path.getsize(cached_dl_path) > 1000:
+                    return FileResponse(cached_dl_path, media_type="video/mp4", filename=filename)
+
+            dl_headers = _get_video_download_headers(raw_stream, target_referer)
             client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None), follow_redirects=True)
-            web_req = client.build_request("GET", raw_stream, headers=dl_headers)
+            web_req = client.build_request("GET", clean_v_url, headers=dl_headers)
             web_resp = await client.send(web_req, stream=True)
 
             async def _proxy_web_download():
@@ -9599,13 +11547,30 @@ async def move_video(video_id: str, req: MoveVideoRequest):
 
 
 @app.post("/api/videos/{video_id}/favorite")
-async def toggle_video_favorite(video_id: str):
-    """Toggles favorite state for a video."""
+async def toggle_video_favorite(video_id: str, request: Request):
+    """Toggles favorite state for a video. Supports both local videos and online/profile videos."""
     video = video_service.get_video_by_id(video_id)
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
-    new_fav = video_service.toggle_favorite(video_id)
-    return {"success": True, "video_id": video_id, "is_favorite": new_fav}
+    if video:
+        new_fav = video_service.toggle_favorite(video_id)
+        return {"success": True, "video_id": video_id, "is_favorite": new_fav}
+
+    # Fallback for online stream / profile videos
+    from .profile_video_favorites_service import toggle_favorite_video
+    payload: Dict[str, Any] = {}
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            payload = body
+    except Exception:
+        pass
+    if "id" not in payload:
+        payload["id"] = video_id
+
+    try:
+        res = toggle_favorite_video(payload)
+        return {"success": True, "video_id": video_id, "is_favorite": res["favorited"], "video": res.get("video")}
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Video not found: {exc}")
 
 
 @app.post("/api/videos/{video_id}/upload-hf")
@@ -9694,6 +11659,28 @@ async def _resolve_album_video_smart_highlight(video_id: str, force: bool = Fals
     alb.metadata["smart_highlight"] = highlight_data
     _save_album_to_disk(s_id, alb)
     return highlight_data
+
+
+from .player_highlights import PlayerHighlightService, player_highlight_router
+from .player_highlight_remote import RemoteAnalysisMedia
+from .smart_shorts_detector import analyze_video_smart_highlights as _analyze_player_highlights
+
+# Technical network/disk budgets for one silent on-demand analysis; not a
+# catalog/media limit. Deployment can lower these independently of playback.
+_PLAYER_ANALYSIS_REMOTE_MAX_BYTES = int(os.environ.get('IMAGEX_PLAYER_ANALYSIS_REMOTE_MAX_BYTES', 64 * 1024 * 1024))
+_PLAYER_ANALYSIS_REMOTE_TIMEOUT_SECONDS = float(os.environ.get('IMAGEX_PLAYER_ANALYSIS_REMOTE_TIMEOUT_SECONDS', 45))
+
+_player_highlights = PlayerHighlightService(
+    os.path.join(DATA_DIR, "cache", "player-highlights.sqlite3"),
+    video_service.get_video_by_id,
+    _analyze_player_highlights,
+    remote_media=RemoteAnalysisMedia(
+        _re_resolve_video_stream, _get_video_download_headers,
+        max_bytes=_PLAYER_ANALYSIS_REMOTE_MAX_BYTES,
+        timeout_seconds=_PLAYER_ANALYSIS_REMOTE_TIMEOUT_SECONDS,
+    ),
+)
+app.include_router(player_highlight_router(_player_highlights))
 
 
 @app.get("/api/videos/{video_id}/smart-highlight")
@@ -9889,6 +11876,14 @@ async def empty_trash_endpoint():
 # Rota Modular Isolada: Multi-Album Discovery
 from .multi_album_service import router as multi_album_router
 app.include_router(multi_album_router)
+from .profile_hub_service import router as profile_hub_router
+app.include_router(profile_hub_router)
+from .profile_hub_comments import router as profile_hub_comments_router
+app.include_router(profile_hub_comments_router)
+from .profile_directory_service import router as profile_directory_router
+app.include_router(profile_directory_router)
+from .profile_hub_library import router as profile_hub_library_router
+app.include_router(profile_hub_library_router)
 
 
 # ---------------------------------------------------------------------------
@@ -9905,10 +11900,28 @@ class MultiAlbumBatchSaveRequest(BaseModel):
     albums: List[MultiAlbumItemInput]
     model_name: Optional[str] = "gemini-3.7-flash"
     folder: Optional[str] = "Geral"
+    strict_profile_selection: bool = False
 
 class MultiAlbumBatchDownloadRequest(BaseModel):
     albums: List[MultiAlbumItemInput]
     format: Optional[str] = "unified"  # "unified" or "individual"
+
+class ProfileHubZipVideo(BatchSaveVideoItemInput):
+    collections: Optional[List[Dict[str, str]]] = None
+
+class ProfileHubZipRequest(BaseModel):
+    albums: Optional[List[MultiAlbumItemInput]] = None
+    videos: Optional[List[ProfileHubZipVideo]] = None
+
+class ProfileFavoriteRequest(BaseModel):
+    url: str
+    name: Optional[str] = None
+    handle: Optional[str] = None
+    avatar_url: Optional[str] = None
+    avatarUrl: Optional[str] = None
+    cover_url: Optional[str] = None
+    coverUrl: Optional[str] = None
+    stats: Optional[Dict[str, Any]] = None
 
 _multi_album_preview_cache: Dict[str, Album] = {}
 
@@ -10087,6 +12100,8 @@ async def multi_album_preview_album(req: MultiAlbumItemInput):
             "format": getattr(img, "format", "jpeg") or "jpeg",
             "media_type": getattr(img, "media_type", "image") or "image",
             "is_animated": bool(getattr(img, "is_animated", False)),
+            "animation_checked": bool(getattr(img, "animation_checked", False)),
+            "video_stream_url": getattr(img, "video_stream_url", None),
             "title": getattr(img, "title", None) or f"{alb.title or req.title} - #{idx + 1}",
         })
 
@@ -10098,11 +12113,138 @@ async def multi_album_preview_album(req: MultiAlbumItemInput):
         "images": images_out,
     }
 
+
+@app.post("/api/profile-hub/export-zip")
+async def profile_hub_export_zip(req: ProfileHubZipRequest, background_tasks: BackgroundTasks):
+    """Export explicit profile subsets or full albums without broadening scope or stripping animation."""
+    from urllib.parse import urlsplit
+    from .profile_hub_export import create_profile_zip
+    from .profile_hub_selection import filter_profile_album_subset
+    if not req.albums and not req.videos:
+        raise HTTPException(status_code=400, detail="No media selected")
+    selected_albums = []
+    try:
+        for item in req.albums or []:
+            unfiltered = item.model_copy(update={"selected_image_urls": None})
+            album = await _resolve_or_extract_album_for_multi(unfiltered, persist_to_library=False, require_full_album=True)
+            if item.selected_image_urls:
+                selected_albums.append(filter_profile_album_subset(album, item.selected_image_urls))
+            else:
+                selected_albums.append(album)
+        selected_videos = []
+        for video in req.videos or []:
+            raw_stream = (video.stream_url or "").strip()
+            # If the stream_url is relative, a proxy URL, or a watch page, resolve the real direct stream
+            if not raw_stream or raw_stream.startswith("/") or "/api/proxy-video-stream" in raw_stream or urlsplit(raw_stream).scheme not in ("http", "https") or "/video-" in raw_stream:
+                stream_url = await _resolve_best_video_stream(video.id, video.url)
+            else:
+                stream_url = raw_stream
+            if not stream_url:
+                raise ValueError("A selected video stream could not be resolved")
+            selected_videos.append({"stream_url": stream_url, "source_url": video.url, "title": video.title, "collections": video.collections or []})
+        zip_path = await create_profile_zip(selected_albums, selected_videos)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Could not download every selected item") from exc
+    background_tasks.add_task(os.remove, zip_path)
+    return FileResponse(path=zip_path, media_type="application/zip", filename="profile-media.zip")
+
+@app.get("/api/profile-hub/favorites")
+async def get_profile_hub_favorites():
+    """Retrieve saved favorite profiles / creators."""
+    from .profile_favorites_service import load_favorite_profiles
+    from .profile_local_service import favorite_examples
+    return {"favorites": [*load_favorite_profiles(strict=True), *favorite_examples()]}
+
+@app.post("/api/profile-hub/favorites")
+async def toggle_profile_hub_favorite(req: ProfileFavoriteRequest):
+    """Toggle favorite status for a creator profile (save or remove)."""
+    from .profile_favorites_service import toggle_favorite_profile
+    try:
+        res = toggle_favorite_profile(req.model_dump())
+        return res
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+@app.put("/api/profile-hub/favorites")
+async def set_profile_hub_favorite(payload: dict):
+    """Set desired favorite state without toggling an existing record."""
+    from .profile_favorites_service import set_favorite_profile
+    if not isinstance(payload.get("favorited"), bool):
+        raise HTTPException(status_code=400, detail="Favorite state is required")
+    try:
+        if isinstance(payload.get("url"), str) and payload["url"].startswith("demo:"):
+            from .profile_local_service import set_example_favorite
+            return set_example_favorite(payload["url"], payload["favorited"])
+        return set_favorite_profile(payload, payload["favorited"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+@app.get("/api/profile-hub/local-profiles")
+async def get_profile_hub_local_profiles():
+    from .profile_local_service import load_profiles
+    return {"profiles": load_profiles()}
+
+@app.put("/api/profile-hub/local-profiles")
+async def create_profile_hub_local_example(payload: dict):
+    from .profile_local_service import create_example
+    try:
+        return create_example(payload.get("id"), payload.get("snapshot"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+@app.get("/api/profile-hub/saved-directories")
+async def get_profile_hub_saved_directories():
+    from .profile_saved_directories_service import get_saved_directories_state
+    return get_saved_directories_state()
+
+@app.put("/api/profile-hub/saved-directories")
+async def set_profile_hub_saved_directory(payload: dict):
+    from .profile_saved_directories_service import set_saved_directory
+    if not isinstance(payload.get("removed"), bool):
+        raise HTTPException(status_code=400, detail="Removal state is required")
+    try:
+        return set_saved_directory(payload.get("item"), payload["removed"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+@app.delete("/api/profile-hub/favorites")
+async def delete_profile_hub_favorite(url: str):
+    """Remove a favorite creator profile by URL."""
+    from .profile_favorites_service import remove_favorite_profile
+    removed = remove_favorite_profile(url)
+    return {"success": removed, "url": url}
+
+@app.get("/api/profile-hub/video-favorites")
+async def get_profile_hub_video_favorites(performer: Optional[str] = None):
+    """Retrieve saved favorite profile videos, optionally filtered by performer."""
+    from .profile_video_favorites_service import get_favorites_for_performer, get_favorite_video_ids
+    return {
+        "favorites": get_favorites_for_performer(performer or ""),
+        "favorite_ids": get_favorite_video_ids()
+    }
+
+@app.post("/api/profile-hub/video-favorites")
+async def toggle_profile_hub_video_favorite(req: Dict[str, Any]):
+    """Toggle favorite status for an online profile video."""
+    from .profile_video_favorites_service import toggle_favorite_video
+    try:
+        return toggle_favorite_video(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 @app.post("/api/multi-album/batch-save-to-library")
 async def multi_album_batch_save_to_library(req: MultiAlbumBatchSaveRequest):
     """Enfileira múltiplos álbuns selecionados para extração e salvamento direto na biblioteca com pasta designada (respeitando seleção individual de imagens)."""
     if not req.albums:
         raise HTTPException(status_code=400, detail="No albums selected.")
+
+    if req.strict_profile_selection:
+        for alb in req.albums:
+            selected = alb.selected_image_urls or []
+            if not selected or any(not url or not url.strip() for url in selected) or len(set(selected)) != len(selected):
+                raise HTTPException(status_code=400, detail="Each profile album needs an explicit, nonempty selection.")
 
     target_folder = (req.folder or "Geral").strip() or "Geral"
     _ensure_album_folder_exists(target_folder)
@@ -10135,6 +12277,9 @@ async def multi_album_batch_save_to_library(req: MultiAlbumBatchSaveRequest):
             "progress": {"current": 0, "total": custom_count, "status": status_msg, "title": alb.title},
             "selected_image_count": custom_count,
         }
+        if req.strict_profile_selection:
+            job_data["strict_profile_selection"] = True
+            job_data["selected_image_urls"] = list(alb.selected_image_urls)
         _active_jobs[s_id] = job_data
         single_req = AnalyzeRequest(
             url=u,
@@ -10144,6 +12289,7 @@ async def multi_album_batch_save_to_library(req: MultiAlbumBatchSaveRequest):
             engine_type="gemini_surgical_scout",
             folder=target_folder,
             selected_image_urls=alb.selected_image_urls,
+            strict_profile_selection=req.strict_profile_selection,
         )
         t = asyncio.create_task(_run_gemini_surgical_task(s_id, single_req, semaphore=_batch_photo_semaphore))
         _job_controllers[s_id] = TaskJobController(t)
@@ -10284,12 +12430,19 @@ async def _refresh_single_image_stream(img, default_page: Optional[str] = None) 
     raw_hdrs = _get_video_download_headers(target_url, target_url)
     cookie_str = raw_hdrs.get("Cookie") or raw_hdrs.get("cookie")
     hdrs = {k: v for k, v in raw_hdrs.items() if k.lower() != "cookie"}
+    hdrs.pop("Sec-Fetch-Dest", None)
+    hdrs.pop("Sec-Fetch-Mode", None)
+    hdrs["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "http_headers": hdrs
+        "http_headers": hdrs,
+        "socket_timeout": 6.0,
+        "retries": 3,
+        "extractor_retries": 3,
     }
+    is_yt = "youtube.com" in target_url.lower() or "youtu.be" in target_url.lower()
     extracted_cookies = {}
     def _extract():
         nonlocal extracted_cookies
@@ -10301,7 +12454,7 @@ async def _refresh_single_image_stream(img, default_page: Optional[str] = None) 
             return inf
 
     try:
-        info = await asyncio.to_thread(_extract)
+        info = normalize_ytdlp_video_info(await asyncio.to_thread(_extract), target_url)
     except Exception as exc:
         return False, f"yt-dlp extraction error: {exc}"
 
@@ -10311,9 +12464,58 @@ async def _refresh_single_image_stream(img, default_page: Optional[str] = None) 
             _domain_cookies[c_dom] = c_str
         _save_domain_cookies()
 
+    fresh_thumb = info.get("thumbnail") if isinstance(info, dict) else None
+    if not fresh_thumb and isinstance(info, dict) and info.get("thumbnails"):
+        t_list = info.get("thumbnails")
+        if isinstance(t_list, list) and t_list:
+            valid_t = [t.get("url") for t in t_list if isinstance(t, dict) and t.get("url")]
+            if valid_t:
+                fresh_thumb = valid_t[-1]
+
+    if not fresh_thumb and is_yt:
+        yt_m = _re.search(r'(?:v=|\/embed\/|\/watch\?v=|youtu\.be\/|\/v\/)([a-zA-Z0-9_-]{11})', target_url)
+        if yt_m:
+            fresh_thumb = f"https://i.ytimg.com/vi/{yt_m.group(1)}/hqdefault.jpg"
+
+    if fresh_thumb:
+        img.thumbnail_url = fresh_thumb
+        img.poster_url = fresh_thumb
+
     formats = [f for f in info.get("formats", []) if f.get("ext") == "mp4" and f.get("url")]
-    direct_mp4s = [f for f in formats if not str(f.get("format_id", "")).startswith("hls")]
-    pool = direct_mp4s if direct_mp4s else formats
+    is_pornhub = "pornhub.com" in (target_url or "").lower()
+    if is_pornhub:
+        # For Pornhub, hv-h CDN streams (HLS format_ids) bypass rigid client-IP bindings (&ipa=1)
+        # and reliably deliver HTTP 206 partial content without 474 Unauthorized errors
+        hls_mp4s = [f for f in formats if str(f.get("format_id", "")).startswith("hls") or "hv-h.phncdn.com" in str(f.get("url", ""))]
+        direct_mp4s = [f for f in formats if not str(f.get("format_id", "")).startswith("hls")]
+        pool = hls_mp4s if hls_mp4s else (direct_mp4s if direct_mp4s else formats)
+    else:
+        direct_mp4s = [
+            f for f in formats
+            if not str(f.get("format_id", "")).startswith("hls")
+            and not f.get("manifest_url")
+            and ".m3u8" not in str(f.get("url") or "").lower()
+        ]
+        av_mp4s = [
+            f for f in direct_mp4s
+            if f.get("acodec") != "none" and f.get("vcodec") != "none"
+        ]
+        pool = av_mp4s if av_mp4s else (direct_mp4s if direct_mp4s else formats)
+    if not pool and is_yt:
+        f_master = next((f for f in info.get("formats", []) if f.get("format_id") in ("234", "233") and f.get("manifest_url")), None)
+        if f_master and f_master.get("manifest_url"):
+            chosen_url = f_master["manifest_url"]
+            img.video_stream_url = chosen_url
+            img.original_url = chosen_url
+            img.width = int(info.get("width") or 1920)
+            img.height = int(info.get("height") or 1080)
+            dur = int(info.get("duration") or 0)
+            if dur > 0:
+                img.duration_seconds = dur
+            if fresh_thumb:
+                img.thumbnail_url = fresh_thumb
+                img.poster_url = fresh_thumb
+            return True, ""
     if not pool:
         pool = [f for f in info.get("formats", []) if f.get("url") and f.get("vcodec") != "none"]
     if not pool:
@@ -10321,14 +12523,25 @@ async def _refresh_single_image_stream(img, default_page: Optional[str] = None) 
     if not pool:
         return False, "No stream formats returned"
 
+    def _fmt_short(fmt: dict) -> int:
+        h_f = int(fmt.get("height") or 0)
+        w_f = int(fmt.get("width") or 0)
+        return min(w_f, h_f) if (w_f > 0 and h_f > 0) else h_f
+
     target_height = _deduce_image_target_height(img)
 
     exact = None
     if target_height:
-        exact = next((f for f in pool if f.get("height") == target_height), None)
+        exact = next(
+            (f for f in pool if f.get("height") == target_height or _fmt_short(f) == target_height),
+            None,
+        )
 
     if not exact:
-        exact = max(pool, key=lambda f: f.get("height", 0) or 0)
+        exact = max(
+            pool,
+            key=lambda f: (_fmt_short(f), 0 if f.get("_is_dash_mux") else 1, float(f.get("tbr") or 0)),
+        )
 
     chosen_url = exact["url"]
     h = exact.get("height") or target_height or 1080
@@ -10414,10 +12627,16 @@ async def _refresh_album_video_streams(album: Album) -> tuple[list, list]:
         raw_hdrs = _get_video_download_headers(target_url, target_url)
         cookie_str = raw_hdrs.get("Cookie") or raw_hdrs.get("cookie")
         hdrs = {k: v for k, v in raw_hdrs.items() if k.lower() != "cookie"}
+        hdrs.pop("Sec-Fetch-Dest", None)
+        hdrs.pop("Sec-Fetch-Mode", None)
+        hdrs["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         ydl_opts = {
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
+            "socket_timeout": 6.0,
+            "retries": 3,
+            "extractor_retries": 3,
             "http_headers": hdrs
         }
         extracted_cookies = {}
@@ -10431,7 +12650,7 @@ async def _refresh_album_video_streams(album: Album) -> tuple[list, list]:
                 return inf
 
         try:
-            info = await asyncio.to_thread(_extract)
+            info = normalize_ytdlp_video_info(await asyncio.to_thread(_extract), target_url)
         except Exception as exc:
             for img in imgs:
                 failed.append({"id": str(img.id), "error": f"yt-dlp error: {exc}"})
@@ -10443,9 +12662,53 @@ async def _refresh_album_video_streams(album: Album) -> tuple[list, list]:
                 _domain_cookies[c_dom] = c_str
             _save_domain_cookies()
 
+        is_yt_target = "youtube.com" in target_url.lower() or "youtu.be" in target_url.lower()
+
+        fresh_thumb = info.get("thumbnail") if isinstance(info, dict) else None
+        if not fresh_thumb and isinstance(info, dict) and info.get("thumbnails"):
+            t_list = info.get("thumbnails")
+            if isinstance(t_list, list) and t_list:
+                valid_t = [t.get("url") for t in t_list if isinstance(t, dict) and t.get("url")]
+                if valid_t:
+                    fresh_thumb = valid_t[-1]
+
+        if not fresh_thumb and is_yt_target:
+            yt_m = _re.search(r'(?:v=|\/embed\/|\/watch\?v=|youtu\.be\/|\/v\/)([a-zA-Z0-9_-]{11})', target_url)
+            if yt_m:
+                fresh_thumb = f"https://i.ytimg.com/vi/{yt_m.group(1)}/hqdefault.jpg"
+
         formats = [f for f in info.get("formats", []) if f.get("ext") == "mp4" and f.get("url")]
-        direct_mp4s = [f for f in formats if not str(f.get("format_id", "")).startswith("hls")]
-        pool = direct_mp4s if direct_mp4s else formats
+        direct_mp4s = [
+            f for f in formats
+            if not str(f.get("format_id", "")).startswith("hls")
+            and not f.get("manifest_url")
+            and ".m3u8" not in str(f.get("url") or "").lower()
+        ]
+        av_mp4s = [
+            f for f in (direct_mp4s if direct_mp4s else formats)
+            if f.get("acodec") != "none" and f.get("vcodec") != "none"
+        ]
+        pool = av_mp4s if av_mp4s else (direct_mp4s if direct_mp4s else formats)
+        if not pool and is_yt_target:
+            f_master = next((f for f in info.get("formats", []) if f.get("format_id") in ("234", "233") and f.get("manifest_url")), None)
+            if f_master and f_master.get("manifest_url"):
+                chosen_url = f_master["manifest_url"]
+                dur = int(info.get("duration") or 0)
+                for img in imgs:
+                    img.video_stream_url = chosen_url
+                    img.original_url = chosen_url
+                    img.width = int(info.get("width") or 1920)
+                    img.height = int(info.get("height") or 1080)
+                    if dur > 0:
+                        img.duration_seconds = dur
+                    if fresh_thumb:
+                        img.thumbnail_url = fresh_thumb
+                        img.poster_url = fresh_thumb
+                if fresh_thumb and album:
+                    first_img = album.images[0] if getattr(album, "images", None) else None
+                    if is_placeholder_image(album.cover_image_url) or len(album.images) == 1 or (first_img and first_img in imgs):
+                        album.cover_image_url = fresh_thumb
+                continue
         if not pool:
             pool = [f for f in info.get("formats", []) if f.get("url") and f.get("vcodec") != "none"]
         if not pool:
@@ -10457,14 +12720,25 @@ async def _refresh_album_video_streams(album: Album) -> tuple[list, list]:
 
         dur = int(info.get("duration") or 0)
 
+        def _fmt_short_group(fmt: dict) -> int:
+            h_f = int(fmt.get("height") or 0)
+            w_f = int(fmt.get("width") or 0)
+            return min(w_f, h_f) if (w_f > 0 and h_f > 0) else h_f
+
         for img in imgs:
             target_height = _deduce_image_target_height(img)
 
             exact = None
             if target_height:
-                exact = next((f for f in pool if f.get("height") == target_height), None)
+                exact = next(
+                    (f for f in pool if f.get("height") == target_height or _fmt_short_group(f) == target_height),
+                    None,
+                )
             if not exact:
-                exact = max(pool, key=lambda f: f.get("height", 0) or 0)
+                exact = max(
+                    pool,
+                    key=lambda f: (_fmt_short_group(f), 0 if f.get("_is_dash_mux") else 1, float(f.get("tbr") or 0)),
+                )
 
             chosen_url = exact["url"]
             h = exact.get("height") or target_height or 1080
@@ -10481,11 +12755,20 @@ async def _refresh_album_video_streams(album: Album) -> tuple[list, list]:
             if not f_sz and dur > 0:
                 tbr = exact.get("tbr") or (4000 if h >= 1080 else (2000 if h >= 720 else 1000))
                 f_sz = int(tbr * 1000 / 8 * dur)
+            if fresh_thumb:
+                img.thumbnail_url = fresh_thumb
+                img.poster_url = fresh_thumb
+
             if f_sz > 0:
                 img.file_size = f_sz
 
             img_id = getattr(img, "id", None) or getattr(img, "candidate_id", "") or "video"
             refreshed.append({"id": str(img_id), "candidate_id": getattr(img, "candidate_id", "")})
+
+        if fresh_thumb and album:
+            first_img = album.images[0] if getattr(album, "images", None) else None
+            if is_placeholder_image(album.cover_image_url) or len(album.images) == 1 or (first_img and first_img in imgs):
+                album.cover_image_url = fresh_thumb
 
     return refreshed, failed
 
@@ -10573,6 +12856,8 @@ def _sync_refreshed_album_to_video_gallery(album: Album):
                         ventry["duration_seconds"] = img.duration_seconds
                     if getattr(img, "file_size", None):
                         ventry["file_size_bytes"] = img.file_size
+                    if getattr(img, "thumbnail_url", None) and not is_placeholder_image(img.thumbnail_url):
+                        ventry["source_thumbnail_url"] = img.thumbnail_url
                     ventry["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                     updated = True
         if updated:
@@ -10644,21 +12929,23 @@ async def renew_video_streams_endpoint(req: Optional[VideoRenewStreamsRequest] =
     v_meta = video_service._load_metadata()
     target_ids = []
 
-    req_ids = req.video_ids if req and req.video_ids else None
-    req_folder = req.folder if req and req.folder else None
+    req_ids = req.video_ids if (req and req.video_ids is not None) else None
+    req_folder = req.folder if (req and req.folder) else None
 
-    for vid, ventry in v_meta.items():
-        if req_ids is not None:
-            if vid in req_ids:
-                target_ids.append(vid)
-        elif req_folder is not None:
+    if req_ids is not None:
+        if not req_ids:
+            return {"success": True, "refreshed": 0, "failed": 0, "deleted_on_source": 0, "details": {"refreshed": [], "failed": []}}
+        target_ids = [vid for vid in req_ids if vid in v_meta]
+    elif req_folder is not None:
+        for vid, ventry in v_meta.items():
             if ventry.get("folder") == req_folder and (
                 ventry.get("storage_location") == "stream_url"
                 or ventry.get("custom_stream_url")
                 or ventry.get("source_origin") == "web"
             ):
                 target_ids.append(vid)
-        else:
+    else:
+        for vid, ventry in v_meta.items():
             if (
                 ventry.get("storage_location") == "stream_url"
                 or ventry.get("custom_stream_url")
@@ -10667,8 +12954,9 @@ async def renew_video_streams_endpoint(req: Optional[VideoRenewStreamsRequest] =
                 target_ids.append(vid)
 
     if not target_ids:
-        return {"success": True, "refreshed": 0, "failed": 0, "details": []}
+        return {"success": True, "refreshed": 0, "failed": 0, "deleted_on_source": 0, "details": {"refreshed": [], "failed": []}}
 
+    original_entries = {vid: dict(v_meta[vid]) for vid in target_ids}
     refreshed = []
     failed = []
 
@@ -10692,9 +12980,24 @@ async def renew_video_streams_endpoint(req: Optional[VideoRenewStreamsRequest] =
         async with sem:
             try:
                 target_h = ventry.get("height")
-                fresh_url, info = await _re_resolve_video_stream(target_page, target_h)
+                fresh_url = None
+                info = None
+                try:
+                    fresh_url, info = await asyncio.wait_for(
+                        _re_resolve_video_stream(target_page, target_h),
+                        timeout=30.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout renewing video stream {vid} ({target_page})")
+
                 if not fresh_url:
-                    fresh_url = await _resolve_best_video_stream("vid", target_page)
+                    try:
+                        fresh_url = await asyncio.wait_for(
+                            _resolve_best_video_stream("vid", target_page),
+                            timeout=25.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Timeout resolving fallback stream for {vid} ({target_page})")
 
                 if fresh_url:
                     ref_param = f"&referer={urllib.parse.quote(target_page)}" if target_page else ""
@@ -10784,7 +13087,36 @@ async def renew_video_streams_endpoint(req: Optional[VideoRenewStreamsRequest] =
     await asyncio.gather(*tasks)
 
     if refreshed or failed:
-        video_service._save_metadata(v_meta)
+        # Network resolution can take minutes. Never write its old library
+        # snapshot back over videos/edits created while those requests ran.
+        renewal_fields = (
+            "custom_stream_url", "stream_status", "stream_error", "updated_at",
+            "duration_seconds", "width", "height", "file_size_bytes",
+        )
+        with video_service._meta_lock:
+            current_meta = video_service._load_metadata()
+            changed = False
+            for vid in target_ids:
+                current_entry = current_meta.get(vid)
+                original_entry = original_entries.get(vid)
+                if current_entry is None or original_entry is None:
+                    continue  # A user deletion must not be resurrected.
+                if any(current_entry.get(key) != original_entry.get(key)
+                       for key in ("source_url", "custom_stream_url")):
+                    continue  # Preserve a newer source or stream replacement.
+                renewed_entry = v_meta.get(vid)
+                if not renewed_entry:
+                    continue
+                for key in renewal_fields:
+                    if key not in renewed_entry:
+                        continue
+                    if key in original_entry and renewed_entry[key] == original_entry[key]:
+                        continue
+                    if current_entry.get(key) == original_entry.get(key):
+                        current_entry[key] = renewed_entry[key]
+                        changed = True
+            if changed:
+                video_service._save_metadata(current_meta)
 
     deleted_count = len([f for f in failed if f.get("status") == "deleted_on_source"])
 
@@ -10799,24 +13131,90 @@ async def renew_video_streams_endpoint(req: Optional[VideoRenewStreamsRequest] =
 
 
 
+# Profile Hub confirmed execution: dependencies are bound here, never imported by
+# isolated execution tests. Existing storage, workers, queue and players remain owners.
+from pathlib import Path as _ProfileHubPath
+from uuid import uuid4 as _profile_hub_uuid4
+from .profile_hub_execution import ExecutionCoordinator, ExecutionRepository, RetryExecution, execution_router
+from .profile_hub_execution_runtime import ProfileHubExecutionPort
+
+
+async def _profile_hub_resolve_gallery_page(url: str, title: str):
+    return await _resolve_or_extract_album_for_multi(
+        MultiAlbumItemInput(title=title or "Profile Hub", url=url),
+        persist_to_library=False, require_full_album=True,
+    )
+
+
+_profile_hub_execution = ExecutionCoordinator(
+    ExecutionRepository(_ProfileHubPath(DATA_DIR) / "profile-hub-execution" / "executions.sqlite3"),
+    ProfileHubExecutionPort(globals(), _ProfileHubPath(DATA_DIR) / "profile-hub-execution"),
+)
+app.include_router(execution_router(_profile_hub_execution))
+
+from .timeline_video_save import TimelineVideoSaver, timeline_video_router, resolve_progressive_video
+async def _timeline_video_resolve(video_id, page_url):
+    # Use the same source resolution and quality cache as the timeline player.
+    # The gallery stores the original page separately for stream renewal.
+    try:
+        response = await get_video_stream_qualities(url=page_url, referer=page_url, _t=None)
+        payload = json.loads(response.body)
+        options = [payload.get('master_hls_url')] + [entry.get('streamUrl') for entry in payload.get('qualities', []) if isinstance(entry, dict) and entry.get('has_audio') is not False]
+        for option in options:
+            if not isinstance(option, str) or not option:
+                continue
+            parsed = urllib.parse.urlsplit(option)
+            candidate = urllib.parse.parse_qs(parsed.query).get('url', [None])[0] if parsed.path == '/api/proxy-video-stream' else option
+            if candidate and candidate != page_url and candidate.startswith('https://'):
+                return {'stream_url': candidate}
+    except Exception:
+        logger.debug('Timeline player quality lookup failed; trying source extraction', exc_info=True)
+    return await resolve_progressive_video(video_id, page_url, _get_video_download_headers, load_cookie_string_into_cookiejar)
+app.include_router(timeline_video_router(TimelineVideoSaver(
+    video_service, _timeline_video_resolve, sanitize_folder_name,
+    _ProfileHubPath(DATA_DIR) / 'profile-hub-execution' / 'timeline-folders.sqlite3',
+)))
+
+
 # Static UI serving (Compatível com desenvolvimento local e PyInstaller .exe)
 base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 mobile_dist = os.path.join(base_path, "frontend-mobile-preview", "dist")
 frontend_dist = os.path.join(base_path, "frontend", "dist")
+legacy_ui = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ui")
 
-if os.path.exists(os.path.join(mobile_dist, "index.html")):
-    ui_dir = mobile_dist
-elif os.path.exists(os.path.join(frontend_dist, "index.html")):
-    ui_dir = frontend_dist
-else:
-    # Fallback caso rode da raiz diretamente
+
+def _resolve_ui_directory() -> str:
+    """Resolve dinamicamente o diretório da UI, priorizando sempre o frontend moderno."""
+    if os.path.exists(os.path.join(mobile_dist, "index.html")):
+        return mobile_dist
+    if os.path.exists(os.path.join(frontend_dist, "index.html")):
+        return frontend_dist
     local_mobile = os.path.join(os.getcwd(), "frontend-mobile-preview", "dist")
     if os.path.exists(os.path.join(local_mobile, "index.html")):
-        ui_dir = local_mobile
-    else:
-        ui_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ui")
+        return local_mobile
+    return legacy_ui
 
-app.mount("/", StaticFiles(directory=ui_dir, html=True), name="ui")
+
+class DynamicUIStaticFiles(StaticFiles):
+    """
+    Serve arquivos estáticos da UI com resolução dinâmica de diretório.
+    Garante que o build moderno de 'frontend-mobile-preview/dist' tenha precedência
+    mesmo que o build termine após o boot do servidor, evitando travar no fallback legado 'src/ui'.
+    """
+
+    def __init__(self, initial_dir: str, **kwargs):
+        super().__init__(directory=initial_dir, **kwargs)
+
+    async def get_response(self, path: str, scope):
+        preferred = _resolve_ui_directory()
+        if preferred != self.directory:
+            self.directory = preferred
+            self.all_directories = self.get_directories(preferred, self.packages)
+        return await super().get_response(path, scope)
+
+
+ui_dir = _resolve_ui_directory()
+app.mount("/", DynamicUIStaticFiles(ui_dir, html=True), name="ui")
 
 

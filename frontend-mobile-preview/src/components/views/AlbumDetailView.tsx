@@ -1,4 +1,6 @@
+import { normalizePlayerHighlights, type PlayerHighlight } from '../video-player/engine/playerHighlights';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import Hls from 'hls.js';
 import {
   Download,
@@ -36,12 +38,13 @@ import { useShallow } from 'zustand/react/shallow';
 import { backendApi } from '../../services/realApi';
 import { translations } from '../../i18n/translations';
 import { formatFileSize } from '../../utils/formatters';
-import { getAlbumMediaSummary, getMediaCategory, getMediaExtension, isVideoMedia } from '../../utils/mediaClassification';
+import { getAlbumMediaSummary, getMediaCategory, getMediaExtension, isVideoMedia, getAnimationVideoUrl } from '../../utils/mediaClassification';
 import { FolderSelectModal } from '../common/FolderSelectModal';
 import { SavedRedirectBadge } from '../common/SavedRedirectBadge';
 import { CHROMATIC_PALETTE_COLORS, matchesPaletteFuzzy, colorPaletteCache } from '../../services/colorExtractor';
 import { ColorFilterPopover } from '../common/ColorFilterPopover';
 import { ImageItem, Album, ExtractionJob } from '../../types';
+import { UniversalVideoPlayer } from '../video-player/ui/UniversalVideoPlayer';
 import { preloadSingleImage } from '../../hooks/useImagePreloader';
 import { ModalPortal } from '../common/ModalPortal';
 
@@ -84,18 +87,103 @@ export const getProxiedStreamUrl = (rawUrl?: string, referer?: string): string =
 
 const InlineStreamPlayer: React.FC<{
   url: string;
+  highlights?: PlayerHighlight[];
   poster?: string;
   referer?: string;
   onRefresh?: () => void;
   isRefreshing?: boolean;
-}> = ({ url, poster, referer, onRefresh, isRefreshing }) => {
+  onDownloadQuality?: (streamUrl: string, label: string) => void;
+}> = ({ url, highlights, poster, referer, onRefresh, isRefreshing, onDownloadQuality }) => {
+  const isEn = useAppStore((state) => state.settings.language === 'en-US');
   const { settings } = useAppStore();
   const videoRef = useRef<HTMLVideoElement>(null);
   const [hasError, setHasError] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [qualities, setQualities] = useState<Array<{ height: number; label: string; streamUrl: string; bitrate?: number }>>([]);
+  const [selectedQuality, setSelectedQuality] = useState<number | 'auto'>('auto');
+  const [activeStreamOverride, setActiveStreamOverride] = useState<string | null>(null);
+  const [showQualityMenu, setShowQualityMenu] = useState(false);
+  const qualityBtnRef = useRef<HTMLButtonElement>(null);
+  const qualityPopoverRef = useRef<HTMLDivElement>(null);
+  const [qualityCoords, setQualityCoords] = useState<{ top: number; left: number; width: number }>({ top: 0, left: 0, width: 204 });
+
+  const updateQualityPopoverCoords = () => {
+    if (!qualityBtnRef.current) return;
+    const rect = qualityBtnRef.current.getBoundingClientRect();
+    const width = Math.min(212, window.innerWidth - 24);
+    let left = rect.left;
+    if (left + width > window.innerWidth - 12) {
+      left = Math.max(12, window.innerWidth - width - 12);
+    }
+    if (left < 12) left = 12;
+
+    const estimatedHeight = Math.min(260, (qualities.length + 1) * 34 + 44);
+    let top = rect.bottom + 6;
+    if (top + estimatedHeight > window.innerHeight - 12 && rect.top > estimatedHeight + 12) {
+      top = Math.max(12, rect.top - estimatedHeight - 6);
+    }
+    setQualityCoords({ top, left, width });
+  };
+
+  useEffect(() => {
+    if (!showQualityMenu) return;
+    updateQualityPopoverCoords();
+    const handleOutside = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      if (
+        qualityPopoverRef.current &&
+        !qualityPopoverRef.current.contains(target) &&
+        qualityBtnRef.current &&
+        !qualityBtnRef.current.contains(target)
+      ) {
+        setShowQualityMenu(false);
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowQualityMenu(false);
+        qualityBtnRef.current?.focus();
+      }
+    };
+    window.addEventListener('resize', updateQualityPopoverCoords);
+    window.addEventListener('scroll', updateQualityPopoverCoords, true);
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('touchstart', handleOutside, { passive: true });
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      window.removeEventListener('resize', updateQualityPopoverCoords);
+      window.removeEventListener('scroll', updateQualityPopoverCoords, true);
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('touchstart', handleOutside);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [showQualityMenu, qualities.length]);
 
   const effectiveUrl = useMemo(() => {
+    if (activeStreamOverride) return activeStreamOverride;
     return getProxiedStreamUrl(url, referer);
+  }, [url, referer, activeStreamOverride]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchQualities = async () => {
+      try {
+        const resp = await fetch(
+          `/api/video-stream-qualities?url=${encodeURIComponent(url)}&referer=${encodeURIComponent(referer || '')}`
+        );
+        if (!resp.ok || cancelled) return;
+        const data = await resp.json();
+        if (!cancelled && Array.isArray(data?.qualities) && data.qualities.length > 0) {
+          setQualities(data.qualities);
+        }
+      } catch {
+        // Silent fallback to default stream
+      }
+    };
+    fetchQualities();
+    return () => {
+      cancelled = true;
+    };
   }, [url, referer]);
 
   useEffect(() => {
@@ -114,7 +202,7 @@ const InlineStreamPlayer: React.FC<{
       hlsInstance.on(Hls.Events.ERROR, (_evt, data) => {
         if (data.fatal) {
           setHasError(true);
-          setErrorMessage('Erro ao carregar fluxo HLS.');
+          setErrorMessage(isEn ? 'Error loading HLS stream.' : 'Erro ao carregar fluxo HLS.');
         }
       });
     } else {
@@ -127,7 +215,7 @@ const InlineStreamPlayer: React.FC<{
         hlsInstance.destroy();
       }
     };
-  }, [effectiveUrl]);
+  }, [effectiveUrl, isEn]);
 
   return (
     <div className="w-full h-full relative bg-black flex items-center justify-center">
@@ -135,10 +223,10 @@ const InlineStreamPlayer: React.FC<{
         <div className="w-full h-full flex flex-col items-center justify-center p-4 text-center bg-slate-950/95 z-20">
           <AlertTriangle size={32} className="text-amber-400 mb-2" />
           <p className="text-xs text-white font-semibold mb-1">
-            {errorMessage || (translations[settings.language].albumDetail.streamPlaybackFailed || 'Falha na reprodução do vídeo')}
+            {errorMessage || (translations[settings.language]?.albumDetail?.streamPlaybackFailed || (isEn ? 'Video playback failed' : 'Falha na reprodução do vídeo'))}
           </p>
           <p className="text-[11px] text-slate-400 mb-3 max-w-xs">
-            O link de stream pode estar expirado ou bloqueado pela CDN.
+            {isEn ? 'The stream link may be expired or blocked by CDN.' : 'O link de stream pode estar expirado ou bloqueado pela CDN.'}
           </p>
           {onRefresh && (
             <button
@@ -151,28 +239,153 @@ const InlineStreamPlayer: React.FC<{
               className="px-3.5 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold flex items-center gap-2 shadow-lg disabled:opacity-50 transition-all cursor-pointer"
             >
               <RefreshCw size={13} className={isRefreshing ? 'animate-spin' : ''} />
-              <span>{isRefreshing ? 'Renovando...' : 'Renovar Stream'}</span>
+              <span>{isRefreshing ? (isEn ? 'Renewing...' : 'Renovando...') : (isEn ? 'Renew Stream' : 'Renovar Stream')}</span>
             </button>
           )}
         </div>
       ) : (
-        <video
-          ref={videoRef}
-          controls
-          autoPlay
-          playsInline
-          {...({ 'webkit-playsinline': 'true', 'x5-playsinline': 'true' } as any)}
-          preload="auto"
-          poster={poster}
-          onError={(e) => {
-            console.warn('Inline video player error:', e);
-            setHasError(true);
-            setErrorMessage(translations[settings.language].albumDetail.streamUnavailable || 'Stream indisponível ou link expirado (CDN 404/410).');
+        <UniversalVideoPlayer
+          density="compact"
+          posterUrl={poster}
+          autoPlayOnActive
+          source={{
+            id: effectiveUrl || url,
+            highlights,
+            streamUrl: effectiveUrl,
+            sourceUrl: referer || url,
+            posterUrl: poster,
+            qualities: qualities.map((q) => ({
+              height: q.height,
+              label: q.label,
+              streamUrl: q.streamUrl || '',
+            })),
           }}
-          className="w-full h-full object-contain"
-        >
-          {translations[settings.language].albumDetail.browserNoVideo || 'Seu navegador não suporta este vídeo.'}
-        </video>
+          onErrorFallback={() => {
+            setHasError(true);
+            setErrorMessage(
+              translations[settings.language]?.albumDetail?.streamUnavailable ||
+                (isEn
+                  ? 'Stream unavailable or link expired (CDN 404/410).'
+                  : 'Stream indisponível ou link expirado (CDN 404/410).')
+            );
+          }}
+          className="w-full h-full object-contain rounded-none border-0"
+        />
+      )}
+      {qualities.length > 0 && !hasError && (
+        <div className="absolute top-2 left-2 z-30" onClick={(e) => e.stopPropagation()}>
+          <button
+            ref={qualityBtnRef}
+            type="button"
+            aria-expanded={showQualityMenu}
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowQualityMenu((prev) => !prev);
+            }}
+            className="min-h-[26px] px-2.5 py-1 rounded-full bg-black/85 hover:bg-violet-600/95 text-white border border-white/25 text-[10px] font-mono font-bold flex items-center gap-1 shadow-lg transition-all cursor-pointer"
+            title={isEn ? 'Stream & Download Quality' : 'Qualidade de Streaming e Download'}
+          >
+            <span>
+              {selectedQuality === 'auto'
+                ? `Auto (${qualities[0]?.height || 1080}p)`
+                : `${selectedQuality}p`}
+            </span>
+          </button>
+          {showQualityMenu && typeof document !== 'undefined' && createPortal(
+            <div
+              ref={qualityPopoverRef}
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                position: 'fixed',
+                top: `${qualityCoords.top}px`,
+                left: `${qualityCoords.left}px`,
+                width: `${qualityCoords.width}px`,
+                maxWidth: 'calc(100dvw - 24px)',
+                maxHeight: 'min(320px, calc(100dvh - 24px))',
+              }}
+              className="rounded-xl bg-slate-950/95 backdrop-blur-xl border border-white/15 shadow-2xl p-1.5 z-[9999] flex flex-col animate-scale-up"
+            >
+              <div className="flex items-center justify-between px-2 py-1 border-b border-white/10 mb-1 shrink-0">
+                <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                  {isEn ? 'Video Quality' : 'Qualidade de Vídeo'}
+                </span>
+                <span className="text-[9px] font-mono text-slate-500">
+                  {qualities.length} {isEn ? 'options' : 'opções'}
+                </span>
+              </div>
+              <div className="flex flex-col gap-0.5 overflow-y-auto custom-scrollbar">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const curTime = videoRef.current?.currentTime || 0;
+                    setSelectedQuality('auto');
+                    setActiveStreamOverride(qualities[0]?.streamUrl || null);
+                    setShowQualityMenu(false);
+                    setTimeout(() => {
+                      if (videoRef.current && curTime > 0) {
+                        videoRef.current.currentTime = curTime;
+                        videoRef.current.play().catch(() => {});
+                      }
+                    }, 120);
+                  }}
+                  className={`w-full min-h-[30px] flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left text-[11px] font-semibold transition-colors cursor-pointer ${
+                    selectedQuality === 'auto'
+                      ? 'bg-brand-600 text-white'
+                      : 'text-slate-200 hover:bg-white/10'
+                  }`}
+                >
+                  <span>Auto ({qualities[0]?.label || 'Max'})</span>
+                  {selectedQuality === 'auto' && <Check size={12} />}
+                </button>
+                {qualities.map((q) => (
+                  <div
+                    key={q.height}
+                    className={`w-full min-h-[30px] flex items-center justify-between px-2 py-1 rounded-lg text-[11px] font-medium transition-colors ${
+                      selectedQuality === q.height
+                        ? 'bg-brand-600/90 text-white'
+                        : 'text-slate-200 hover:bg-white/10'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const curTime = videoRef.current?.currentTime || 0;
+                        setSelectedQuality(q.height);
+                        setActiveStreamOverride(q.streamUrl);
+                        setShowQualityMenu(false);
+                        setTimeout(() => {
+                          if (videoRef.current && curTime > 0) {
+                            videoRef.current.currentTime = curTime;
+                            videoRef.current.play().catch(() => {});
+                          }
+                        }, 120);
+                      }}
+                      className="flex-1 flex items-center gap-1.5 text-left py-0.5 cursor-pointer"
+                    >
+                      <span>{q.label}</span>
+                      {selectedQuality === q.height && <Check size={12} />}
+                    </button>
+                    {onDownloadQuality && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowQualityMenu(false);
+                          onDownloadQuality(q.streamUrl, q.label);
+                        }}
+                        className="min-w-[26px] min-h-[26px] flex items-center justify-center rounded-md hover:bg-black/40 text-cyan-300 hover:text-white transition-colors cursor-pointer"
+                        title={isEn ? `Download ${q.label} (with audio)` : `Baixar ${q.label} (com som)`}
+                      >
+                        <Download size={12} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>,
+            document.body
+          )}
+        </div>
       )}
     </div>
   );
@@ -255,11 +468,156 @@ const AlbumMediaCard: React.FC<{
 }) => {
   const isEn = useAppStore((state) => state.settings.language === 'en-US');
   const [localDims, setLocalDims] = useState<{ w: number; h: number } | null>(null);
+  const [showDownloadQualityMenu, setShowDownloadQualityMenu] = useState(false);
+  const [downloadQualities, setDownloadQualities] = useState<Array<{ height: number; label: string; streamUrl: string; bitrate?: number }>>([]);
+  const [loadingDownloadQualities, setLoadingDownloadQualities] = useState(false);
+  const downloadBtnRef = useRef<HTMLButtonElement>(null);
+  const downloadMenuRef = useRef<HTMLDivElement>(null);
+  const [downloadMenuCoords, setDownloadMenuCoords] = useState<{ top: number; left: number; width: number }>({
+    top: 0,
+    left: 0,
+    width: 212,
+  });
+
+  const updateDownloadMenuPosition = () => {
+    if (!downloadBtnRef.current) return;
+    const rect = downloadBtnRef.current.getBoundingClientRect();
+    const width = Math.min(216, window.innerWidth - 24);
+    let left = rect.right - width;
+    if (left + width > window.innerWidth - 12) {
+      left = Math.max(12, window.innerWidth - width - 12);
+    }
+    if (left < 12) {
+      left = 12;
+    }
+
+    const itemCount = Math.max(2, downloadQualities.length);
+    const estimatedHeight = Math.min(280, itemCount * 36 + 48);
+    let top = rect.bottom + 6;
+    if (top + estimatedHeight > window.innerHeight - 12 && rect.top > estimatedHeight + 12) {
+      top = Math.max(12, rect.top - estimatedHeight - 6);
+    }
+    setDownloadMenuCoords({ top, left, width });
+  };
+
+  useEffect(() => {
+    if (!showDownloadQualityMenu) return;
+    updateDownloadMenuPosition();
+    const handleOutside = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      if (
+        downloadMenuRef.current &&
+        !downloadMenuRef.current.contains(target) &&
+        downloadBtnRef.current &&
+        !downloadBtnRef.current.contains(target)
+      ) {
+        setShowDownloadQualityMenu(false);
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowDownloadQualityMenu(false);
+        downloadBtnRef.current?.focus();
+      }
+    };
+    window.addEventListener('resize', updateDownloadMenuPosition);
+    window.addEventListener('scroll', updateDownloadMenuPosition, true);
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('touchstart', handleOutside, { passive: true });
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      window.removeEventListener('resize', updateDownloadMenuPosition);
+      window.removeEventListener('scroll', updateDownloadMenuPosition, true);
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('touchstart', handleOutside);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [showDownloadQualityMenu, downloadQualities.length]);
 
   const isVideo = isVideoMedia(img);
   const rawVideoLink = img.videoUrl || (img as any).videoStreamUrl || (isVideo ? img.originalUrl : undefined);
   const videoLink = getProxiedStreamUrl(rawVideoLink, (img as any).sourcePage || album.sourceUrl);
   const isGif = getMediaCategory(img) === 'gif';
+
+  const triggerMediaDownload = async (customStreamUrl?: string, qualityTag?: string) => {
+    const ext = getMediaExtension(img);
+    let rawTitle = (img.title || (isVideo ? 'video' : isGif ? 'animacao' : 'foto')).trim();
+    if (rawTitle.toLowerCase().endsWith(`.${ext.toLowerCase()}`)) {
+      rawTitle = rawTitle.slice(0, -(ext.length + 1));
+    }
+    if (qualityTag) {
+      rawTitle = rawTitle.replace(/\s*\((?:4K|2K|\d{3,4}p)[^)]*\)\s*$/i, '').trim();
+    }
+    const suffix = qualityTag ? ` (${qualityTag})` : '';
+    const fname = `${rawTitle}${suffix}.${ext}`;
+    const targetUrl = customStreamUrl || (
+      isVideo
+        ? (img.videoUrl || (img as any).videoStreamUrl || img.originalUrl)
+        : (img.rawOriginalUrl || img.originalUrl || img.previewUrl || img.thumbnailUrl)
+    );
+
+    addNotification({
+      type: 'info',
+      title: isEn ? 'Downloading File' : 'Baixando Arquivo',
+      message: isEn
+        ? `Saving "${fname}" directly to Downloads folder...`
+        : `Salvando "${fname}" diretamente na pasta Downloads...`
+    });
+
+    // 1. Immediately trigger native browser file download
+    try {
+      let browserDlUrl = '';
+      if (isVideo) {
+        if (targetUrl && targetUrl.includes('/api/proxy-video-stream')) {
+          const u = new URL(targetUrl, window.location.origin);
+          u.searchParams.set('download', 'true');
+          u.searchParams.set('filename', fname);
+          browserDlUrl = `${u.pathname}${u.search}`;
+        } else if (targetUrl) {
+          const ref = (img as any).sourcePage || album.sourceUrl || '';
+          const refParam = ref ? `&referer=${encodeURIComponent(ref)}` : '';
+          browserDlUrl = `/api/proxy-video-stream?url=${encodeURIComponent(targetUrl)}${refParam}&download=true&filename=${encodeURIComponent(fname)}`;
+        }
+      } else if (targetUrl) {
+        const ref = (img as any).sourcePage || album.sourceUrl || '';
+        const refParam = ref ? `&referer=${encodeURIComponent(ref)}` : '';
+        browserDlUrl = `/api/download-image?url=${encodeURIComponent(targetUrl)}&filename=${encodeURIComponent(fname)}${refParam}`;
+      }
+
+      if (browserDlUrl) {
+        const link = document.createElement('a');
+        link.href = browserDlUrl;
+        link.setAttribute('download', fname);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
+    } catch (eBrowserDl) {
+      console.warn('Browser download dispatch error:', eBrowserDl);
+    }
+
+    // 2. Also execute host background download for local library disk mirroring
+    try {
+      const res = await backendApi.downloadToDisk(targetUrl || '', fname, true);
+      if (res.success) {
+        addNotification({
+          type: 'success',
+          title: isEn ? 'Download Complete' : 'Download Concluído',
+          message: isEn
+            ? `Saved successfully: "${res.filename || fname}".`
+            : `Salvo com sucesso: "${res.filename || fname}".`
+        });
+      } else {
+        addNotification({
+          type: 'error',
+          title: isEn ? 'Download Failed' : 'Falha no Download',
+          message: res.error || (isEn ? 'Error saving file.' : 'Erro ao salvar arquivo.')
+        });
+      }
+    } catch (errDisk) {
+      console.warn('Disk mirror download error:', errDisk);
+    }
+  };
 
   const w = img.width || localDims?.w || 0;
   const h = img.height || localDims?.h || 0;
@@ -287,6 +645,27 @@ const AlbumMediaCard: React.FC<{
   }
 
   const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const videoCardRef = useRef<HTMLVideoElement>(null);
+  const [cardAnimFailed, setCardAnimFailed] = useState(false);
+
+  useEffect(() => {
+    if (!isGif || !videoCardRef.current) return;
+    const vid = videoCardRef.current;
+    if (typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          vid.play().catch(() => {});
+        } else {
+          vid.pause();
+        }
+      });
+    }, { threshold: 0.1 });
+    observer.observe(vid);
+    return () => {
+      observer.disconnect();
+    };
+  }, [isGif]);
 
   const handleMouseEnter = () => {
     if (!isVideo) {
@@ -351,10 +730,12 @@ const AlbumMediaCard: React.FC<{
               <InlineStreamPlayer
                 key={`${img.id}-${img.videoUrl || img.originalUrl || ''}`}
                 url={videoLink}
+                highlights={normalizePlayerHighlights(img)}
                 poster={img.posterUrl || img.thumbnailUrl}
                 referer={(img as any).sourcePage || album.sourceUrl}
                 onRefresh={() => handleRefreshSingleVideo(img)}
                 isRefreshing={refreshingStreamId === img.id}
+                onDownloadQuality={(streamUrl, label) => triggerMediaDownload(streamUrl, label)}
               />
 
               {(img.candidateId || img.id) && (
@@ -390,9 +771,9 @@ const AlbumMediaCard: React.FC<{
                   const vRef = (img as any).sourcePage || album.sourceUrl || defaultRef;
                   setActivePlayingVideo({
                     id: img.id,
-                    title: img.title || 'Vídeo',
-                    filename: `${img.title || 'video'}.${getMediaExtension(img)}`,
-                    folder: album.title || 'Álbum',
+                    title: img.title || (isEn ? 'Video' : 'Vídeo'),
+                    filename: `${img.title || (isEn ? 'video' : 'video')}.${getMediaExtension(img)}`,
+                    folder: album.title || (isEn ? 'Album' : 'Álbum'),
                     fileSizeBytes: img.fileSizeBytes || (img as any).file_size || 0,
                     format: getMediaExtension(img).toUpperCase(),
                     isFavorite: false,
@@ -436,9 +817,22 @@ const AlbumMediaCard: React.FC<{
               </div>
             </div>
           )
+        ) : (isGif && !cardAnimFailed) ? (
+          <video
+            ref={videoCardRef}
+            src={getAnimationVideoUrl(img.originalUrl || img.rawOriginalUrl || img.thumbnailUrl, 'standard', (img as any).sourcePage || album.sourceUrl)}
+            poster={img.thumbnailUrl || img.rawThumbnailUrl}
+            autoPlay
+            loop
+            muted
+            playsInline
+            preload="metadata"
+            onError={() => setCardAnimFailed(true)}
+            className={`w-full h-full ${imageFitClass} group-hover:scale-105 transition-transform duration-500 pointer-events-none`}
+          />
         ) : (
           <img
-            src={isGif ? (img.originalUrl || img.thumbnailUrl) : img.thumbnailUrl}
+            src={img.thumbnailUrl}
             alt={img.title}
             loading={idx < 8 ? "eager" : "lazy"}
             {...({ fetchPriority: idx < 2 ? 'high' : undefined } as any)}
@@ -503,7 +897,7 @@ const AlbumMediaCard: React.FC<{
           });
           if (!sInfo.isSaved) return null;
           return (
-            <div className="absolute top-2.5 left-9 z-10">
+            <div className={`absolute top-2.5 left-9 z-10 transition-opacity ${showDownloadQualityMenu ? 'opacity-0 pointer-events-none' : 'hidden sm:block sm:group-hover:opacity-0 sm:group-hover:pointer-events-none'}`}>
               <SavedRedirectBadge savedInfo={sInfo} />
             </div>
           );
@@ -514,25 +908,25 @@ const AlbumMediaCard: React.FC<{
             const vInfo = getVideoResolutionInfo(img);
             const is4k = vInfo.label.includes('4K');
             return (
-              <span className={`absolute top-2.5 right-2.5 px-2.5 py-1 rounded-full backdrop-blur-md border text-[10px] font-mono font-bold flex items-center gap-1.5 shadow-md group-hover:opacity-0 transition-opacity ${vInfo.badgeClass}`}>
+              <span className={`absolute top-2.5 right-2.5 px-2.5 py-1 rounded-full backdrop-blur-md border text-[10px] font-mono font-bold flex items-center gap-1.5 shadow-md transition-opacity ${showDownloadQualityMenu ? 'opacity-0 pointer-events-none' : 'hidden sm:flex sm:group-hover:opacity-0'} ${vInfo.badgeClass}`}>
                 <Film size={11} className={is4k ? 'text-amber-400' : 'text-violet-300'} />
                 {vInfo.label}
               </span>
             );
           })() : isGif ? (
-            <span className="absolute top-2.5 right-2.5 px-2.5 py-1 rounded-full bg-amber-950/90 backdrop-blur-md border border-amber-500/50 text-[10px] font-mono font-bold text-amber-300 flex items-center gap-1.5 group-hover:opacity-0 transition-opacity shadow-md">
+            <span className="absolute top-2.5 right-2.5 px-2.5 py-1 rounded-full bg-amber-950/90 backdrop-blur-md border border-amber-500/50 text-[10px] font-mono font-bold text-amber-300 hidden sm:flex items-center gap-1.5 sm:group-hover:opacity-0 transition-opacity shadow-md">
               <Clapperboard size={11} className="text-amber-400" />
               <span>GIF{img.width && img.height ? ` • ${img.width}×${img.height}` : ''}{img.fileSizeBytes ? ` • ${formatFileSize(img.fileSizeBytes)}` : ''}</span>
             </span>
           ) : (
-            <span className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded-full bg-black/70 backdrop-blur-md border border-white/10 text-[9px] font-mono font-bold text-emerald-400 group-hover:opacity-0 transition-opacity">
+            <span className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded-full bg-black/70 backdrop-blur-md border border-white/10 text-[9px] font-mono font-bold text-emerald-400 hidden sm:inline-block sm:group-hover:opacity-0 transition-opacity">
               {w > 0 && h > 0 ? `${w}×${h}${resLabel ? ` • ${resLabel}` : ''}` : (img.fileSizeBytes ? formatFileSize(img.fileSizeBytes) : 'Detectando...')}
             </span>
           )
         )}
 
         {!isInlinePlaying && (
-          <div className="absolute top-2.5 right-2.5 flex items-center gap-1 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div className={`absolute top-2.5 right-2.5 max-w-[calc(100%-2.5rem)] flex flex-wrap justify-end items-center gap-1 z-20 transition-opacity ${showDownloadQualityMenu ? 'opacity-100' : 'opacity-100 sm:opacity-0 sm:group-hover:opacity-100'}`}>
             {isVideo && (img.candidateId || img.id) && (
               <button
                 onClick={(e) => {
@@ -652,45 +1046,145 @@ const AlbumMediaCard: React.FC<{
             >
               <Edit2 size={13} />
             </button>
-            <button
-              onClick={async (e) => {
-                e.stopPropagation();
-                const ext = getMediaExtension(img);
-                let rawTitle = (img.title || (isVideo ? 'video' : isGif ? 'animacao' : 'foto')).trim();
-                if (rawTitle.toLowerCase().endsWith(`.${ext.toLowerCase()}`)) {
-                  rawTitle = rawTitle.slice(0, -(ext.length + 1));
-                }
-                const fname = `${rawTitle}.${ext}`;
-                const targetUrl = isVideo
-                  ? (img.videoUrl || (img as any).videoStreamUrl || img.originalUrl)
-                  : (img.rawOriginalUrl || img.originalUrl || img.previewUrl || img.thumbnailUrl);
+            <div className="relative">
+              <button
+                ref={downloadBtnRef}
+                type="button"
+                aria-expanded={isVideo ? showDownloadQualityMenu : undefined}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  if (!isVideo) {
+                    await triggerMediaDownload();
+                    return;
+                  }
+                  if (showDownloadQualityMenu) {
+                    setShowDownloadQualityMenu(false);
+                    return;
+                  }
+                  updateDownloadMenuPosition();
+                  if (downloadQualities.length > 1) {
+                    setShowDownloadQualityMenu(true);
+                    return;
+                  }
+                  setLoadingDownloadQualities(true);
+                  setShowDownloadQualityMenu(true);
+                  try {
+                    const targetUrl = img.videoUrl || (img as any).videoStreamUrl || img.originalUrl || '';
+                    const vRef = (img as any).sourcePage || album.sourceUrl || '';
+                    const resp = await fetch(
+                      `/api/video-stream-qualities?url=${encodeURIComponent(targetUrl)}&referer=${encodeURIComponent(vRef)}`
+                    );
+                    if (resp.ok) {
+                      const data = await resp.json();
+                      const quals = Array.isArray(data?.qualities) ? data.qualities : [];
+                      setDownloadQualities(quals);
+                      if (quals.length === 1) {
+                        setShowDownloadQualityMenu(false);
+                        await triggerMediaDownload(quals[0].streamUrl, quals[0].label);
+                        return;
+                      } else if (quals.length === 0) {
+                        setShowDownloadQualityMenu(false);
+                        await triggerMediaDownload();
+                        return;
+                      }
+                    } else {
+                      setShowDownloadQualityMenu(false);
+                      await triggerMediaDownload();
+                    }
+                  } catch {
+                    setShowDownloadQualityMenu(false);
+                    await triggerMediaDownload();
+                  } finally {
+                    setLoadingDownloadQualities(false);
+                  }
+                }}
+                className={`p-1.5 rounded-lg border transition-colors shadow-sm cursor-pointer ${
+                  showDownloadQualityMenu
+                    ? 'bg-brand-600 text-white border-brand-400 shadow-glow-brand'
+                    : 'bg-black/80 hover:bg-black text-slate-200 hover:text-white border-white/20'
+                }`}
+                title={isVideo ? (isEn ? "Choose Quality & Download Video" : "Escolher Qualidade e Baixar Vídeo") : isGif ? (isEn ? "Download Original Animation" : "Baixar Animação Original") : (isEn ? "Download Original Photo" : "Baixar Foto Original")}
+              >
+                {loadingDownloadQualities ? (
+                  <Loader2 size={13} className="animate-spin text-white" />
+                ) : (
+                  <Download size={13} />
+                )}
+              </button>
 
-                addNotification({
-                  type: 'info',
-                  title: isEn ? 'Downloading File' : 'Baixando Arquivo',
-                  message: `Saving "${fname}" directly to Downloads folder...`
-                });
-
-                const res = await backendApi.downloadToDisk(targetUrl || '', fname, true);
-                if (res.success) {
-                  addNotification({
-                    type: 'success',
-                    title: "Download Complete",
-                    message: `Saved successfully: "${res.filename || fname}".`
-                  });
-                } else {
-                  addNotification({
-                    type: 'error',
-                    title: isEn ? 'Download Failed' : 'Falha no Download',
-                    message: res.error || "Error saving file."
-                  });
-                }
-              }}
-              className="p-1.5 rounded-lg bg-black/80 hover:bg-black text-slate-200 hover:text-white border border-white/20 transition-colors shadow-sm cursor-pointer"
-              title={isVideo ? (isEn ? "Download Original Video" : "Baixar Vídeo Original") : isGif ? (isEn ? "Download Original Animation" : "Baixar Animação Original") : (isEn ? "Download Original Photo" : "Baixar Foto Original")}
-            >
-              <Download size={13} />
-            </button>
+              {isVideo && showDownloadQualityMenu && typeof document !== 'undefined' && createPortal(
+                <div
+                  ref={downloadMenuRef}
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    position: 'fixed',
+                    top: `${downloadMenuCoords.top}px`,
+                    left: `${downloadMenuCoords.left}px`,
+                    width: `${downloadMenuCoords.width}px`,
+                    maxWidth: 'calc(100dvw - 24px)',
+                    maxHeight: 'min(340px, calc(100dvh - 24px))',
+                  }}
+                  className="rounded-xl bg-slate-950/95 backdrop-blur-xl border border-white/15 shadow-2xl p-1.5 z-[9999] flex flex-col animate-scale-up"
+                >
+                  <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-white/10 mb-1 shrink-0">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-300">
+                      {isEn ? 'Download Quality' : 'Qualidade do Download'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowDownloadQualityMenu(false);
+                      }}
+                      className="min-w-[24px] min-h-[24px] flex items-center justify-center text-slate-400 hover:text-white rounded-md hover:bg-white/10 transition-colors cursor-pointer"
+                      aria-label={isEn ? 'Close download quality menu' : 'Fechar menu de qualidade de download'}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                  {loadingDownloadQualities ? (
+                    <div className="flex items-center justify-center gap-2 py-4 text-[11px] text-slate-300">
+                      <Loader2 size={14} className="animate-spin text-brand-400" />
+                      <span>{isEn ? 'Loading qualities...' : 'Carregando qualidades...'}</span>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-0.5 overflow-y-auto custom-scrollbar">
+                      {downloadQualities.map((q) => (
+                        <button
+                          key={`${q.height}-${q.label}`}
+                          type="button"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            setShowDownloadQualityMenu(false);
+                            await triggerMediaDownload(q.streamUrl, q.label);
+                          }}
+                          className="w-full min-h-[34px] flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left text-[11.5px] font-medium text-slate-200 hover:bg-brand-600 hover:text-white active:bg-brand-700 transition-colors cursor-pointer"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Download size={12} className="opacity-85 shrink-0" />
+                            <span>{q.label}</span>
+                          </span>
+                          {q.height >= 2160 ? (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-400/40 text-amber-300 text-[9px] font-mono font-bold">
+                              4K
+                            </span>
+                          ) : q.height >= 1440 ? (
+                            <span className="px-1.5 py-0.5 rounded bg-fuchsia-500/20 border border-fuchsia-400/40 text-fuchsia-300 text-[9px] font-mono font-bold">
+                              2K
+                            </span>
+                          ) : q.height >= 720 ? (
+                            <span className="px-1.5 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/40 text-cyan-300 text-[9px] font-mono font-bold">
+                              HD
+                            </span>
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>,
+                document.body
+              )}
+            </div>
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -742,7 +1236,7 @@ const AlbumMediaCard: React.FC<{
             className="font-semibold text-slate-100 truncate group-hover/title:text-brand-300 transition-colors cursor-pointer flex-1"
             title={isEn ? "Click to rename this item" : "Clique para renomear este item"}
           >
-            {img.title && img.title.startsWith('#') ? img.title : `#${idx + 1} ${img.title || (isVideo ? 'Vídeo' : 'Foto')}`}
+            {img.title && img.title.startsWith('#') ? img.title : `#${idx + 1} ${img.title || (isVideo ? (isEn ? 'Video' : 'Vídeo') : (isEn ? 'Photo' : 'Foto'))}`}
           </h4>
           <button
             onClick={(e) => {
@@ -750,7 +1244,7 @@ const AlbumMediaCard: React.FC<{
               handleOpenRename(img);
             }}
             className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-brand-300 hover:bg-white/10 rounded transition-all shrink-0"
-            title="Renomear item"
+            title={isEn ? "Rename item" : "Renomear item"}
           >
             <Edit2 size={11} />
           </button>
@@ -802,69 +1296,82 @@ export const AlbumDetailView: React.FC = () => {
 
     // Se o título indica 4K ou 2K mas a altura no objeto é menor (ex: atribuída como 1080p pelo scraper antigo),
     // respeita a resolução superior do título
-    if (titleH > h) {
-      h = titleH;
-      if (h === 2160) w = 3840;
-      else if (h === 1440) w = 2560;
-      else if (h === 1080) w = 1920;
-      else if (h === 720) w = 1280;
+    const isPortrait = w > 0 && h > 0 && w < h;
+    const curShort = isPortrait ? w : h;
+    if (titleH > curShort) {
+      if (isPortrait) {
+        w = titleH;
+        if (w === 2160) h = 3840;
+        else if (w === 1440) h = 2560;
+        else if (w === 1080) h = 1920;
+        else if (w === 720) h = 1280;
+      } else {
+        h = titleH;
+        if (h === 2160) w = 3840;
+        else if (h === 1440) w = 2560;
+        else if (h === 1080) w = 1920;
+        else if (h === 720) w = 1280;
+      }
     }
 
+    const shortSide = (w > 0 && h > 0) ? Math.min(w, h) : h;
+    const longSide = (w > 0 && h > 0) ? Math.max(w, h) : w;
+    const actualDims = (w > 0 && h > 0) ? `${w}×${h}` : null;
     const is60 = t.includes('60fps') || t.includes('60p') || t.includes('60 fps');
 
     // 4K UHD (2160p)
-    if (h >= 2160 || w >= 3840) {
+    if (shortSide >= 2160 || longSide >= 3840) {
       return {
         label: is60 ? '4K 60fps' : '4K UHD',
-        dimensions: '3840×2160',
+        dimensions: actualDims || '3840×2160',
         badgeClass: 'bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-amber-900/30'
       };
     }
     // 2K QHD (1440p)
-    if (h >= 1440 || w >= 2560) {
+    if (shortSide >= 1440 || longSide >= 2560) {
       return {
         label: is60 ? '2K 60fps' : '2K QHD',
-        dimensions: '2560×1440',
+        dimensions: actualDims || '2560×1440',
         badgeClass: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/50 shadow-indigo-900/30'
       };
     }
     // 1080p Full HD
-    if (h >= 1080 || w >= 1920) {
+    if (shortSide >= 1080 || longSide >= 1920) {
       return {
         label: is60 ? '1080p60' : '1080p FHD',
-        dimensions: '1920×1080',
+        dimensions: actualDims || '1920×1080',
         badgeClass: 'bg-violet-900/90 text-violet-200 border-violet-400/50 shadow-violet-900/30'
       };
     }
     // 720p HD
-    if (h >= 720 || w >= 1280) {
+    if (shortSide >= 720 || longSide >= 1280) {
       return {
         label: is60 ? '720p60' : '720p HD',
-        dimensions: '1280×720',
+        dimensions: actualDims || '1280×720',
         badgeClass: 'bg-blue-900/80 text-blue-200 border-blue-400/40'
       };
     }
     // 480p SD
-    if (h >= 480) {
+    if (shortSide >= 480) {
       return {
         label: '480p SD',
-        dimensions: '854×480',
+        dimensions: actualDims || '854×480',
         badgeClass: 'bg-slate-800 text-slate-300 border-slate-600/40'
       };
     }
     // 360p
-    if (h >= 360) {
+    if (shortSide >= 360) {
       return {
         label: '360p',
-        dimensions: '640×360',
+        dimensions: actualDims || '640×360',
         badgeClass: 'bg-slate-800 text-slate-300 border-slate-600/40'
       };
     }
     // 240p
-    if (h >= 240) {
+    if (shortSide >= 240) {
       return {
         label: '240p',
-        dimensions: '426×240',
+        dimensions: actualDims || '426×240',
         badgeClass: 'bg-slate-800 text-slate-300 border-slate-600/40'
       };
     }
@@ -1076,6 +1583,37 @@ export const AlbumDetailView: React.FC = () => {
       const filenameStem = title.toLowerCase().endsWith(`.${ext}`) ? title.slice(0, -(ext.length + 1)) : title;
       const fname = `${filenameStem}.${ext}`;
       const targetUrl = isVid ? (img.rawOriginalUrl || img.videoUrl || img.originalUrl) : (img.rawOriginalUrl || img.originalUrl || img.previewUrl || img.thumbnailUrl);
+
+      // Native browser download
+      try {
+        let bUrl = '';
+        if (isVid) {
+          if (targetUrl && targetUrl.includes('/api/proxy-video-stream')) {
+            const u = new URL(targetUrl, window.location.origin);
+            u.searchParams.set('download', 'true');
+            u.searchParams.set('filename', fname);
+            bUrl = `${u.pathname}${u.search}`;
+          } else if (targetUrl) {
+            const ref = (img as any).sourcePage || album.sourceUrl || '';
+            const refParam = ref ? `&referer=${encodeURIComponent(ref)}` : '';
+            bUrl = `/api/proxy-video-stream?url=${encodeURIComponent(targetUrl)}${refParam}&download=true&filename=${encodeURIComponent(fname)}`;
+          }
+        } else if (targetUrl) {
+          const ref = (img as any).sourcePage || album.sourceUrl || '';
+          const refParam = ref ? `&referer=${encodeURIComponent(ref)}` : '';
+          bUrl = `/api/download-image?url=${encodeURIComponent(targetUrl)}&filename=${encodeURIComponent(fname)}${refParam}`;
+        }
+        if (bUrl) {
+          const link = document.createElement('a');
+          link.href = bUrl;
+          link.setAttribute('download', fname);
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+        }
+      } catch (eB) {
+        console.warn('Batch browser download error:', eB);
+      }
 
       const res = await backendApi.downloadToDisk(targetUrl || '', fname, idx === selectedImages.length - 1);
       if (res.success) successCount++;
@@ -1395,7 +1933,7 @@ export const AlbumDetailView: React.FC = () => {
                 onClick={handleSaveTitle}
                 className="px-3.5 py-1.5 rounded-xl bg-brand-600 text-white text-xs font-bold shrink-0 cursor-pointer"
               >
-                Salvar
+                {isEn ? 'Save' : 'Salvar'}
               </button>
             </div>
           ) : (
@@ -1848,7 +2386,7 @@ export const AlbumDetailView: React.FC = () => {
                   onClick={() => setIsConfirmingDeleteAlbum(false)}
                   className="flex-1 py-2.5 rounded-xl bg-surface hover:bg-surface-elevated text-slate-300 text-xs font-semibold border border-border transition-colors"
                 >
-                  Cancelar
+                  {isEn ? 'Cancel' : 'Cancelar'}
                 </button>
                 <button
                   type="button"
@@ -1859,7 +2397,7 @@ export const AlbumDetailView: React.FC = () => {
                   }}
                   className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-lg shadow-rose-600/30 transition-colors"
                 >
-                  Sim, Excluir
+                  {isEn ? 'Yes, Delete' : 'Sim, Excluir'}
                 </button>
               </div>
             </div>

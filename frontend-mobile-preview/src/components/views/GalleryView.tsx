@@ -612,7 +612,7 @@ export const GalleryView: React.FC = () => {
                       <button
                         type="button"
                         onClick={async () => {
-                          if (window.confirm(t.deleteFolderConfirm ? t.deleteFolderConfirm.replace('{folder}', folder.name) : `Tem certeza que deseja excluir a pasta "${folder.name}"? Os álbuns dentro dela serão mantidos e movidos para "Geral".`)) {
+                          if (window.confirm(t.deleteFolderConfirm ? t.deleteFolderConfirm.replace('{folder}', folder.name) : (isEn ? `Are you sure you want to delete folder "${folder.name}"? The albums inside will be safely moved to "General".` : `Tem certeza que deseja excluir a pasta "${folder.name}"? Os álbuns dentro dela serão mantidos e movidos para "Geral".`))) {
                             await deleteAlbumFolder(folder.name);
                           }
                           setActiveFolderMenuName(null);
@@ -1555,14 +1555,14 @@ export const GalleryView: React.FC = () => {
                     onClick={() => setIsUploadModalOpen(false)}
                     className="px-4 py-2.5 rounded-xl bg-surface hover:bg-surface-elevated text-slate-300 text-xs font-semibold border border-border transition-colors"
                   >
-                    Cancelar
+                    {isEn ? 'Cancel' : 'Cancelar'}
                   </button>
                   <button
                     type="submit"
                     disabled={isUploadingAlbum || !uploadTitle.trim() || uploadFiles.length === 0}
                     className="px-5 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 disabled:opacity-50 text-white text-xs font-bold transition-all shadow-glow-brand flex items-center gap-1.5"
                   >
-                    {isUploadingAlbum ? 'Enviando Fotos...' : 'Criar Álbum Agora'}
+                    {isUploadingAlbum ? (isEn ? 'Uploading Photos...' : 'Enviando Fotos...') : (isEn ? 'Create Album Now' : 'Criar Álbum Agora')}
                   </button>
                 </div>
               </form>
@@ -1588,7 +1588,11 @@ export const GalleryView: React.FC = () => {
               <div>
                 <h4 className="font-bold text-base text-white">{isEn ? "Delete Album?" : "Excluir Álbum?"}</h4>
                 <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
-                  Tem certeza que deseja apagar o álbum <span className="font-semibold text-slate-200">"{albumToDelete.title}"</span>? O álbum será movido para a lixeira.
+                  {isEn ? (
+                    <>Are you sure you want to delete album <span className="font-semibold text-slate-200">"{albumToDelete.title}"</span>? The album will be moved to trash.</>
+                  ) : (
+                    <>Tem certeza que deseja apagar o álbum <span className="font-semibold text-slate-200">"{albumToDelete.title}"</span>? O álbum será movido para a lixeira.</>
+                  )}
                 </p>
               </div>
               <div className="flex items-center gap-2.5 pt-2">
@@ -1597,7 +1601,7 @@ export const GalleryView: React.FC = () => {
                   onClick={() => setAlbumToDelete(null)}
                   className="flex-1 py-2.5 rounded-xl bg-surface hover:bg-surface-elevated text-slate-300 text-xs font-semibold border border-border transition-colors"
                 >
-                  Cancelar
+                  {isEn ? "Cancel" : "Cancelar"}
                 </button>
                 <button
                   type="button"
@@ -1632,7 +1636,11 @@ export const GalleryView: React.FC = () => {
               <div>
                 <h4 className="font-bold text-base text-white">{isEn ? `Delete ${selectedAlbumIds.length} Albums?` : `Excluir ${selectedAlbumIds.length} Álbuns?`}</h4>
                 <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
-                  Tem certeza que deseja apagar os <span className="font-semibold text-rose-300">{selectedAlbumIds.length}</span> álbuns selecionados? Todos serão movidos para a lixeira.
+                  {isEn ? (
+                    <>Are you sure you want to delete the <span className="font-semibold text-rose-300">{selectedAlbumIds.length}</span> selected albums? All will be moved to trash.</>
+                  ) : (
+                    <>Tem certeza que deseja apagar os <span className="font-semibold text-rose-300">{selectedAlbumIds.length}</span> álbuns selecionados? Todos serão movidos para a lixeira.</>
+                  )}
                 </p>
               </div>
               <div className="flex items-center gap-2.5 pt-2">
@@ -1641,7 +1649,7 @@ export const GalleryView: React.FC = () => {
                   onClick={() => setIsConfirmingBatchDelete(false)}
                   className="flex-1 py-2.5 rounded-xl bg-surface hover:bg-surface-elevated text-slate-300 text-xs font-semibold border border-border transition-colors"
                 >
-                  Cancelar
+                  {isEn ? "Cancel" : "Cancelar"}
                 </button>
                 <button
                   type="button"
@@ -1698,7 +1706,7 @@ export const GalleryView: React.FC = () => {
                       setActiveAlbumFolderModal(null);
                     }
                   }}
-                  placeholder="Ex: Viagens, Favoritas..."
+                  placeholder={isEn ? "Ex: Travel, Favorites..." : "Ex: Viagens, Favoritas..."}
                   className="w-full h-10 px-3.5 rounded-xl bg-surface-elevated border border-border text-slate-100 text-xs outline-none focus:border-purple-500"
                 />
               </div>
@@ -1708,7 +1716,7 @@ export const GalleryView: React.FC = () => {
                   onClick={() => setActiveAlbumFolderModal(null)}
                   className="flex-1 py-2.5 rounded-xl bg-surface hover:bg-surface-elevated text-slate-300 text-xs font-semibold border border-border transition-colors"
                 >
-                  Cancelar
+                  {isEn ? 'Cancel' : 'Cancelar'}
                 </button>
                 <button
                   type="button"
@@ -1772,7 +1780,7 @@ export const GalleryView: React.FC = () => {
                   onClick={() => setActiveAlbumFolderModal(null)}
                   className="flex-1 py-2.5 rounded-xl bg-surface hover:bg-surface-elevated text-slate-300 text-xs font-semibold border border-border transition-colors"
                 >
-                  Cancelar
+                  {isEn ? 'Cancel' : 'Cancelar'}
                 </button>
                 <button
                   type="button"
@@ -1785,7 +1793,7 @@ export const GalleryView: React.FC = () => {
                   }}
                   className="flex-1 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 disabled:opacity-50 text-white text-xs font-bold shadow-lg shadow-brand-600/30 transition-colors"
                 >
-                  Salvar
+                  {isEn ? 'Save' : 'Salvar'}
                 </button>
               </div>
             </div>
@@ -1823,11 +1831,11 @@ export const GalleryView: React.FC = () => {
                   value={targetMoveFolder}
                   onChange={e => setTargetMoveFolder(e.target.value)}
                   list="gallery-move-folder-options"
-                  placeholder="Geral"
+                  placeholder={isEn ? "General" : "Geral"}
                   className="w-full h-10 px-3.5 rounded-xl bg-surface-elevated border border-border text-slate-100 text-xs outline-none focus:border-violet-500"
                 />
                 <datalist id="gallery-move-folder-options">
-                  <option value="Geral" />
+                  <option value={isEn ? "General" : "Geral"} />
                   {albumFolders.map(f => (
                     <option key={f.name} value={f.name} />
                   ))}
@@ -1839,14 +1847,14 @@ export const GalleryView: React.FC = () => {
                   onClick={() => setActiveAlbumFolderModal(null)}
                   className="flex-1 py-2.5 rounded-xl bg-surface hover:bg-surface-elevated text-slate-300 text-xs font-semibold border border-border transition-colors"
                 >
-                  Cancelar
+                  {isEn ? 'Cancel' : 'Cancelar'}
                 </button>
                 <button
                   type="button"
                   onClick={async () => {
                     const ids = activeAlbumFolderModal.albumIds || (activeAlbumFolderModal.albumId ? [activeAlbumFolderModal.albumId] : []);
                     if (ids.length > 0) {
-                      await moveAlbumsToFolder(ids, targetMoveFolder.trim() || 'Geral');
+                      await moveAlbumsToFolder(ids, targetMoveFolder.trim() || (isEn ? 'General' : 'Geral'));
                       clearSelectedAlbums();
                       setActiveAlbumFolderModal(null);
                       setIsSelectionMode(false);
@@ -1854,7 +1862,7 @@ export const GalleryView: React.FC = () => {
                   }}
                   className="flex-1 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold shadow-lg shadow-violet-600/30 transition-colors"
                 >
-                  Confirmar e Mover
+                  {isEn ? 'Confirm and Move' : 'Confirmar e Mover'}
                 </button>
               </div>
             </div>

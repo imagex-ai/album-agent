@@ -1,0 +1,68 @@
+PROPRIETARY SOFTWARE LICENSE / TERMO DE SOFTWARE PROPRIETÁRIO
+
+Copyright (c) 2026 IMAGEX. Todos os direitos reservados. / All rights reserved.
+
+===============================================================================
+[PORTUGUÊS]
+===============================================================================
+
+Este software e seus arquivos associados de código-fonte, arquitetura, design 
+e documentação são propriedade exclusiva e confidencial de IMAGEX.
+
+O código-fonte é disponibilizado publicamente neste repositório exclusivamente 
+para fins de visualização, auditoria, transparência e estudo pessoal.
+
+1. É ESTRITAMENTE PROIBIDO:
+   a) Copiar, clonar, reproduzir ou redistribuir total ou parcialmente o código-fonte 
+      ou seus binários sem prévia autorização expressa e por escrito de IMAGEX.
+   b) Modificar, adaptar, traduzir ou criar obras derivadas com base neste software.
+   c) Utilizar este software ou partes de seu código para fins comerciais, lucrativos 
+      ou redistribuição sob outro nome, marca ou autoria.
+   d) Remover, alterar ou ocultar qualquer aviso de direitos autorais ou marca 
+      registrada contida neste repositório ou no software compilado.
+
+2. PROTEÇÃO LEGAL:
+   Este programa de computador é protegido pela legislação de propriedade 
+   intelectual brasileira (Lei Federal nº 9.610/1998 - Direitos Autorais e 
+   Lei Federal nº 9.609/1998 - Propriedade Intelectual de Programa de Computador) 
+   e por tratados internacionais de direitos autorais (Convenção de Berna).
+   Qualquer violação sujeitará o infrator às sanções civis e criminais cabíveis.
+
+3. ISENÇÃO DE RESPONSABILIDADE:
+   O SOFTWARE É FORNECIDO "NO ESTADO EM QUE SE ENCONTRA" (AS IS), SEM GARANTIAS 
+   DE QUALQUER TIPO, EXPRESSAS OU IMPLÍCITAS. EM NENHUMA HIPÓTESE O AUTOR OU OS 
+   DETENTORES DOS DIREITOS AUTORAIS SERÃO RESPONSÁVEIS POR QUAISQUER RECLAMAÇÕES, 
+   DANOS OU OUTRAS RESPONSABILIDADES DECORRENTES DO USO DESTE SOFTWARE.
+
+===============================================================================
+[ENGLISH]
+===============================================================================
+
+This software and its associated source code, architecture, design, and 
+documentation files are the exclusive and proprietary property of IMAGEX.
+
+The source code is made publicly available in this repository strictly for 
+inspection, audit, transparency, and personal study purposes.
+
+1. RESTRICTIONS:
+   a) Copying, cloning, reproducing, or redistributing this software, its 
+      source code, or its compiled binaries, in whole or in part, without prior 
+      express written permission from IMAGEX, is strictly prohibited.
+   b) Modifying, adapting, translating, or creating derivative works based 
+      on this software is strictly prohibited.
+   c) Using this software or any portion of its code for commercial purposes, 
+      for-profit operations, or rebranding under another entity is prohibited.
+   d) Removing, altering, or obscuring any copyright notice or proprietary 
+      markings contained in this repository or compiled builds is prohibited.
+
+2. LEGAL PROTECTION:
+   This software is protected by applicable international copyright treaties 
+   (Berne Convention) and software intellectual property laws. Unauthorized 
+   use or plagiarism constitutes copyright infringement punishable by law.
+
+3. DISCLAIMER:
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR 
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
+   FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER 
+   LIABILITY ARISING FROM OR IN CONNECTION WITH THE SOFTWARE.

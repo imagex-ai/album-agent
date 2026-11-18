@@ -41,7 +41,7 @@ export const ContactSheetModal: React.FC = () => {
           </head>
           <body>
             <h1>${album.title}</h1>
-            <p>IMAGEX.AI MASTER SHEET &bull; ${new Date().toLocaleDateString()} &bull; ${album.resolvedOriginalCount} Original ASSETS</p>
+            <p>IMAGEX MASTER SHEET &bull; ${new Date().toLocaleDateString()} &bull; ${album.resolvedOriginalCount} Original ASSETS</p>
             <div class="grid">
               ${images.map((img, idx) => `
                 <div class="img-container">
@@ -102,7 +102,7 @@ export const ContactSheetModal: React.FC = () => {
                     {album.title}
                   </h4>
                   <p className="text-[9px] text-zinc-600 font-mono truncate">
-                    IMAGEX.AI MASTER SHEET • {new Date().toLocaleDateString()} • {album.resolvedOriginalCount} Original ASSETS
+                    IMAGEX MASTER SHEET • {new Date().toLocaleDateString()} • {album.resolvedOriginalCount} Original ASSETS
                   </p>
                 </div>
                 <span className="text-[9px] sm:text-[10px] font-black font-mono px-2 py-0.5 border border-zinc-900 shrink-0">

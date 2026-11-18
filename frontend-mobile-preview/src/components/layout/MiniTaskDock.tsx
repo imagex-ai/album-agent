@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   X,
   ExternalLink,
@@ -112,11 +112,6 @@ export const MiniTaskDock: React.FC = () => {
     }
   }
 
-  // If there are no tasks in dock, do not render dock
-  if (dockJobs.length === 0) {
-    return null;
-  }
-
   // Determine currently focused job
   const focusedJob: ExtractionJob | null =
     (selectedJobId ? dockJobs.find(j => j.id === selectedJobId) : null) ||
@@ -127,6 +122,101 @@ export const MiniTaskDock: React.FC = () => {
     failedOrCancelledJobs[0] ||
     dockJobs[0] ||
     null;
+
+  const isDockVisible = dockJobs.length > 0 && focusedJob !== null;
+  const mobilePillRef = useRef<HTMLDivElement | null>(null);
+  const desktopPillRef = useRef<HTMLDivElement | null>(null);
+  const expandedDockRef = useRef<HTMLDivElement | null>(null);
+
+  // Publish --mini-task-dock-height for FloatingMiniPlayer safe clearance before any early return
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+
+    const notifyDockHeight = (pxVal: number) => {
+      const valStr = `${pxVal}px`;
+      try {
+        document.documentElement.style.setProperty('--mini-task-dock-height', valStr);
+      } catch {
+        // Safe fallback in non-standard environments
+      }
+      try {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('imagex:mini-task-dock-height', {
+              detail: { height: pxVal },
+            })
+          );
+        }
+      } catch {
+        // Safe event fallback
+      }
+    };
+
+    if (!isDockVisible) {
+      notifyDockHeight(0);
+      return () => {
+        notifyDockHeight(0);
+      };
+    }
+
+    const updateHeight = () => {
+      const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+      let targetEl: HTMLElement | null = null;
+      if (isDockMinimized) {
+        targetEl = isMobile ? mobilePillRef.current : desktopPillRef.current;
+      } else {
+        targetEl = expandedDockRef.current;
+      }
+
+      if (targetEl && typeof window !== 'undefined') {
+        const rect = targetEl.getBoundingClientRect();
+        if (rect && rect.height > 0) {
+          const heightFromBottom = Math.ceil(window.innerHeight - rect.top + 8);
+          notifyDockHeight(Math.max(0, heightFromBottom));
+          return;
+        }
+      }
+
+      if (isDockMinimized) {
+        notifyDockHeight(isMobile ? 64 : 52);
+      } else {
+        notifyDockHeight(180);
+      }
+    };
+
+    updateHeight();
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      try {
+        ro = new ResizeObserver(() => {
+          updateHeight();
+        });
+        if (mobilePillRef.current) ro.observe(mobilePillRef.current);
+        if (desktopPillRef.current) ro.observe(desktopPillRef.current);
+        if (expandedDockRef.current) ro.observe(expandedDockRef.current);
+      } catch {
+        ro = null;
+      }
+    }
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('resize', updateHeight);
+    }
+
+    return () => {
+      if (ro) ro.disconnect();
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('resize', updateHeight);
+      }
+      notifyDockHeight(0);
+    };
+  }, [isDockVisible, isDockMinimized]);
+
+  // If there are no tasks in dock, do not render dock
+  if (dockJobs.length === 0) {
+    return null;
+  }
 
   if (!focusedJob) return null;
 
@@ -147,6 +237,7 @@ export const MiniTaskDock: React.FC = () => {
       <>
         {/* MOBILE: Circular floating button only (< 768px) */}
         <div
+          ref={mobilePillRef}
           className={`md:hidden fixed right-3.5 z-40 ${getTaskDockAnimationClass(settings.taskDockAnimation || 'slide-up', settings.disableAllAnimations)} ${getSpeedClass(settings.animationSpeed || 'normal')} ${getDistanceClass(settings.animationDistance || 'normal')}`}
           style={{ bottom: 'max(0.75rem, env(safe-area-inset-bottom, 0.75rem))' }}
         >
@@ -177,7 +268,10 @@ export const MiniTaskDock: React.FC = () => {
         </div>
 
         {/* DESKTOP: Sleek horizontal pill (>= 768px) */}
-        <div className={`hidden md:flex fixed bottom-4 right-4 z-40 ${getTaskDockAnimationClass(settings.taskDockAnimation || 'slide-up', settings.disableAllAnimations)} ${getSpeedClass(settings.animationSpeed || 'normal')} ${getDistanceClass(settings.animationDistance || 'normal')}`}>
+        <div
+          ref={desktopPillRef}
+          className={`hidden md:flex fixed bottom-4 right-4 z-40 ${getTaskDockAnimationClass(settings.taskDockAnimation || 'slide-up', settings.disableAllAnimations)} ${getSpeedClass(settings.animationSpeed || 'normal')} ${getDistanceClass(settings.animationDistance || 'normal')}`}
+        >
           <button
             onClick={() => setDockMinimized(false)}
             className="glass-panel-elevated rounded-full py-2.5 px-4 flex items-center gap-2.5 border border-brand-500/40 shadow-2xl bg-surface/95 backdrop-blur-xl hover:border-brand-400 hover:scale-105 active:scale-95 transition-all text-xs font-semibold text-slate-200 group"
@@ -216,6 +310,7 @@ export const MiniTaskDock: React.FC = () => {
   // 2. Expanded View: Sleek Modern Tabbed Dock
   return (
     <div
+      ref={expandedDockRef}
       className={`fixed left-3 right-3 md:left-68 md:right-4 md:bottom-4 z-40 ${getTaskDockAnimationClass(settings.taskDockAnimation || 'slide-up', settings.disableAllAnimations)} ${getSpeedClass(settings.animationSpeed || 'normal')} ${getDistanceClass(settings.animationDistance || 'normal')}`}
       style={{ bottom: 'max(0.75rem, env(safe-area-inset-bottom, 0.75rem))' }}
     >

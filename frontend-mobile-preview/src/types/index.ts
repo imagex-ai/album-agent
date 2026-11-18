@@ -1,10 +1,11 @@
-export type ThemeMode = 'dark-slate' | 'deep-oled' | 'clean-light' | 'cyber-studio';
+export type ThemeMode = 'dark-slate' | 'deep-oled' | 'clean-light' | 'cyber-studio' | 'hub-violet';
 export type AccentColor = 'blue' | 'emerald' | 'amber' | 'violet' | 'rose' | 'cyan';
 export type Language = 'pt-BR' | 'en-US';
 
 export type ViewId =
   | 'home'
   | 'extractor'
+  | 'profile-hub'
   | 'web-video-scraper'
   | 'multi-album'
   | 'batch-queue'
@@ -19,7 +20,12 @@ export type ViewId =
   | 'job-history'
   | 'realtime-logs'
   | 'performance-metrics'
-  | 'settings';
+  | 'settings'
+  | 'timeline-preview'
+  | 'timeline-history'
+  | 'timeline-playlists'
+  | 'timeline-favorites'
+  | 'timeline-liked';
 
 export type GalleryViewMode =
   | 'grid-xl'
@@ -59,6 +65,7 @@ export interface ImageItem {
   title: string;
   rawOriginalUrl?: string;
   rawThumbnailUrl?: string;
+  pageUrl?: string;
   width: number;
   height: number;
   fileSizeBytes: number;
@@ -110,6 +117,8 @@ export interface ImageItem {
 export type MediaExtractFilter = 'all' | 'images' | 'videos' | 'gifs';
 
 export interface Album {
+  /** An in-memory preview, not a persisted album. */
+  isTransient?: boolean;
   id: string;
   title: string;
   description?: string;
@@ -344,6 +353,7 @@ export interface AppSettings {
   accent: AccentColor;
   language: Language;
   soundEnabled: boolean;
+  automaticErrorReports?: boolean;
   ambientSoundVolume: number;
   ambientSoundType: 'none' | 'lofi' | 'rain' | 'whitenoise';
   defaultFilenamePattern: string;
@@ -389,6 +399,15 @@ export interface VideoHighlight {
   reason?: string;
 }
 
+export interface VideoQualityOption {
+  height: number;
+  label: string;
+  streamUrl?: string;
+  bitrate?: number;
+  levelIndex?: number;
+  formatId?: string;
+}
+
 export interface VideoItem {
   id: string;
   title: string;
@@ -420,6 +439,14 @@ export interface VideoItem {
   highlights?: VideoHighlight[];
   streamStatus?: 'ok' | 'expired' | 'deleted_on_source';
   streamError?: string;
+  qualities?: VideoQualityOption[];
+  preferredQuality?: string;
+  duration?: string;
+  resolution?: string;
+  views?: string;
+  uploader?: string;
+  performer?: string;
+  artistSlug?: string;
 }
 
 export interface StorageAnalytics {
@@ -529,6 +556,9 @@ export interface MultiAlbumPreviewImage {
   format: string;
   media_type: 'image' | 'video' | 'gif';
   is_animated: boolean;
+  animation_checked?: boolean;
+  source_media_type?: 'image' | 'video' | 'gif';
+  video_stream_url?: string | null;
   title: string;
   filename?: string;
 }

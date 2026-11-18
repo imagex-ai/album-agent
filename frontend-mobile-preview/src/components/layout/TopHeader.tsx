@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Search, Bell, Menu, Command, Bot, Folder, X, Languages, Maximize2, Minimize2 } from 'lucide-react';
-import { toggleDesktopFullscreen, restoreDesktopWindow } from '../../services/desktopService';
+import { toggleAppFullscreen, isAppFullscreen, isDesktopApp, getDesktopFullscreen, toggleDesktopFullscreen, desktopFullscreenEvent } from '../../services/desktopService';
 import { useAppStore } from '../../store/useAppStore';
 import { translations } from '../../i18n/translations';
+import { updateNeedsAttention } from '../../services/updateAlerts';
 
 interface TopHeaderProps {
   onOpenMobileMenu?: () => void;
@@ -11,6 +12,8 @@ interface TopHeaderProps {
 export const TopHeader: React.FC<TopHeaderProps> = ({ onOpenMobileMenu }) => {
   const {
     settings,
+    updateInfo,
+    dismissedUpdateVersion,
     updateSettings,
     notifications,
     setNotificationDrawerOpen,
@@ -25,8 +28,37 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ onOpenMobileMenu }) => {
   } = useAppStore();
 
   const t = translations[settings.language].header;
+  const isEn = settings.language === 'en-US';
+  const updateAttention = updateNeedsAttention(updateInfo, dismissedUpdateVersion);
   const unreadCount = notifications.filter(n => !n.isRead).length;
   const currentAlbum = currentView === 'album-detail' ? albums.find(a => a.id === activeAlbumId) : null;
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    const syncFullscreenState = async () => {
+      const native = await getDesktopFullscreen();
+      if (mounted) setIsFullscreen(native === null ? isAppFullscreen() : native);
+    };
+
+    syncFullscreenState();
+    document.addEventListener('fullscreenchange', syncFullscreenState);
+    document.addEventListener('webkitfullscreenchange', syncFullscreenState);
+    document.addEventListener('mozfullscreenchange', syncFullscreenState);
+    document.addEventListener('MSFullscreenChange', syncFullscreenState);
+    window.addEventListener(desktopFullscreenEvent, syncFullscreenState);
+    window.addEventListener('pywebviewready', syncFullscreenState);
+
+    return () => {
+      mounted = false;
+      document.removeEventListener('fullscreenchange', syncFullscreenState);
+      document.removeEventListener('webkitfullscreenchange', syncFullscreenState);
+      document.removeEventListener('mozfullscreenchange', syncFullscreenState);
+      document.removeEventListener('MSFullscreenChange', syncFullscreenState);
+      window.removeEventListener(desktopFullscreenEvent, syncFullscreenState);
+      window.removeEventListener('pywebviewready', syncFullscreenState);
+    };
+  }, []);
 
   return (
     <header className="h-14 border-b border-border glass-panel px-3 sm:px-4 flex items-center justify-between gap-3 select-none relative z-20 max-w-full">
@@ -35,11 +67,12 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ onOpenMobileMenu }) => {
         {onOpenMobileMenu && (
           <button
             onClick={onOpenMobileMenu}
-            className="md:hidden p-2 rounded-xl bg-surface-elevated border border-border text-slate-300 hover:text-white shrink-0 active:scale-95 transition-transform"
-            title={t.navigationMenu || 'Menu de Navegação'}
-            aria-label={t.openMenu || 'Abrir Menu'}
+            className="md:hidden relative p-2 rounded-xl bg-surface-elevated border border-border text-slate-300 hover:text-white shrink-0 active:scale-95 transition-transform"
+            title={t.navigationMenu || (isEn ? 'Navigation Menu' : 'Menu de Navegação')}
+            aria-label={`${t.openMenu || (isEn ? 'Open Menu' : 'Abrir Menu')}${updateAttention ? `: ${translations[settings.language].updater.modalTitle}` : ''}`}
           >
             <Menu size={18} />
+            {updateAttention && <span aria-hidden="true" className="absolute top-1 right-1 w-2 h-2 rounded-full bg-amber-400 ring-2 ring-slate-900" />}
           </button>
         )}
 
@@ -52,21 +85,21 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ onOpenMobileMenu }) => {
                 navigateToView('gallery');
               }}
               className="hover:text-brand-300 transition-colors"
-              title={t.goToAllAlbums || 'Ir para todos os álbuns'}
+              title={t.goToAllAlbums || (isEn ? 'Go to all albums' : 'Ir para todos os álbuns')}
             >
-              {t.allAlbums || 'Albums'}
+              {t.allAlbums || (isEn ? 'Albums' : 'Álbuns')}
             </button>
             <span className="text-slate-600">/</span>
             <button
               onClick={() => {
-                setActiveAlbumFolder(currentAlbum.folder || 'Geral');
+                setActiveAlbumFolder(currentAlbum.folder || (isEn ? 'General' : 'Geral'));
                 navigateToView('gallery');
               }}
               className="text-violet-400 hover:text-violet-200 font-semibold flex items-center gap-1 cursor-pointer"
-              title={(t.viewFolderAlbums || 'Ver todos os álbuns da pasta "{folder}"').replace('{folder}', currentAlbum.folder || 'Geral')}
+              title={(t.viewFolderAlbums || (isEn ? 'View all albums in folder "{folder}"' : 'Ver todos os álbuns da pasta "{folder}"')).replace('{folder}', currentAlbum.folder || (isEn ? 'General' : 'Geral'))}
             >
               <Folder size={12} />
-              <span>{currentAlbum.folder || 'Geral'}</span>
+              <span>{currentAlbum.folder || (isEn ? 'General' : 'Geral')}</span>
             </button>
           </div>
         ) : activeAlbumFolder && currentView === 'gallery' ? (
@@ -107,13 +140,25 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ onOpenMobileMenu }) => {
       <div className="flex items-center gap-2 shrink-0">
         {/* Toggle Window Fullscreen / Restore Button */}
         <button
-          onClick={() => toggleDesktopFullscreen()}
+          onClick={() => isDesktopApp() ? toggleDesktopFullscreen() : toggleAppFullscreen(isFullscreen, setIsFullscreen)}
           className="px-2.5 py-1.5 rounded-xl bg-surface-elevated border border-border text-slate-300 hover:text-white hover:border-brand-500/40 transition-all flex items-center gap-1.5 active:scale-95 shadow-sm cursor-pointer"
-          title={settings.language === "en-US" ? "Toggle Fullscreen / Normal Window (F11)" : "Alternar Tela Cheia / Janela Normal (F11)"}
-          aria-label={settings.language === "en-US" ? "Toggle Fullscreen" : "Alternar Tela Cheia"}
+          title={
+            isFullscreen
+              ? (isEn ? "Exit Fullscreen (Esc / F11)" : "Sair da Tela Cheia (Esc / F11)")
+              : (isEn ? "Toggle Fullscreen / Normal Window (F11)" : "Alternar Tela Cheia / Janela Normal (F11)")
+          }
+          aria-label={isEn ? "Toggle Fullscreen" : "Alternar Tela Cheia"}
         >
-          <Maximize2 size={14} className="text-brand-400" />
-          <span className="hidden xl:inline text-[11px] font-semibold text-slate-300">{settings.language === "en-US" ? "Fullscreen" : "Tela Cheia"}</span>
+          {isFullscreen ? (
+            <Minimize2 size={14} className="text-amber-400" />
+          ) : (
+            <Maximize2 size={14} className="text-brand-400" />
+          )}
+          <span className="hidden xl:inline text-[11px] font-semibold text-slate-300">
+            {isFullscreen
+              ? (isEn ? "Exit Fullscreen" : "Sair Tela Cheia")
+              : (isEn ? "Fullscreen" : "Tela Cheia")}
+          </span>
         </button>
         {/* Language Toggle Button */}
         <button

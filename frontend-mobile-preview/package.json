@@ -1,7 +1,7 @@
 {
-  "name": "imagex-ai-frontend",
+  "name": "imagex-frontend",
   "private": true,
-  "version": "5.6.1",
+  "version": "5.7.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@sentry/browser": "11.14.0",
     "canvas-confetti": "^1.9.3",
     "clsx": "^2.1.1",
     "hls.js": "^1.7.3",
@@ -27,7 +28,8 @@
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.14",
+    "terser": "^5.51.2",
     "typescript": "^5.6.3",
-    "vite": "^5.4.10"
+    "vite": "^6.4.4"
   }
 }

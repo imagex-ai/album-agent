@@ -99,6 +99,14 @@ export const ExtractorView: React.FC = () => {
       l.includes('video-') ||
       l.includes('/video/') ||
       l.includes('/watch') ||
+      l.includes('/reel/') ||
+      l.includes('/reels/') ||
+      l.includes('/shorts/') ||
+      l.includes('instagram.com/p/') ||
+      l.includes('instagram.com/tv/') ||
+      l.includes('instagr.am/') ||
+      l.includes('youtu.be/') ||
+      l.includes('tiktok.com/') ||
       l.includes('.mp4') ||
       l.includes('.m3u8') ||
       l.includes('.webm')
@@ -184,13 +192,13 @@ export const ExtractorView: React.FC = () => {
         const jobId = res.session_id;
         const newJob = {
           id: jobId,
-          title: `Extração: ${new URL(targetUrl).hostname}`,
+          title: `${isEn ? 'Extraction' : 'Extração'}: ${new URL(targetUrl).hostname}`,
           url: targetUrl,
           status: 'active' as const,
           mode: activeAiEngine as any || mode,
           aiModel: `${settings.geminiModel || 'gemini-3.7-flash'} + ${settings.aiModel}`,
           progressPercent: 10,
-          currentStage: `Iniciando ${activeAiEngine || mode}...`,
+          currentStage: isEn ? `Starting ${activeAiEngine || mode}...` : `Iniciando ${activeAiEngine || mode}...`,
           discoveredImagesCount: 0,
           resolvedOriginalCount: 0,
           failedCount: 0,
@@ -319,7 +327,9 @@ export const ExtractorView: React.FC = () => {
               syncVideos();
               addNotification({
                 title: t.videoNotificationTitle || "Video(s) Extracted Successfully!",
-                message: `"${completedAlbum.title}" com ${videoCount > 0 ? videoCount : completedAlbum.images.length} stream(s) prontos na Galeria de Vídeos.`,
+                message: isEn
+                  ? `"${completedAlbum.title}" with ${videoCount > 0 ? videoCount : completedAlbum.images.length} stream(s) ready in Video Gallery.`
+                  : `"${completedAlbum.title}" com ${videoCount > 0 ? videoCount : completedAlbum.images.length} stream(s) prontos na Galeria de Vídeos.`,
                 type: 'success',
                 linkViewId: 'videos'
               });
@@ -348,13 +358,13 @@ export const ExtractorView: React.FC = () => {
     addNotification({
       title: t.failStartExtraction || (isEn ? "Failed to Start Extraction" : "Falha ao Iniciar Extração"),
       message: backendOnline
-        ? (t.failStartExtractionMsg || 'O servidor backend não conseguiu iniciar a tarefa para esta URL. Verifique a URL informada.')
-        : (t.backendOfflineMsg || 'O backend Python está offline. Inicie o servidor via start_server.bat (porta 8000).'),
+        ? (t.failStartExtractionMsg || (isEn ? 'The backend server could not start the task for this URL. Please verify the URL.' : 'O servidor backend não conseguiu iniciar a tarefa para esta URL. Verifique a URL informada.'))
+        : (t.backendOfflineMsg || (isEn ? 'The Python backend is offline. Start the server via start_server.bat.' : 'O backend Python está offline. Inicie o servidor via start_server.bat (porta 8000).')),
       type: 'warning'
     });
   };
 
-  const handleBatchExtraction = async (folder: string = 'Geral') => {
+  const handleBatchExtraction = async (folder: string = (isEn ? 'General' : 'Geral')) => {
     const urls = batchUrls.split('\n').map(u => u.trim()).filter(Boolean);
     if (urls.length === 0) return;
 
@@ -461,7 +471,7 @@ export const ExtractorView: React.FC = () => {
         <div className="relative z-10 max-w-3xl">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-500/20 text-brand-400 font-semibold text-xs border border-brand-500/30 mb-3">
             <Sparkles size={13} />
-            <span>Autonomous Image Intelligence Studio v5.6.1</span>
+            <span>Autonomous Image Intelligence Studio v5.7.0</span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-100 tracking-tight mb-2">
             {t.title}
@@ -617,11 +627,11 @@ export const ExtractorView: React.FC = () => {
                   onChange={e => handleSetSingleUrl(e.target.value)}
                   placeholder={
                     mediaTypeFilter === 'videos'
-                      ? (t.videoUrlPlaceholder || 'Insira o link da página do vídeo (ex: https://.../video-...)')
+                      ? (t.videoUrlPlaceholder || (isEn ? 'Enter video page URL (e.g., https://.../video-...)' : 'Insira o link da página do vídeo (ex: https://.../video-...)'))
                       : mediaTypeFilter === 'gifs'
-                      ? (t.gifUrlPlaceholder || 'Insira o link para extrair GIFs animados...')
+                      ? (t.gifUrlPlaceholder || (isEn ? 'Enter link to extract animated GIFs...' : 'Insira o link para extrair GIFs animados...'))
                       : mediaTypeFilter === 'images'
-                      ? (t.photoUrlPlaceholder || 'Insira o link do álbum de fotos (ex: https://.../gallery/...)')
+                      ? (t.photoUrlPlaceholder || (isEn ? 'Enter photo album link (e.g., https://.../gallery/...)' : 'Insira o link do álbum de fotos (ex: https://.../gallery/...)'))
                       : t.urlPlaceholder
                   }
                   className="w-full h-12 px-4 rounded-2xl bg-surface-elevated border border-border text-slate-100 placeholder-slate-500 text-xs sm:text-sm font-medium outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all shadow-inner"

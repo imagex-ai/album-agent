@@ -1,11 +1,10 @@
 """
-Main Entrypoint for AI-First Browser Agent.
+Main Entrypoint for IMAGEX Media Suite.
 Supports launching the web server or running CLI investigation on target URLs.
 """
 
 import multiprocessing
 import threading
-import webview
 import sys
 import argparse
 import asyncio
@@ -18,18 +17,20 @@ if sys.platform == "win32":
     if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     try:
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        if sys.version_info < (3, 14):
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     except Exception:
         pass
 
-from src.browser.engine import BrowserEngine
-from src.browser.tools import BrowserTools
-from src.validator.validator import ImageValidator
-from src.investigator.investigator import OriginalImageInvestigator
-from src.agent.brain import SemanticAgentBrain
-from src.agent.llm_adapter import LLMAdapter
-from src.observability.debugger import AgentDebugger
-from src.server.server import app
+if __name__ != "__mp_main__":
+    from src.browser.engine import BrowserEngine
+    from src.browser.tools import BrowserTools
+    from src.validator.validator import ImageValidator
+    from src.investigator.investigator import OriginalImageInvestigator
+    from src.agent.brain import SemanticAgentBrain
+    from src.agent.llm_adapter import LLMAdapter
+    from src.observability.debugger import AgentDebugger
+    from src.server.server import app
 
 def _get_local_ips() -> list[str]:
     """Returns local network IPv4 addresses for mobile access (e.g. iPhone on Wi-Fi)."""
@@ -89,7 +90,7 @@ async def run_cli_investigation(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AI-First Browser Agent for Album Discovery")
+    parser = argparse.ArgumentParser(description="IMAGEX Browser Agent for Media Discovery")
     parser.add_argument("url", nargs="?", help="Target album or gallery URL to investigate")
     parser.add_argument("--server", action="store_true", help="Launch FastAPI Web UI server")
     parser.add_argument("--no-window", action="store_true", help="Runs web server only, without opening desktop window")
@@ -106,7 +107,7 @@ def main():
     if args.server or not args.url:
         local_ips = _get_local_ips()
         print("\n" + "=" * 65)
-        print(" AI-First Browser Agent Server Running")
+        print(" IMAGEX Media Suite Server Running")
         print(f" Computador Local: http://localhost:{args.port}")
         for ip in local_ips:
             print(f" iPhone / Wi-Fi:   http://{ip}:{args.port}")
@@ -128,6 +129,8 @@ def main():
                     print(f"\n[Server] Reiniciando uvicorn após erro: {e}", flush=True)
                     time.sleep(1)
         else:
+            import webview
+
             server_thread = threading.Thread(
                 target=uvicorn.run,
                 args=(app,),
@@ -181,7 +184,7 @@ def main():
                             return found_hwnds[0]
 
                         # 3. Fallback por titulos conhecidos
-                        for title in ["IMAGEX.AI", "Media Extractor", "Extrator de Mídia", "Extrator de Midia"]:
+                        for title in ["IMAGEX - Media Suite", "IMAGEX", "Media Suite", "Media Extractor", "Extrator de Mídia", "Extrator de Midia"]:
                             h = ctypes.windll.user32.FindWindowW(None, title)
                             if h:
                                 return h
@@ -326,7 +329,7 @@ def main():
                     time.sleep(0.15)
 
             webview.create_window(
-                title="IMAGEX.AI - Media Extractor",
+                title="IMAGEX - Media Suite",
                 url=f"http://127.0.0.1:{args.port}",
                 width=1280,
                 height=800,
@@ -334,7 +337,15 @@ def main():
                 background_color='#000000',
                 js_api=desktop_api
             )
-            webview.start()
+            base_dir = getattr(sys, '_MEIPASS', os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+            icon_file = os.path.join(base_dir, 'assets', 'app-icon.ico')
+            if not os.path.exists(icon_file):
+                icon_file = os.path.abspath(os.path.join(os.getcwd(), 'assets', 'app-icon.ico'))
+            icon_path = icon_file if os.path.exists(icon_file) else None
+            if icon_path:
+                webview.start(icon=icon_path)
+            else:
+                webview.start()
     else:
         asyncio.run(run_cli_investigation(
             url=args.url,
